@@ -555,9 +555,19 @@ async def test_reconnect_does_not_duplicate_tracked_timer_task():
 
     await voter.disconnect()
     voter2, _ = await _join(voter_token, code)
-    # Same reasoning as above: real sleep, not _settle(), to let the join tail's
-    # thread-pool DB calls actually complete before inspecting _timer_tasks.
-    await asyncio.sleep(0.1)
+    # Barriere DETERMINISTE, et non une attente calibree a la louche : le consumer
+    # traite les messages d'une meme connexion en serie, donc recevoir le pong
+    # prouve que _handle_join est entierement termine -- tail (_reconcile_timeout
+    # puis _resume_timeout) compris.
+    #
+    # Un sleep fixe etait ici plus pernicieux que dans le test precedent :
+    # l'assertion porte sur une ABSENCE de changement. Inspecter trop tot, avant
+    # meme que _resume_timeout ait tourne, faisait donc PASSER le test sans rien
+    # verifier. Sur PostgreSQL le tail dure ~250 ms, contre ~9 ms sur SQLite : les
+    # 100 ms accordes n'y suffisaient pas, et c'est le moteur de production qui
+    # etait le moins bien couvert.
+    await voter2.send_json_to({"v": 1, "type": "ping", "payload": {}})
+    await _drain_until(voter2, "pong")
 
     assert consumers._timer_tasks.get(code) is task_a, (
         "reconnect must not replace an already-tracked timer task"
