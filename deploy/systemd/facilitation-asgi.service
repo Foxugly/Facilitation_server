@@ -1,0 +1,23 @@
+[Unit]
+Description=Delegation Poker — Daphne (ASGI, config.asgi) — the fleet's only ASGI site
+After=network.target facilitation-env-fetch.service redis-server.service
+# Hard dependency: without the SSM-fetched env, refuse to start.
+Requires=facilitation-env-fetch.service
+
+[Service]
+User=django
+Group=www-data
+UMask=0027
+WorkingDirectory=/var/www/django_websites/Poker_server
+EnvironmentFile=/run/poker/.env
+# Daphne (not gunicorn): Channels needs an ASGI server. Binds localhost:8006
+# (§3.4); nginx proxies HTTP + upgrades /ws/ to it (deploy/nginx/facilitation-api.conf).
+ExecStart=/var/www/django_websites/Poker_server/.venv/bin/daphne -b 127.0.0.1 -p 8006 config.asgi:application
+Restart=always
+RestartSec=5
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

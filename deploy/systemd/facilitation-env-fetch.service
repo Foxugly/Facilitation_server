@@ -1,0 +1,28 @@
+[Unit]
+Description=Delegation Poker — fetch environment from AWS SSM into /run/poker/.env
+After=network-online.target
+Wants=network-online.target
+# Must complete before any process that needs the env file.
+Before=facilitation-asgi.service facilitation-celery.service facilitation-celery-beat.service
+
+[Service]
+# oneshot + RemainAfterExit: runs once at boot and stays "active" afterwards.
+# A code deploy does NOT restart this unit, so it keeps the env already fetched.
+# To pick up changed SSM values: `sudo systemctl restart facilitation-env-fetch`.
+Type=oneshot
+RemainAfterExit=yes
+# Force the EC2 instance role (foxugly-fleet-ec2) over IMDS by blanking root's
+# static certbot-route53 keys in /root/.aws — otherwise they shadow the role (§3.5).
+Environment=AWS_SHARED_CREDENTIALS_FILE=/dev/null
+Environment=AWS_CONFIG_FILE=/dev/null
+Environment=AWS_REGION=eu-west-1
+# §3.10: this oneshot runs as root, so its script must NOT live in the
+# django-writable tree. Installed root:root 0755 at /usr/local/sbin/facilitation-env-fetch.sh
+# by ROOT (out-of-band, from the committed git blob); deploy/fetch-env-from-ssm.sh
+# is the versioned source, never the execution target.
+ExecStart=/usr/local/sbin/facilitation-env-fetch.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,77 @@
+# Dependabot — configuration de flotte Foxugly.
+#
+# Sans ce fichier, seules les *security updates* tournaient : les lockfiles
+# derivaient librement jusqu'a ce qu'une CVE tombe, d'ou les backlogs de 59 a
+# 77 alertes constates le 2026-07-30 sur les frontends. Les *version updates*
+# declares ici les maintiennent a jour en continu, ce qui est la vraie
+# prevention.
+#
+# Regroupement : un seul PR par lot plutot qu'un par paquet. Le 2026-07-30,
+# Dependabot avait ouvert 5 PR concurrentes sur un meme lockfile ; chaque
+# merge invalidait les 4 autres, qui devaient etre rebasees en serie.
+#
+# Majeures ignorees (npm, pip, gradle). Une montee de majeure n'est jamais
+# une mise a jour de routine : elle demande une decision. Laissees libres, le
+# premier passage du 2026-07-30 a ouvert 84 PR individuelles a travers la
+# flotte, dont l'essentiel echouait en CI -- primeng 21->22 (exige Angular 22),
+# typescript 5.9->7.0 (non supporte par Angular 20/21), jsdom 28->30,
+# primeicons 7->8, @primeuix/themes 2->3. Une premiere version de ce fichier
+# n'ignorait que les majeures @angular* : c'etait traiter le symptome observe
+# au lieu de la classe entiere.
+#
+# github-actions fait exception : ses majeures sont groupees en un seul PR par
+# depot, vert, donc sans nuisance.
+#
+# A NOTER : cette regle ne bloque PAS les correctifs de securite. Verifie
+# empiriquement le 2026-07-30 -- 13 minutes apres le merge de la regle,
+# Dependabot a ouvert trainingmanager_app#81, « io.sentry:sentry-android 7.18.0
+# -> 8.14.0 in the security group », soit une majeure. Les majeures de routine
+# sont donc filtrees, les correctifs de securite passent, y compris quand ils
+# exigent une majeure. C'est exactement le comportement voulu.
+#
+# (Une premiere version de ce commentaire affirmait l'inverse. C'etait faux.)
+version: 2
+
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "05:00"
+      timezone: "Europe/Brussels"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # Un seul PR pour tous les correctifs de securite du lot.
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      # Mineures et correctives regroupees : sures, pas besoin d'un PR chacune.
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # Les actions de workflow n'etaient mises a jour par personne : sans ce
+  # bloc, aucune version update ne les touche.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "05:00"
+      timezone: "Europe/Brussels"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions:
+        patterns:
+          - "*"

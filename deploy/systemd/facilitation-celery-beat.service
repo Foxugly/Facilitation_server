@@ -1,0 +1,20 @@
+[Unit]
+Description=Delegation Poker — Celery beat (scheduler: 8h room expiry sweep)
+After=network.target facilitation-env-fetch.service redis-server.service
+Requires=facilitation-env-fetch.service
+
+[Service]
+User=django
+Group=www-data
+UMask=0027
+WorkingDirectory=/var/www/django_websites/Poker_server
+EnvironmentFile=/run/poker/.env
+ExecStart=/var/www/django_websites/Poker_server/.venv/bin/celery -A config beat -l info
+Restart=always
+RestartSec=5
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

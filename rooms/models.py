@@ -1,0 +1,168 @@
+"""Runtime models for a Delegation Poker room (data-model spec §5).
+
+Identity is a per-participant secret ``token`` (spec P5); the deck is a frozen
+``deck_snapshot`` JSON on the room (spec §4); a round is a ``VoteSession`` whose
+``state`` runs idle → open → revealed → acted (spec §5.4).
+"""
+import uuid
+
+from django.conf import settings
+from django.db import models
+from django.utils import timezone
+
+from teams.models import ResultLayout
+
+
+class Role(models.TextChoices):
+    FACILITATOR = "facilitator", "Facilitator"
+    VOTER = "voter", "Voter"
+
+
+class RoundState(models.TextChoices):
+    IDLE = "idle", "Idle"
+    OPEN = "open", "Open"
+    REVEALED = "revealed", "Revealed"
+    ACTED = "acted", "Acted"
+
+
+class Room(models.Model):
+    code = models.CharField(max_length=8, unique=True)  # UPPER, ambiguous chars excluded
+    title = models.CharField(max_length=120, blank=True)
+    vote_type = models.ForeignKey("decks.VoteType", on_delete=models.PROTECT)
+    # The deck currently in play. Frozen from the referential at creation; it only
+    # ever changes by swapping in another entry of ``deck_snapshots`` (never edited).
+    deck_snapshot = models.JSONField()
+    # Every deck this room may play, frozen at creation (the team's enabled poker
+    # types). Self-sufficient like deck_snapshot — the runtime never reads ``decks``.
+    deck_snapshots = models.JSONField(default=list, blank=True)
+    current_session = models.ForeignKey(
+        "rooms.VoteSession", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    # Phase 2: a room tied to a team is members-only and NON-ephemeral (no 8h expiry).
+    # Null = free anonymous room (Phase 1 default).
+    team = models.ForeignKey("teams.Team", on_delete=models.CASCADE, null=True, blank=True, related_name="rooms")
+    # Hard cap on participants per room (product limit).
+    # Fige a la creation depuis ROOM_MAX_PARTICIPANTS : une salle deja ouverte garde
+    # sa limite si le reglage change, sans quoi elle pourrait se retrouver au-dela.
+    max_participants = models.PositiveSmallIntegerField(default=15)
+    # Comment le depouillement s'affiche a la place de la main. Fige depuis l'equipe a
+    # la creation, comme la limite ci-dessus : une salle en cours ne doit pas changer
+    # de mise en page sous les yeux des joueurs parce qu'un manager a bascule le
+    # reglage ailleurs. Une salle anonyme n'a pas d'equipe et garde donc la valeur
+    # par defaut.
+    result_layout = models.CharField(max_length=8, choices=ResultLayout.choices, default=ResultLayout.CARDS)
+    # Timer de round (optionnel) : le facilitateur l'active et regle sa duree.
+    # Porte par la room et non par le round, pour persister d'un round a l'autre.
+    # Duree bornee 10-60 s par pas de 5, normalisee cote serveur (services.set_timer).
+    timer_enabled = models.BooleanField(default=False)
+    timer_seconds = models.PositiveSmallIntegerField(default=10)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_activity_at = models.DateTimeField(default=timezone.now, db_index=True)
+    expires_at = models.DateTimeField(db_index=True)
+    is_expired = models.BooleanField(default=False)
+
+    def touch(self, *, save=True):
+        """Slide the 8h inactivity window forward (scope §4). Team rooms don't expire."""
+        now = timezone.now()
+        self.last_activity_at = now
+        self.expires_at = now + timezone.timedelta(hours=settings.ROOM_INACTIVITY_HOURS)
+        if save:
+            self.save(update_fields=["last_activity_at", "expires_at"])
+
+    @property
+    def is_live(self):
+        if self.is_expired:
+            return False
+        return self.team_id is not None or self.expires_at > timezone.now()
+
+    def __str__(self):
+        return self.code
+
+
+class Participant(models.Model):
+    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="participants")
+    token = models.CharField(max_length=64, unique=True)  # secret, replayed on each WS (re)connect
+    public_id = models.UUIDField(default=uuid.uuid4, editable=False)  # broadcast id (≠ token)
+    display_name = models.CharField(max_length=50)  # ephemeral display name, NOT an auth identifier
+    role = models.CharField(max_length=12, choices=Role.choices, default=Role.VOTER)
+    is_connected = models.BooleanField(default=False)
+    last_seen_at = models.DateTimeField(default=timezone.now)
+    user = models.ForeignKey(  # Phase 2 (authenticated member); nullable now
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("room", "public_id"), name="uniq_participant_room_pubid"),
+        ]
+
+    def __str__(self):
+        return f"{self.display_name} ({self.role})"
+
+
+class Subject(models.Model):
+    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="subjects")
+    text = models.CharField(max_length=300)
+    sequence = models.PositiveSmallIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("room", "sequence")
+
+    def __str__(self):
+        return self.text
+
+
+class VoteSession(models.Model):
+    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="sessions")
+    subject = models.ForeignKey(Subject, on_delete=models.PROTECT, related_name="sessions")
+    state = models.CharField(max_length=10, choices=RoundState.choices, default=RoundState.IDLE)
+    facilitator = models.ForeignKey(
+        Participant, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    # The deck this round was played with, frozen when the round starts. The room's
+    # active deck can change between rounds, so results must not be relabelled by a
+    # later switch (history maps chosen_value -> label through this).
+    deck_snapshot = models.JSONField(null=True, blank=True)
+    # Reveal mode, chosen by the facilitator and frozen when the round opens.
+    # Nominative by default (who voted what); anonymous hides the participant->card
+    # link entirely and is a paid-team option. Voters see the mode BEFORE voting —
+    # switching it after votes are in would expose people who thought otherwise.
+    is_anonymous = models.BooleanField(default=False)
+    opened_at = models.DateTimeField(null=True, blank=True)
+    revealed_at = models.DateTimeField(null=True, blank=True)
+    # Echeance du vote, posee a l'ouverture quand le timer est actif. Le serveur
+    # fait autorite : le decompte affiche par le client est cosmetique.
+    vote_deadline = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Session<{self.pk}> {self.state}"
+
+
+class Vote(models.Model):
+    session = models.ForeignKey(VoteSession, on_delete=models.CASCADE, related_name="votes")
+    participant = models.ForeignKey(Participant, on_delete=models.CASCADE, related_name="votes")
+    card_value = models.CharField(max_length=32)  # ∈ snapshot cards[].value; secret until reveal
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("session", "participant"), name="uniq_vote_session_participant"),
+        ]
+
+    def __str__(self):
+        return f"Vote<{self.pk}> p={self.participant_id}"
+
+
+class Result(models.Model):
+    session = models.OneToOneField(VoteSession, on_delete=models.CASCADE, related_name="result")
+    subject = models.ForeignKey(Subject, on_delete=models.PROTECT, related_name="results")
+    chosen_value = models.CharField(max_length=32)
+    decided_by = models.ForeignKey(Participant, on_delete=models.SET_NULL, null=True, blank=True)
+    decided_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Result<{self.pk}> {self.chosen_value}"
