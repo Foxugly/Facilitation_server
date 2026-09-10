@@ -384,36 +384,32 @@ Weighted Ranking, QCM/Poll, ROTI.
 
 ## Pièges
 
-- **⚠️ La box est à saturation mémoire : Celery est volontairement ARRÊTÉ.**
-  1,9 Go de RAM pour **dix** applications Django. Le 2026-09-10, le démarrage de
-  `facilitation-celery` + `facilitation-celery-beat` (259 Mo à eux deux, le worker tournant
-  en `--concurrency=2`, soit trois processus chargeant Django) a fait basculer la machine :
-  swap plein (2047/2047), load à **76**, **toute la flotte injoignable** — `poker-api`
-  répondait en 39 s, les autres en timeout. Seul `netdata` restait vif, n'ayant pas de
-  backend Django : c'est ce qui a permis de voir que nginx tenait et que la box n'était pas
-  morte, mais saturée.
+- **Capacité de la box : `t3.medium` (4 Go) depuis le 2026-09-10. Celery est actif.**
+  La machine était en `t3.small` (1,9 Go) pour **dix** applications Django. Le démarrage de
+  `facilitation-celery` + `facilitation-celery-beat` a suffi à la faire basculer : swap plein
+  (2047/2047), load à **76**, **toute la flotte injoignable** — `poker-api` répondait en 39 s,
+  les autres en timeout. Seul `netdata` restait vif, n'ayant pas de backend Django : c'est ce
+  qui a montré que nginx tenait et que la box n'était pas morte, mais saturée.
 
-  Les deux units ont été `stop` + `disable`. **Impact fonctionnel nul à ce jour** :
-  `expire_stale_rooms` ne fait que poser le drapeau `is_expired`, alors que `Room.is_live`
-  évalue `expires_at > now` en temps réel — une room expirée est déjà traitée comme morte
-  sans le sweep.
+  Après redimensionnement : Facilitation consomme **375 Mo** (asgi 112, celery 162, beat 101)
+  avec **~660 Mo disponibles** et un swap quasi nul. Les mêmes 375 Mo devaient auparavant
+  tenir dans 113 Mo de marge.
 
-  **La protection tient à DEUX endroits, et les deux sont nécessaires** — corriger le
-  premier seul ne sert à rien, constaté au déploiement suivant :
+  **Le mécanisme de protection reste en place, et c'est voulu.** Activer Celery est une
+  décision explicite, prise hors bande, que le déploiement ne peut ni imposer ni annuler :
 
   1. `.github/workflows/deploy.yml` n'appelle `systemctl enable` que sur
-     `facilitation-env-fetch` et `facilitation-asgi`. Il les activait toutes les quatre,
-     ce qui **réactivait Celery à chaque déploiement**, avant même que `deploy.sh` ne
-     s'exécute. Les units restent installées par le `for u in …` juste au-dessus : elles
-     sont disponibles, simplement pas activées.
-  2. `deploy/deploy.sh` ne redémarre Celery que si l'unit est `enabled` — sans quoi un
-     `restart` explicite relancerait un service pourtant désactivé.
+     `facilitation-env-fetch` et `facilitation-asgi`. Il les activait toutes les quatre, ce
+     qui **réactivait Celery à chaque déploiement** — corriger `deploy.sh` seul n'avait donc
+     servi à rien. Les units restent installées par le `for u in …` juste au-dessus.
+  2. `deploy/deploy.sh` ne redémarre Celery que si l'unit est `enabled`. Celery l'étant
+     désormais, il est bien redémarré à chaque déploiement.
 
-  **Ne pas réactiver sans redimensionner la box** (la RAM est le facteur limitant, pas le
-  CPU) : `sudo systemctl enable --now facilitation-celery facilitation-celery-beat`.
+  Pour le désactiver de nouveau :
+  `sudo systemctl disable --now facilitation-celery facilitation-celery-beat`.
 
-  Corollaire pour la flotte : ajouter un site à cette machine n'est plus une opération
-  neutre. Vérifier `free -m` **avant**, pas après.
+  Corollaire pour la flotte : ajouter un site à cette machine n'est pas une opération neutre.
+  Vérifier `free -m` **avant**, pas après.
 
 - **Les attentes fixes dans les tests async sont calibrées sur SQLite et mentent sur
   PostgreSQL.** `test_timer_resumes_on_reconnect_after_restart` échouait sur PostgreSQL
