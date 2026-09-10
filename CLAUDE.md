@@ -405,10 +405,21 @@ Weighted Ranking, QCM/Poll, ROTI.
   `timeout` (le défaut de `WebsocketCommunicator` est 1 s). Vérifié par mutation — en
   neutralisant `_resume_timeout`, le test échoue toujours.
 
-  **Reste à traiter :** un `asyncio.sleep(0.1)` du même type subsiste dans
-  `test_reconnect_does_not_duplicate_tracked_timer_task`. Il ne fait pas échouer la suite,
-  mais pour un test qui vérifie une **absence** de duplication, inspecter trop tôt donne un
-  faux vert.
+  **Le second cas était pire, et il est corrigé.**
+  `test_reconnect_does_not_duplicate_tracked_timer_task` vérifie une **absence** de
+  changement : inspecter trop tôt le faisait *passer* sans rien vérifier. Démontré par
+  mutation sur PostgreSQL — en retirant la garde `if code not in _timer_tasks` de
+  `_resume_timeout`, l'ancienne version passait quand même, la nouvelle échoue.
+
+  **La bonne barrière est un aller-retour, pas une attente** : le consumer traite les
+  messages d'une même connexion **en série**, donc recevoir un `pong` prouve que
+  `_handle_join` est entièrement terminé, tail compris. Préférer ce motif à tout
+  `asyncio.sleep()` dans un nouveau test du consumer :
+
+  ```python
+  await comm.send_json_to({"v": 1, "type": "ping", "payload": {}})
+  await _drain_until(comm, "pong")
+  ```
 
 - **Coordonnées d'infrastructure, relevées sur la box le 2026-09-10.** Port **8009**
   (`8000`–`8008` tous occupés, dont `8006` daphne Poker, `8007` gunicorn billing, `8008` daphne
@@ -419,11 +430,18 @@ Weighted Ranking, QCM/Poll, ROTI.
   **Ne pas réutiliser une valeur de Poker :** jusqu'au 2026-09-10, `deploy/` et `deploy.yml`
   pointaient encore sur `Poker_server` / `/run/poker` / `/poker/prod` — un déploiement aurait
   visé l'installation Poker vivante.
-- **Rien n'est déployable tant que les prérequis off-box n'existent pas** (`deploy/DEPLOY.md`) :
-  au 2026-09-10, aucun paramètre SSM `/facilitation/prod/*`, aucun secret GitHub
-  (`AWS_DEPLOY_ROLE_ARN`, `EC2_INSTANCE_ID`), pas de base, pas de répertoire sur la box. Le
-  workflow se déclenche bien sur push vers `main` mais échoue à l'étape OIDC — le garde-fou est
-  l'absence de secrets, pas la justesse du workflow.
+- **Le site est en production depuis le 2026-09-10.** `https://facilitation-api.foxugly.com/health/`
+  répond `{"status": "ok", "database": "ok"}`, les quatre units tournent, le WebSocket
+  négocie bien un `101 Switching Protocols`. Séparation d'avec Poker vérifiée sur les cinq
+  axes : bases distinctes (`facilitation` porte `rooms_round`, `poker` garde
+  `rooms_votesession`), Redis `db5` vs `db3`, chemins des units, `/run` séparés, zéro
+  croisement de processus.
+- **Le claim OIDC de GitHub est au format *immuable*.** Le rôle `facilitation-deploy` doit
+  accepter `repo:Foxugly@3275928/Facilitation_server@1363704826:environment:production` —
+  le dépôt y est identifié par ses IDs numériques, pas par son nom. La forme classique
+  `repo:Foxugly/Facilitation_server:...` **seule ne suffit pas** : `AssumeRoleWithWebIdentity`
+  est refusé sans explication utile. Les deux formes sont déclarées, en `StringEquals` et
+  sans joker. Même piège pour tout nouveau dépôt de la flotte.
 - **Valider les migrations sur PostgreSQL.** Le dev local est en sqlite ; les violations
   NOT NULL / unique que sqlite laisse passer casseront en prod. La CI teste bien sur Postgres
   (délibérément) — faire confiance à la CI plutôt qu'à un pytest local vert.
