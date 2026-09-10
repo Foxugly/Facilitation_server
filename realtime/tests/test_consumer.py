@@ -64,9 +64,16 @@ async def _join(token, code):
     return comm, first
 
 
-async def _drain_until(comm, wanted, pred=None, limit=8):
+async def _drain_until(comm, wanted, pred=None, limit=8, timeout=None):
+    """``timeout`` (secondes) desserre l'attente par message de WebsocketCommunicator,
+    dont le defaut est 1 s. Necessaire des qu'on attend un fait declenche par une
+    echeance serveur plus lointaine que cette seconde ; laisse le defaut inchange
+    pour tous les autres appels."""
     for _ in range(limit):
-        msg = await comm.receive_json_from()
+        if timeout is None:
+            msg = await comm.receive_json_from()
+        else:
+            msg = await comm.receive_json_from(timeout=timeout)
         if msg["type"] == wanted and (pred is None or pred(msg["payload"])):
             return msg
     raise AssertionError(f"{wanted} not received")
@@ -80,6 +87,33 @@ async def _settle(n=10):
     wait)."""
     for _ in range(n):
         await asyncio.sleep(0)
+
+
+async def _wait_for_timer_task(code, timeout=2.0):
+    """Attend qu'une tache de revelation soit suivie pour ``code``, ou None au bout
+    de ``timeout``.
+
+    Remplace un ``asyncio.sleep()`` fixe, qui etait calibre sur SQLite et mentait sur
+    le moteur de production. Le tail de ``_handle_join`` (``_reconcile_timeout`` puis
+    ``_resume_timeout``) poursuit sur la tache applicative apres que ``_join()`` a
+    rendu la main, et enchaine des appels ``database_sync_to_async`` dont la duree
+    depend du moteur : mesure a ~9 ms sur SQLite mais ~256 ms sur PostgreSQL, ou le
+    thread du pool doit ouvrir une connexion. Un ``sleep(0.1)`` inspectait donc
+    ``_timer_tasks`` avant que la reprise ait eu lieu et faisait echouer le test sur
+    le seul moteur qui compte -- celui de la prod.
+
+    Sonder plutot qu'attendre une duree fixe ne perd aucun pouvoir de detection : si
+    la reprise n'arrive jamais, la fonction rend None au bout du timeout et
+    l'assertion appelante echoue, comme avant.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        task = consumers._timer_tasks.get(code)
+        if task is not None:
+            return task
+        await asyncio.sleep(0.01)
+    return consumers._timer_tasks.get(code)
 
 
 def _current_subject_id(code):
@@ -428,7 +462,7 @@ async def test_timer_resumes_on_reconnect_after_restart(monkeypatch):
     the real timer.seconds, the deadline is then pulled to a near-future instant
     via a direct DB write (the same trick `_expire()` above uses for the past
     case, just with a positive delta) -- only the final "does it actually fire"
-    step below waits any real (sub-second) time."""
+    step below waits any real time (~2,5 s, borne par l'echeance posee plus bas)."""
     monkeypatch.setattr(services, "TIMER_MIN_SECONDS", 0)
     code, fac_token, voter_token = await database_sync_to_async(_make_room)(True)
     fac, _ = await _join(fac_token, code)
@@ -455,7 +489,12 @@ async def test_timer_resumes_on_reconnect_after_restart(monkeypatch):
     def _pull_deadline_near():
         room = Room.objects.get(code=code)
         rnd = room.current_round
-        rnd.vote_deadline = timezone.now() + timezone.timedelta(milliseconds=400)
+        # 2,5 s et non 400 ms : l'echeance doit survivre au tail de _handle_join
+        # ci-dessous, qui dure ~256 ms sur PostgreSQL. Avec 400 ms elle expirait
+        # pendant ce tail ; la tache reprise se declenchait aussitot et se retirait
+        # de _timer_tasks, si bien que l'assertion « la reprise a eu lieu » voyait un
+        # dict vide -- un echec au diagnostic trompeur, la reprise ayant bien eu lieu.
+        rnd.vote_deadline = timezone.now() + timezone.timedelta(milliseconds=2500)
         rnd.save(update_fields=["vote_deadline"])
 
     await database_sync_to_async(_pull_deadline_near)()
@@ -464,20 +503,19 @@ async def test_timer_resumes_on_reconnect_after_restart(monkeypatch):
     # future) but the new resume-on-reconnect logic must pick tracking back up.
     await voter.disconnect()
     voter2, sync2 = await _join(voter_token, code)
-    # _handle_join's tail (reconcile + resume) keeps running on the background
-    # application task after _join() returns with only the first message
-    # (state.sync); both involve real database_sync_to_async thread-pool calls,
-    # so a real sleep -- not a bare _settle() tick -- is needed to let it land
-    # before we inspect module state.
-    await asyncio.sleep(0.1)
     assert sync2["payload"]["roundState"] == "open"  # confirms it wasn't already revealed
-    task_b = consumers._timer_tasks.get(code)
+    # Le tail de _handle_join (reconcile + resume) poursuit en arriere-plan apres que
+    # _join() a rendu la main sur le seul state.sync. On attend la CONDITION plutot
+    # qu'une duree : voir _wait_for_timer_task.
+    task_b = await _wait_for_timer_task(code)
     assert task_b is not None and not task_b.done(), (
         "reconnect with a still-open round and a future deadline must resume a "
         "timer task -- _reconcile_timeout alone never reschedules"
     )
 
-    revealed = await _drain_until(voter2, "vote.revealed", limit=10)
+    # timeout explicite : la revelation tombe a l'echeance ci-dessus (~2,5 s), donc
+    # au-dela du defaut d'une seconde de WebsocketCommunicator.
+    revealed = await _drain_until(voter2, "vote.revealed", limit=10, timeout=6)
     assert revealed["payload"]["reason"] == "timeout"
     # Receiving the broadcast only proves _fire_timeout reached the `await
     # self._broadcast(...)` line, not that it has finished (the `finally` pop is
