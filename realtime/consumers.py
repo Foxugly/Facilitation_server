@@ -54,7 +54,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         if mtype == "ping":
             return await self._emit("pong", {}, cid)
         if not self.joined:
-            return await self._error("token.unknown", "Join the session first", mtype, cid)
+            return await self._error("token.unknown", "Join the room first", mtype, cid)
 
         try:
             await self._dispatch(mtype, payload, cid)

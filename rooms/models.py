@@ -1,8 +1,13 @@
-"""Runtime models for a Delegation Poker room (data-model spec §5).
+"""Runtime models for a room (data-model spec §5).
 
 Identity is a per-participant secret ``token`` (spec P5); the deck is a frozen
-``deck_snapshot`` JSON on the room (spec §4); a round is a ``VoteSession`` whose
-``state`` runs idle → open → revealed → acted (spec §5.4).
+``deck_snapshot`` JSON on the room (spec §4); a ``Round`` is one activity run in
+the room, its ``state`` running idle → open → revealed → acted (spec §5.4).
+
+``Round`` was called ``VoteSession`` until the Facilitation fork: "session" is
+banned from the domain vocabulary because it collided with that former name.
+The WebSocket message type ``session.join`` is NOT part of that rename — it is
+the wire contract (§4) and renaming it would break the SPA.
 """
 import uuid
 
@@ -35,8 +40,8 @@ class Room(models.Model):
     # Every deck this room may play, frozen at creation (the team's enabled poker
     # types). Self-sufficient like deck_snapshot — the runtime never reads ``decks``.
     deck_snapshots = models.JSONField(default=list, blank=True)
-    current_session = models.ForeignKey(
-        "rooms.VoteSession", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    current_round = models.ForeignKey(
+        "rooms.Round", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
     # Phase 2: a room tied to a team is members-only and NON-ephemeral (no 8h expiry).
     # Null = free anonymous room (Phase 1 default).
@@ -114,9 +119,9 @@ class Subject(models.Model):
         return self.text
 
 
-class VoteSession(models.Model):
-    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="sessions")
-    subject = models.ForeignKey(Subject, on_delete=models.PROTECT, related_name="sessions")
+class Round(models.Model):
+    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="rounds")
+    subject = models.ForeignKey(Subject, on_delete=models.PROTECT, related_name="rounds")
     state = models.CharField(max_length=10, choices=RoundState.choices, default=RoundState.IDLE)
     facilitator = models.ForeignKey(
         Participant, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
@@ -138,11 +143,11 @@ class VoteSession(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"Session<{self.pk}> {self.state}"
+        return f"Round<{self.pk}> {self.state}"
 
 
 class Vote(models.Model):
-    session = models.ForeignKey(VoteSession, on_delete=models.CASCADE, related_name="votes")
+    round = models.ForeignKey(Round, on_delete=models.CASCADE, related_name="votes")
     participant = models.ForeignKey(Participant, on_delete=models.CASCADE, related_name="votes")
     card_value = models.CharField(max_length=32)  # ∈ snapshot cards[].value; secret until reveal
     created_at = models.DateTimeField(auto_now_add=True)
@@ -150,7 +155,7 @@ class Vote(models.Model):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=("session", "participant"), name="uniq_vote_session_participant"),
+            models.UniqueConstraint(fields=("round", "participant"), name="uniq_vote_round_participant"),
         ]
 
     def __str__(self):
@@ -158,7 +163,7 @@ class Vote(models.Model):
 
 
 class Result(models.Model):
-    session = models.OneToOneField(VoteSession, on_delete=models.CASCADE, related_name="result")
+    round = models.OneToOneField(Round, on_delete=models.CASCADE, related_name="result")
     subject = models.ForeignKey(Subject, on_delete=models.PROTECT, related_name="results")
     chosen_value = models.CharField(max_length=32)
     decided_by = models.ForeignKey(Participant, on_delete=models.SET_NULL, null=True, blank=True)

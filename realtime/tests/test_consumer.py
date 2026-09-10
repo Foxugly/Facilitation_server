@@ -83,7 +83,7 @@ async def _settle(n=10):
 
 
 def _current_subject_id(code):
-    return Room.objects.get(code=code).current_session.subject_id
+    return Room.objects.get(code=code).current_round.subject_id
 
 
 @pytest.mark.django_db(transaction=True)
@@ -251,9 +251,9 @@ async def test_timeout_reveals_on_reconnect_reconciliation():
 
     def _expire():
         room = Room.objects.get(code=code)
-        session = room.current_session
-        session.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
-        session.save(update_fields=["vote_deadline"])
+        rnd = room.current_round
+        rnd.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
+        rnd.save(update_fields=["vote_deadline"])
 
     await database_sync_to_async(_expire)()
 
@@ -340,8 +340,8 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     task_a = consumers._timer_tasks.get(code)
     assert task_a is not None and not task_a.done()
 
-    # 2) subject.set while OPEN creates a brand new IDLE session (services.set_subject
-    # always takes the "create a new subject+session" branch when the current one
+    # 2) subject.set while OPEN creates a brand new IDLE round (services.set_subject
+    # always takes the "create a new subject+round" branch when the current one
     # isn't idle) -- but the subject.set branch of _dispatch never touches
     # _timer_tasks. Task A is left exactly as it was: still tracked, still alive.
     # (Harmless if it ever fired: reveal_on_timeout() guards on round state, and the
@@ -374,7 +374,7 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     )
     assert not task_b.done()
 
-    # 4) subject.select on the very subject/session currently open must cancel B
+    # 4) subject.select on the very subject/round currently open must cancel B
     # immediately (the _cancel_timeout() call in the subject.select branch). Without
     # it, B would survive untouched here.
     subject_id = await database_sync_to_async(_current_subject_id)(code)
@@ -454,9 +454,9 @@ async def test_timer_resumes_on_reconnect_after_restart(monkeypatch):
 
     def _pull_deadline_near():
         room = Room.objects.get(code=code)
-        session = room.current_session
-        session.vote_deadline = timezone.now() + timezone.timedelta(milliseconds=400)
-        session.save(update_fields=["vote_deadline"])
+        rnd = room.current_round
+        rnd.vote_deadline = timezone.now() + timezone.timedelta(milliseconds=400)
+        rnd.save(update_fields=["vote_deadline"])
 
     await database_sync_to_async(_pull_deadline_near)()
 

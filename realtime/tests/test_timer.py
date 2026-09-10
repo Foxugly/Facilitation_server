@@ -90,7 +90,7 @@ def test_open_vote_sets_no_deadline_when_disabled(room_with_facilitator):
     room, facilitator, _ = room_with_facilitator
     services.set_subject(room, facilitator, "Recrutement")
     assert services.open_vote(room, facilitator) is None
-    assert services._current_session(room).vote_deadline is None
+    assert services._current_round(room).vote_deadline is None
 
 
 @pytest.mark.django_db
@@ -111,9 +111,9 @@ def test_vote_after_deadline_is_refused(room_with_facilitator):
     services.set_timer(room, facilitator, True, 30)
     services.set_subject(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
-    session = services._current_session(room)
-    session.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
-    session.save(update_fields=["vote_deadline"])
+    rnd = services._current_round(room)
+    rnd.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
+    rnd.save(update_fields=["vote_deadline"])
     with pytest.raises(RoomError):
         services.cast_vote(room, voter, "4")
 
@@ -125,40 +125,40 @@ def test_reset_clears_the_deadline(room_with_facilitator):
     services.set_subject(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
     services.reset_round(room, facilitator)
-    assert services._current_session(room).vote_deadline is None
-    assert services._current_session(room).state == RoundState.IDLE
+    assert services._current_round(room).vote_deadline is None
+    assert services._current_round(room).state == RoundState.IDLE
 
 
 @pytest.mark.django_db
 def test_select_subject_clears_stale_deadline_after_reveal(room_with_facilitator):
-    """Reveal puis re-selection du meme sujet : la session repasse IDLE et ne doit
+    """Reveal puis re-selection du meme sujet : le round repasse IDLE et ne doit
     conserver aucune echeance perimee en base (hygiene de donnees)."""
     room, facilitator, voter = room_with_facilitator
     services.set_timer(room, facilitator, True, 30)
     services.set_subject(room, facilitator, "Recrutement")
-    subject_id = services._current_session(room).subject_id
+    subject_id = services._current_round(room).subject_id
     services.open_vote(room, facilitator)
-    assert services._current_session(room).vote_deadline is not None
+    assert services._current_round(room).vote_deadline is not None
     services.cast_vote(room, voter, "4")
     services.reveal(room, facilitator)
 
     services.select_subject(room, facilitator, subject_id)
 
-    session = services._current_session(room)
-    assert session.state == RoundState.IDLE
-    assert session.vote_deadline is None
+    rnd = services._current_round(room)
+    assert rnd.state == RoundState.IDLE
+    assert rnd.vote_deadline is None
 
 
 @pytest.mark.django_db
 def test_deadline_iso_hides_stale_deadline_outside_open_round(room_with_facilitator):
-    """Defense en profondeur : meme si une echeance traine en base sur une session
+    """Defense en profondeur : meme si une echeance traine en base sur un round
     non-OPEN, deadline_iso() ne doit jamais la divulguer."""
     room, facilitator, _ = room_with_facilitator
     services.set_subject(room, facilitator, "Recrutement")
-    session = services._current_session(room)
-    assert session.state == RoundState.IDLE
-    session.vote_deadline = timezone.now() + timezone.timedelta(seconds=30)
-    session.save(update_fields=["vote_deadline"])
+    rnd = services._current_round(room)
+    assert rnd.state == RoundState.IDLE
+    rnd.vote_deadline = timezone.now() + timezone.timedelta(seconds=30)
+    rnd.save(update_fields=["vote_deadline"])
 
     assert services.deadline_iso(room) is None
 
@@ -170,12 +170,12 @@ def test_reveal_on_timeout_reveals_when_deadline_passed(room_with_facilitator):
     services.set_subject(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
     services.cast_vote(room, voter, "4")
-    session = services._current_session(room)
-    session.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
-    session.save(update_fields=["vote_deadline"])
+    rnd = services._current_round(room)
+    rnd.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
+    rnd.save(update_fields=["vote_deadline"])
 
     assert services.reveal_on_timeout(room) is True
-    assert services._current_session(room).state == RoundState.REVEALED
+    assert services._current_round(room).state == RoundState.REVEALED
 
 
 @pytest.mark.django_db
@@ -186,7 +186,7 @@ def test_reveal_on_timeout_is_a_noop_before_deadline(room_with_facilitator):
     services.open_vote(room, facilitator)
 
     assert services.reveal_on_timeout(room) is False
-    assert services._current_session(room).state == RoundState.OPEN
+    assert services._current_round(room).state == RoundState.OPEN
 
 
 @pytest.mark.django_db
@@ -197,9 +197,9 @@ def test_reveal_on_timeout_works_with_zero_votes(room_with_facilitator):
     services.set_timer(room, facilitator, True, 30)
     services.set_subject(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
-    session = services._current_session(room)
-    session.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
-    session.save(update_fields=["vote_deadline"])
+    rnd = services._current_round(room)
+    rnd.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
+    rnd.save(update_fields=["vote_deadline"])
 
     assert services.reveal_on_timeout(room) is True
     assert services.revealed_payload(room)["tally"] == []
@@ -236,8 +236,8 @@ def test_revealed_payload_emits_no_link_when_anonymous(room_with_facilitator):
     posee ici directement sur le round pour tester la charge utile seule)."""
     room, facilitator, voter = room_with_facilitator
     services.set_subject(room, facilitator, "Recrutement")
-    room.current_session.is_anonymous = True
-    room.current_session.save(update_fields=["is_anonymous"])
+    room.current_round.is_anonymous = True
+    room.current_round.save(update_fields=["is_anonymous"])
     services.open_vote(room, facilitator)
     services.cast_vote(room, facilitator, "4")
     services.cast_vote(room, voter, "4")
@@ -283,9 +283,9 @@ def test_revealed_payload_empty_when_no_votes(room_with_facilitator):
     services.set_timer(room, facilitator, True, 10)
     services.set_subject(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
-    session = services._current_session(room)
-    session.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
-    session.save(update_fields=["vote_deadline"])
+    rnd = services._current_round(room)
+    rnd.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
+    rnd.save(update_fields=["vote_deadline"])
     services.reveal_on_timeout(room)
 
     payload = services.revealed_payload(room)

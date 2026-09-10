@@ -12,7 +12,7 @@ from decks.seed import create_standard_deck
 from realtime import services
 from realtime.services import RoomError
 from rooms.codes import generate_token, generate_unique_code
-from rooms.models import Participant, Role, Room, RoundState, Subject, VoteSession
+from rooms.models import Participant, Role, Room, RoundState, Subject, Round
 from rooms.snapshot import build_deck_snapshot
 from teams.models import Team, TeamMembership, TeamRole
 
@@ -83,9 +83,9 @@ def test_cannot_switch_mid_round(room_with_two_decks):
     """Votes already cast reference the current deck's values."""
     room, fac, _, _, other = room_with_two_decks
     subject = Subject.objects.create(room=room, text="Deploys")
-    session = VoteSession.objects.create(room=room, subject=subject, facilitator=fac, state=RoundState.OPEN)
-    room.current_session = session
-    room.save(update_fields=["current_session"])
+    rnd = Round.objects.create(room=room, subject=subject, facilitator=fac, state=RoundState.OPEN)
+    room.current_round = rnd
+    room.save(update_fields=["current_round"])
 
     with pytest.raises(RoomError) as exc:
         services.select_deck(room, fac, other.pk)
@@ -97,21 +97,21 @@ def test_open_round_freezes_its_deck_and_survives_a_later_switch(room_with_two_d
     """A past round keeps its own deck, so history can't be relabelled by a switch."""
     room, fac, _, standard, other = room_with_two_decks
     subject = Subject.objects.create(room=room, text="Deploys")
-    session = VoteSession.objects.create(room=room, subject=subject, facilitator=fac)
-    room.current_session = session
-    room.save(update_fields=["current_session"])
+    rnd = Round.objects.create(room=room, subject=subject, facilitator=fac)
+    room.current_round = rnd
+    room.save(update_fields=["current_round"])
 
     services.open_vote(room, fac)
-    session.refresh_from_db()
-    assert session.deck_snapshot["deckId"] == standard.pk
+    rnd.refresh_from_db()
+    assert rnd.deck_snapshot["deckId"] == standard.pk
 
     # Close the round, then switch: the played round keeps the deck it used.
-    session.state = RoundState.ACTED
-    session.save(update_fields=["state"])
+    rnd.state = RoundState.ACTED
+    rnd.save(update_fields=["state"])
     services.select_deck(room, fac, other.pk)
 
-    session.refresh_from_db()
-    assert session.deck_snapshot["deckId"] == standard.pk
+    rnd.refresh_from_db()
+    assert rnd.deck_snapshot["deckId"] == standard.pk
     room.refresh_from_db()
     assert room.deck_snapshot["deckId"] == other.pk
 
@@ -132,9 +132,9 @@ def test_vote_values_follow_the_round_deck_not_the_room(room_with_two_decks):
     on the old one."""
     room, fac, voter, _, other = room_with_two_decks
     subject = Subject.objects.create(room=room, text="Deploys")
-    session = VoteSession.objects.create(room=room, subject=subject, facilitator=fac)
-    room.current_session = session
-    room.save(update_fields=["current_session"])
+    rnd = Round.objects.create(room=room, subject=subject, facilitator=fac)
+    room.current_round = rnd
+    room.save(update_fields=["current_round"])
     services.open_vote(room, fac)  # freezes the standard deck (values "1".."7")
 
     with pytest.raises(RoomError):

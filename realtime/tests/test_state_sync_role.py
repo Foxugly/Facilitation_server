@@ -1,6 +1,6 @@
 """L'etat de connexion doit dire au destinataire QUI il est.
 
-Sans cela, le client tenait son propre role de la session enregistree a son arrivee.
+Sans cela, le client tenait son propre role de l'etat enregistre a son arrivee.
 Prendre le role de facilitateur le rendait donc tel pour tout le monde sauf pour
 lui-meme, et recharger n'y changeait rien : le role perime etait persiste. Le bouton
 « prendre le role » etait, de son point de vue, sans effet.
@@ -10,7 +10,7 @@ import pytest
 from decks.seed import create_standard_deck
 from realtime import services
 from rooms.codes import generate_token, generate_unique_code
-from rooms.models import Participant, Role, Room, Subject, VoteSession
+from rooms.models import Participant, Role, Room, Subject, Round
 from rooms.snapshot import build_deck_snapshot
 
 
@@ -23,9 +23,9 @@ def _room():
     fac = Participant.objects.create(room=room, token=generate_token(), display_name="Sam", role=Role.FACILITATOR)
     voter = Participant.objects.create(room=room, token=generate_token(), display_name="Alex", role=Role.VOTER)
     subject = Subject.objects.create(room=room, text="Deploys")
-    session = VoteSession.objects.create(room=room, subject=subject, facilitator=fac)
-    room.current_session = session
-    room.save(update_fields=["current_session"])
+    rnd = Round.objects.create(room=room, subject=subject, facilitator=fac)
+    room.current_round = rnd
+    room.save(update_fields=["current_round"])
     return room, fac, voter
 
 

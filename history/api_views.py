@@ -1,4 +1,4 @@
-"""Team session history — a read model derived from acted results (design P2.4).
+"""Team history — a read model derived from acted results (design P2.4).
 
 Team rooms are non-ephemeral, so every acted ``Result`` persists: history needs no
 snapshot table, it is queried live and is therefore always accurate. Acted results
@@ -37,18 +37,18 @@ def _level_name(deck_snapshot, value):
 
 def _entries_for(team, day):
     results = (
-        Result.objects.filter(session__room__team=team, decided_at__date=day)
-        .select_related("subject", "session__room")
+        Result.objects.filter(round__room__team=team, decided_at__date=day)
+        .select_related("subject", "round__room")
         .order_by("decided_at")
     )
     out = []
     for r in results:
-        room = r.session.room
+        room = r.round.room
         out.append(
             {
                 "subject": r.subject.text,
                 "chosenValue": r.chosen_value,
-                "levelName": _level_name(r.session.deck_snapshot or room.deck_snapshot, r.chosen_value),
+                "levelName": _level_name(r.round.deck_snapshot or room.deck_snapshot, r.chosen_value),
                 "roomCode": room.code,
                 "decidedAt": r.decided_at.isoformat(),
             }
@@ -66,7 +66,7 @@ class HistoryListView(APIView):
         if not is_member(team, request.user):
             return error_response(code="not_a_member", detail="Not a member of this team.", http_status=403)
         rows = (
-            Result.objects.filter(session__room__team=team)
+            Result.objects.filter(round__room__team=team)
             .annotate(day=TruncDate("decided_at"))
             .values("day")
             .annotate(count=Count("id"))

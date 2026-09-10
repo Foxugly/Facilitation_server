@@ -42,11 +42,20 @@ et la spec de modèle de données restent la référence à étendre.
    il n'y a aucune donnée à reprendre.
 6. Vérifier qu'aucun autre service de la flotte n'occupe le port 8007.
 
-## Premier commit conseillé
+## Premier commit — fait
 
-Le renommage `VoteSession` → `Round` n'est **pas** fait ici : il touche 45 références
-et les migrations, et méritait d'être fait avec la suite de tests sous les yeux.
-C'est le premier commit à passer sur ce fork.
+Le renommage `VoteSession` → `Round` a été passé sur ce fork
+(`rooms/migrations/0009_votesession_to_round.py`) : modèle, champs
+`Vote.round` / `Result.round` / `Room.current_round`, `related_name` `rounds`,
+et contrainte `uniq_vote_round_participant`. `pytest` : 240 passed, inchangé.
+
+Le type de message WebSocket `session.join` a été **laissé intact** : il appartient
+au contrat temps réel (§4) et le renommer casserait `Facilitation_frontend` tant que
+les deux dépôts ne sont pas livrés ensemble. C'est le seul « session » qui subsiste
+dans le domaine.
+
+Restent à faire, dans cet ordre : `Subject` → `Item`, puis `Vote` → `Response`
+(étape 5 du plan — voir `CLAUDE.md`).
 
 ## Pousser vers GitHub
 
