@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Delegation Poker — Fetch environment from AWS SSM Parameter Store into tmpfs.
+# Facilitation — Fetch environment from AWS SSM Parameter Store into tmpfs.
 #
 # Run as root by facilitation-env-fetch.service (oneshot) at boot, BEFORE the ASGI /
 # celery units start. The file lives in /run (tmpfs): never on disk, re-fetched
-# each boot. Source of truth = SSM /poker/prod/* (eu-west-1), read via the EC2
+# each boot. Source of truth = SSM /facilitation/prod/* (eu-west-1), read via the EC2
 # instance role over IMDS (no AWS keys on disk).
 #
 # §3.10: this script runs as root, so it is installed root:root 0755 at
@@ -14,9 +14,9 @@
 set -euo pipefail
 umask 077   # temp files (which briefly hold decrypted secrets) are root-only.
 
-SSM_PREFIX="/poker/prod"
+SSM_PREFIX="/facilitation/prod"
 AWS_REGION="eu-west-1"
-RUN_DIR="/run/poker"
+RUN_DIR="/run/facilitation"
 ENV_FILE="$RUN_DIR/.env"
 TMP_FILE="$RUN_DIR/.env.tmp"
 RAW_FILE="$RUN_DIR/.ssm.json"

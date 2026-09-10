@@ -26,7 +26,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: poker
+          POSTGRES_DB: facilitation
         ports:
           - 5432:5432
         options: >-
@@ -50,7 +50,7 @@ jobs:
           SECRET_KEY: test-secret-key
           # Convention DB_* 6 variables de la flotte (OPERATIONS.md §3.13).
           DB_ENGINE: postgresql
-          DB_NAME: poker
+          DB_NAME: facilitation
           DB_HOST: localhost
           DB_PORT: "5432"
           DB_USER: postgres
@@ -87,7 +87,7 @@ jobs:
           { "commands": [
             "set -eu",
             "export HOME=/root",
-            "APP=/var/www/django_websites/Poker_server",
+            "APP=/var/www/django_websites/Facilitation_server",
             "git config --global --get-all safe.directory 2>/dev/null | grep -qx $APP || git config --global --add safe.directory $APP",
             "sudo -u django bash -c 'umask 027; cd '$APP' && git fetch --quiet origin main && git reset --hard --quiet origin/main'",
             "git -C $APP show origin/main:deploy/fetch-env-from-ssm.sh > /usr/local/sbin/facilitation-env-fetch.sh",
@@ -105,7 +105,7 @@ jobs:
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
-            --comment "Deploy poker ${{ github.sha }}" \
+            --comment "Deploy facilitation ${{ github.sha }}" \
             --cloud-watch-output-config CloudWatchOutputEnabled=true \
             --parameters file:///tmp/ssm-params.json \
             --query Command.CommandId --output text)

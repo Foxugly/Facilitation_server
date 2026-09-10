@@ -410,19 +410,20 @@ Weighted Ranking, QCM/Poll, ROTI.
   mais pour un test qui vérifie une **absence** de duplication, inspecter trop tôt donne un
   faux vert.
 
-- **Le rebranding n'est appliqué qu'à moitié.** Les *noms* d'units, le logger, l'app Celery,
-  les hosts, `BILLING_APP_SLUG` et le titre OpenAPI sont `facilitation`, mais le *contenu* de
-  `deploy/` et de `.github/workflows/deploy.yml` pointe encore sur Poker :
-  `APP=/var/www/django_websites/Poker_server`, `EnvironmentFile=/run/poker/.env`,
-  `SSM_PREFIX="/poker/prod"`, `alias …/Poker_server/…` dans nginx, rôle IAM `poker-deploy`,
-  base et rôle SQL `poker`, et tous les prérequis de `deploy/DEPLOY.md`. **Déployer en l'état
-  viserait l'installation Poker vivante.** Corriger l'ensemble d'un bloc avant tout déploiement.
-  (`DEPLOY.md` désigne aussi encore `Poker_frontend` comme frontend : c'est `Facilitation_frontend`.)
-- **Le port est incohérent sur trois fichiers.** `README.md`, `deploy/DEPLOY.md` et le
-  `proxy_pass` nginx disent **8007** ; `facilitation-asgi.service` écoute encore **8006**
-  (le port de Poker). Pire : la flotte occupe déjà **8007 avec billing** (table des ports dans
-  le `~/.claude/CLAUDE.md` global). Ni l'une ni l'autre valeur n'est correcte — choisir et
-  vérifier un port réellement libre.
+- **Coordonnées d'infrastructure, relevées sur la box le 2026-09-10.** Port **8009**
+  (`8000`–`8008` tous occupés, dont `8006` daphne Poker, `8007` gunicorn billing, `8008` daphne
+  Fabric ; suivant occupé : `8125` netdata). Redis **db5** (`db0`–`db4` pris — un index partagé
+  mélangerait les channel layers de deux applications). Base et rôle SQL `facilitation`, SSM
+  `/facilitation/prod`, env `/run/facilitation/.env`, arbre
+  `/var/www/django_websites/Facilitation_server`, rôle IAM `facilitation-deploy`.
+  **Ne pas réutiliser une valeur de Poker :** jusqu'au 2026-09-10, `deploy/` et `deploy.yml`
+  pointaient encore sur `Poker_server` / `/run/poker` / `/poker/prod` — un déploiement aurait
+  visé l'installation Poker vivante.
+- **Rien n'est déployable tant que les prérequis off-box n'existent pas** (`deploy/DEPLOY.md`) :
+  au 2026-09-10, aucun paramètre SSM `/facilitation/prod/*`, aucun secret GitHub
+  (`AWS_DEPLOY_ROLE_ARN`, `EC2_INSTANCE_ID`), pas de base, pas de répertoire sur la box. Le
+  workflow se déclenche bien sur push vers `main` mais échoue à l'étape OIDC — le garde-fou est
+  l'absence de secrets, pas la justesse du workflow.
 - **Valider les migrations sur PostgreSQL.** Le dev local est en sqlite ; les violations
   NOT NULL / unique que sqlite laisse passer casseront en prod. La CI teste bien sur Postgres
   (délibérément) — faire confiance à la CI plutôt qu'à un pytest local vert.
@@ -448,7 +449,7 @@ script env-fetch **depuis le blob git committé**, puis lance `deploy/deploy.sh`
 `django`. Ne jamais `cp` un artefact chargé par root depuis l'arbre inscriptible par django
 (escalade de privilèges, OPERATIONS.md §3.10/§3.11).
 
-Quatre units : `facilitation-env-fetch` (oneshot, SSM → `/run/<app>/.env` en tmpfs),
+Quatre units : `facilitation-env-fetch` (oneshot, SSM → `/run/facilitation/.env` en tmpfs),
 `facilitation-asgi` (daphne), `facilitation-celery`, `facilitation-celery-beat`. Un déploiement
 de code **ne redémarre pas** `env-fetch` : une valeur SSM modifiée exige un restart explicite.
 
