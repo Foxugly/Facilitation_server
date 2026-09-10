@@ -11,7 +11,7 @@ the first activity, not the product. Part of the Foxugly fleet — conventions i
 ## Stack
 
 Django 6 · DRF · Channels + Redis · django-parler (i18n in DB) · Celery · PostgreSQL (prod) ·
-simplejwt (Phase 2 auth). Python 3.14, port `127.0.0.1:8007`.
+simplejwt (Phase 2 auth). Python 3.14, port `127.0.0.1:8009`.
 
 ## Apps
 
@@ -36,5 +36,7 @@ Dev uses sqlite + the in-memory channel layer (no Redis needed). Tests: `.venv/S
 
 ## Docs
 
-- `docs/superpowers/specs/2026-07-08-data-model.md` — detailed data model (livrable n°0).
-- Product scope / realtime contract / Phase-1 design: `../Poker_handoff/` (to be versioned here).
+- `docs/superpowers/specs/README-handoff-claude-code.md` — index + conventions de flotte. À lire en premier.
+- `docs/superpowers/specs/delegation-poker-realtime-contract.md` — contrat WebSocket.
+- `docs/superpowers/specs/2026-07-08-data-model.md` — modèle de données détaillé (livrable n°0).
+- `CLAUDE.md` — état du dépôt, vocabulaire, cible, écarts connus et pièges.

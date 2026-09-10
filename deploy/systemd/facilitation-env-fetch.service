@@ -1,5 +1,5 @@
 [Unit]
-Description=Delegation Poker — fetch environment from AWS SSM into /run/poker/.env
+Description=Facilitation — fetch environment from AWS SSM into /run/facilitation/.env
 After=network-online.target
 Wants=network-online.target
 # Must complete before any process that needs the env file.

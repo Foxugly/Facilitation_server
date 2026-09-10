@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Delegation Poker — Deployment script (runs as 'django' via OIDC->SSM).
-#   /var/www/django_websites/Poker_server/deploy/deploy.sh
+# Facilitation — Deployment script (runs as 'django' via OIDC->SSM).
+#   /var/www/django_websites/Facilitation_server/deploy/deploy.sh
 # =============================================================================
 set -euo pipefail
 umask 027   # new dirs 750 / files 640 from git/pip/collectstatic (§3.1/§3.2)
 
-APP_DIR="/var/www/django_websites/Poker_server"
+APP_DIR="/var/www/django_websites/Facilitation_server"
 VENV="$APP_DIR/.venv"
 
 cd "$APP_DIR"
@@ -17,7 +17,7 @@ echo ">>> Installing dependencies..."
 # Load the SSM-fetched env so manage.py has SECRET_KEY, STATE, DB creds, etc.
 # Parse literally (key=value), NOT `source`: values may contain shell-special
 # chars that `.` would mangle (mirrors systemd EnvironmentFile parsing).
-ENV_FILE="/run/poker/.env"
+ENV_FILE="/run/facilitation/.env"
 if [ -f "$ENV_FILE" ]; then
     echo ">>> Loading env from $ENV_FILE..."
     while IFS='=' read -r _k _v || [ -n "$_k" ]; do
@@ -43,7 +43,7 @@ chown -R django:www-data "$APP_DIR"
 chmod -R g-w,o-rwx "$APP_DIR"
 
 # facilitation-env-fetch is intentionally NOT restarted here (a code deploy keeps the
-# env already in /run/poker/.env). To pick up changed SSM values:
+# env already in /run/facilitation/.env). To pick up changed SSM values:
 #   sudo systemctl restart facilitation-env-fetch && sudo systemctl restart facilitation-asgi facilitation-celery facilitation-celery-beat
 echo ">>> Restarting services..."
 sudo /bin/systemctl restart facilitation-asgi
