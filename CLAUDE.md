@@ -384,6 +384,28 @@ Weighted Ranking, QCM/Poll, ROTI.
 
 ## Pièges
 
+- **⚠️ La box est à saturation mémoire : Celery est volontairement ARRÊTÉ.**
+  1,9 Go de RAM pour **dix** applications Django. Le 2026-09-10, le démarrage de
+  `facilitation-celery` + `facilitation-celery-beat` (259 Mo à eux deux, le worker tournant
+  en `--concurrency=2`, soit trois processus chargeant Django) a fait basculer la machine :
+  swap plein (2047/2047), load à **76**, **toute la flotte injoignable** — `poker-api`
+  répondait en 39 s, les autres en timeout. Seul `netdata` restait vif, n'ayant pas de
+  backend Django : c'est ce qui a permis de voir que nginx tenait et que la box n'était pas
+  morte, mais saturée.
+
+  Les deux units ont été `stop` + `disable`. **Impact fonctionnel nul à ce jour** :
+  `expire_stale_rooms` ne fait que poser le drapeau `is_expired`, alors que `Room.is_live`
+  évalue `expires_at > now` en temps réel — une room expirée est déjà traitée comme morte
+  sans le sweep.
+
+  `deploy/deploy.sh` ne redémarre Celery que si l'unit est `enabled`, sinon chaque
+  déploiement reproduirait la panne. **Ne pas réactiver sans redimensionner la box**
+  (la RAM est le facteur limitant, pas le CPU) :
+  `sudo systemctl enable --now facilitation-celery facilitation-celery-beat`.
+
+  Corollaire pour la flotte : ajouter un site à cette machine n'est plus une opération
+  neutre. Vérifier `free -m` **avant**, pas après.
+
 - **Les attentes fixes dans les tests async sont calibrées sur SQLite et mentent sur
   PostgreSQL.** `test_timer_resumes_on_reconnect_after_restart` échouait sur PostgreSQL
   (vert sur SQLite) depuis le fork — **corrigé**, mais l'enseignement vaut pour tout nouveau

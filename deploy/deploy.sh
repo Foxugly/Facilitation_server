@@ -47,7 +47,24 @@ chmod -R g-w,o-rwx "$APP_DIR"
 #   sudo systemctl restart facilitation-env-fetch && sudo systemctl restart facilitation-asgi facilitation-celery facilitation-celery-beat
 echo ">>> Restarting services..."
 sudo /bin/systemctl restart facilitation-asgi
-sudo /bin/systemctl restart facilitation-celery
-sudo /bin/systemctl restart facilitation-celery-beat
+
+# Celery n'est redemarre QUE s'il est active. Le 2026-09-10, son demarrage a
+# sature la box : 1,9 Go de RAM pour dix applications Django, swap plein
+# (2047/2047), load a 76, toute la flotte injoignable pendant ~15 min. Les deux
+# units consommaient a elles seules 259 Mo. Elles ont ete desactivees.
+#
+# Sans cette garde, chaque deploiement les relancerait et reproduirait la panne,
+# alors meme qu'un operateur les a explicitement arretees. Le script respecte
+# donc l'etat choisi hors bande plutot que de l'ecraser.
+#
+# Pour les reactiver une fois la box redimensionnee :
+#   sudo systemctl enable --now facilitation-celery facilitation-celery-beat
+for unit in facilitation-celery facilitation-celery-beat; do
+    if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+        sudo /bin/systemctl restart "$unit"
+    else
+        echo ">>> $unit desactive — non redemarre (voir CLAUDE.md)"
+    fi
+done
 
 echo ">>> Deploy complete."
