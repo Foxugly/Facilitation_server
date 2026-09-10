@@ -10,6 +10,8 @@ from collections import Counter
 from django.conf import settings
 from django.utils import timezone
 
+from realtime.activities import is_ordinal
+
 from rooms.models import (
     Participant,
     Result,
@@ -45,10 +47,9 @@ def _card_values(room):
     return [card["value"] for card in (snapshot or {}).get("cards", [])]
 
 
-# Principe P1 de la spec de modele de donnees : la DB decrit un type de vote, le code
-# decide du comportement. Seules ces strategies ont une echelle ordinale sur laquelle
-# un ecart min/max veut dire quelque chose.
-ORDINAL_RESOLUTION_STRATEGIES = frozenset({"delegation_v1", "fist_of_five_v1"})
+# Principe P1 de la spec : la DB decrit un type de vote, le code decide du
+# comportement. Ce comportement vit desormais dans `realtime.activities`, qui le
+# rassemble au lieu de le disperser — voir l'en-tete de ce module.
 
 
 def _resolution_strategy(room):
@@ -66,7 +67,7 @@ def _spread_for(strategy, card_values):
     passant isdigit() : « +1 » et « -1 » echouent, « 0 » reussit, et l'ecran
     afficherait « 0 - 0 » — un faux consensus — sous un vote pourtant partage.
     """
-    if strategy not in ORDINAL_RESOLUTION_STRATEGIES:
+    if not is_ordinal(strategy):
         return {"min": None, "max": None}
     numeric = [int(v) for v in card_values if v.isdigit()]
     if not numeric:
