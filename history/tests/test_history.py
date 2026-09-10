@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.core import mail
 from rest_framework.test import APIClient
 
-from rooms.models import Result, Room, RoundState, Subject, VoteSession
+from rooms.models import Result, Room, RoundState, Subject, Round
 from teams.models import Team, TeamMembership, TeamRole
 
 User = get_user_model()
@@ -32,8 +32,8 @@ def _team_room(member, team):
 
 def _act(room, text, value, seq):
     subject = Subject.objects.create(room=room, text=text, sequence=seq)
-    session = VoteSession.objects.create(room=room, subject=subject, state=RoundState.ACTED)
-    return Result.objects.create(session=session, subject=subject, chosen_value=value)
+    rnd = Round.objects.create(room=room, subject=subject, state=RoundState.ACTED)
+    return Result.objects.create(round=rnd, subject=subject, chosen_value=value)
 
 
 @pytest.mark.django_db

@@ -59,7 +59,7 @@ class CreateRoomView(APIView):
         team_id = data.get("team")
         if team_id is not None:
             if not request.user.is_authenticated:
-                return error_response(code="auth_required", detail="Sign in to create a team session.", http_status=401)
+                return error_response(code="auth_required", detail="Sign in to create a team room.", http_status=401)
             team = get_object_or_404(Team, pk=team_id)
             if not is_member(team, request.user):
                 return error_response(code="not_a_member", detail="Not a member of this team.", http_status=403)
@@ -132,7 +132,7 @@ class JoinRoomView(APIView):
         if room.team_id is not None:
             # Team room: members only, no anonymous guests (scope §4.2).
             if not request.user.is_authenticated:
-                return error_response(code="auth_required", detail="Sign in to join this team session.", http_status=401)
+                return error_response(code="auth_required", detail="Sign in to join this team room.", http_status=401)
             if not is_member(room.team, request.user):
                 return error_response(code="not_a_member", detail="Not a member of this team.", http_status=403)
             # Re-join reuses the member's existing participant (no duplicate seats).

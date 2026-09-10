@@ -46,9 +46,9 @@ class ResultLayout(models.TextChoices):
 
 class TeamRole(models.TextChoices):
     """Team-scoped roles. Deliberately NOT "facilitator": that word is taken by
-    ``rooms.Role.FACILITATOR``, who runs the current round — a per-session role any
+    ``rooms.Role.FACILITATOR``, who runs the current round — a per-round role any
     member can hold and hand over. A manager administers the team, and may never
-    facilitate a single session."""
+    facilitate a single round."""
 
     OWNER = "owner", "Owner"
     MANAGER = "manager", "Manager"

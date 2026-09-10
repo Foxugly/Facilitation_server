@@ -18,7 +18,7 @@ from rooms.models import (
     RoundState,
     Subject,
     Vote,
-    VoteSession,
+    Round,
 )
 
 
@@ -40,8 +40,8 @@ def _card_values(room):
     by ``Card.order`` — see ``rooms.snapshot.build_deck_snapshot``). Returned as a
     list, not a set: callers that display a per-value tally (``revealed_payload``)
     depend on this order being stable across reveals."""
-    session = room.current_session
-    snapshot = (session.deck_snapshot if session and session.deck_snapshot else room.deck_snapshot)
+    rnd = room.current_round
+    snapshot = (rnd.deck_snapshot if rnd and rnd.deck_snapshot else room.deck_snapshot)
     return [card["value"] for card in (snapshot or {}).get("cards", [])]
 
 
@@ -52,10 +52,10 @@ ORDINAL_RESOLUTION_STRATEGIES = frozenset({"delegation_v1", "fist_of_five_v1"})
 
 
 def _resolution_strategy(room):
-    """La strategie du deck actif — session en cours si elle porte un snapshot, sinon
+    """La strategie du deck actif — le round en cours s'il porte un snapshot, sinon
     celui de la salle. Meme regle de priorite que ``_card_values``."""
-    session = room.current_session
-    snapshot = (session.deck_snapshot if session and session.deck_snapshot else room.deck_snapshot)
+    rnd = room.current_round
+    snapshot = (rnd.deck_snapshot if rnd and rnd.deck_snapshot else room.deck_snapshot)
     return (snapshot or {}).get("resolutionStrategy", "")
 
 
@@ -103,16 +103,16 @@ def set_connected(participant, connected):
     participant.save(update_fields=["is_connected", "last_seen_at"])
 
 
-def _current_session(room):
-    return room.current_session
+def _current_round(room):
+    return room.current_round
 
 
 def _require_facilitator(room, participant, rejected_type):
-    session = _current_session(room)
-    # Authority is the session facilitator; before any session exists, the room's
+    rnd = _current_round(room)
+    # Authority is the round facilitator; before any round exists, the room's
     # sole facilitator participant holds it (contract §2).
-    if session and session.facilitator_id:
-        if participant.id != session.facilitator_id:
+    if rnd and rnd.facilitator_id:
+        if participant.id != rnd.facilitator_id:
             raise RoomError("forbidden.not_facilitator", "Not the facilitator", rejected_type)
     elif participant.role != Role.FACILITATOR:
         raise RoomError("forbidden.not_facilitator", "Not the facilitator", rejected_type)
@@ -124,35 +124,35 @@ def touch(room):
 
 def set_subject(room, participant, text):
     _require_facilitator(room, participant, "subject.set")
-    session = _current_session(room)
-    if session and session.state == RoundState.IDLE:
-        session.subject.text = text
-        session.subject.save(update_fields=["text"])
+    rnd = _current_round(room)
+    if rnd and rnd.state == RoundState.IDLE:
+        rnd.subject.text = text
+        rnd.subject.save(update_fields=["text"])
     else:
         seq = room.subjects.count() + 1
         subject = Subject.objects.create(room=room, text=text, sequence=seq)
-        session = VoteSession.objects.create(
+        rnd = Round.objects.create(
             room=room, subject=subject, state=RoundState.IDLE, facilitator=participant
         )
-        room.current_session = session
-        room.save(update_fields=["current_session"])
+        room.current_round = rnd
+        room.save(update_fields=["current_round"])
     room.touch()
     return text
 
 
 def current_subject_text(room):
-    s = _current_session(room)
+    s = _current_round(room)
     return s.subject.text if s else ""
 
 
 def build_agenda(room):
     """The scenario: every subject of the room with its status (current / done / pending)
     and, when acted, its retained value."""
-    current_id = room.current_session.subject_id if room.current_session_id else None
+    current_id = room.current_round.subject_id if room.current_round_id else None
     out = []
-    for s in room.subjects.all().order_by("sequence").prefetch_related("sessions__result"):
+    for s in room.subjects.all().order_by("sequence").prefetch_related("rounds__result"):
         result = None
-        acted = next((se for se in s.sessions.all() if se.state == RoundState.ACTED and hasattr(se, "result")), None)
+        acted = next((rd for rd in s.rounds.all() if rd.state == RoundState.ACTED and hasattr(rd, "result")), None)
         if acted:
             result = acted.result.chosen_value
         status = "current" if s.id == current_id else ("done" if result is not None else "pending")
@@ -168,10 +168,10 @@ def add_subject(room, participant, text):
         raise RoomError("state.invalid_transition", "Empty subject", "subject.add")
     seq = room.subjects.count() + 1
     subject = Subject.objects.create(room=room, text=text, sequence=seq)
-    if room.current_session_id is None:
-        session = VoteSession.objects.create(room=room, subject=subject, state=RoundState.IDLE, facilitator=participant)
-        room.current_session = session
-        room.save(update_fields=["current_session"])
+    if room.current_round_id is None:
+        rnd = Round.objects.create(room=room, subject=subject, state=RoundState.IDLE, facilitator=participant)
+        room.current_round = rnd
+        room.save(update_fields=["current_round"])
     room.touch()
     return subject.id
 
@@ -182,19 +182,19 @@ def select_subject(room, participant, subject_id):
     subject = room.subjects.filter(id=subject_id).first()
     if subject is None:
         raise RoomError("state.invalid_transition", "Unknown subject", "subject.select")
-    session = subject.sessions.exclude(state=RoundState.ACTED).first()
-    if session is None:
-        session = VoteSession.objects.create(room=room, subject=subject, state=RoundState.IDLE, facilitator=participant)
+    rnd = subject.rounds.exclude(state=RoundState.ACTED).first()
+    if rnd is None:
+        rnd = Round.objects.create(room=room, subject=subject, state=RoundState.IDLE, facilitator=participant)
     else:
-        session.state = RoundState.IDLE
-        session.opened_at = None
-        session.revealed_at = None
-        session.vote_deadline = None
-        session.facilitator = participant
-        session.save(update_fields=["state", "opened_at", "revealed_at", "vote_deadline", "facilitator"])
-        session.votes.all().delete()
-    room.current_session = session
-    room.save(update_fields=["current_session"])
+        rnd.state = RoundState.IDLE
+        rnd.opened_at = None
+        rnd.revealed_at = None
+        rnd.vote_deadline = None
+        rnd.facilitator = participant
+        rnd.save(update_fields=["state", "opened_at", "revealed_at", "vote_deadline", "facilitator"])
+        rnd.votes.all().delete()
+    room.current_round = rnd
+    room.save(update_fields=["current_round"])
     room.touch()
     return subject.text
 
@@ -239,23 +239,23 @@ def prepare_round(
 
     Doing it atomically is what lets the facilitator manipulate the panel as a *form*
     (subject + details) and commit it in one go: every setting is applied while the
-    session provably exists and is idle, so none of them can race or reject (that's
+    round provably exists and is idle, so none of them can race or reject (that's
     what used to make toggling the reveal mode before any subject existed pop an
     error). Reuses the single-setting services so the rules stay in one place.
     """
     _require_facilitator(room, participant, "round.prepare")
-    # 1) Make the chosen subject the current one (creating/resetting its session).
+    # 1) Make the chosen subject the current one (creating/resetting its round).
     if subject_id is not None:
         select_subject(room, participant, subject_id)
     elif subject_text is not None and subject_text.strip():
         set_subject(room, participant, subject_text.strip())
-    session = _current_session(room)
-    if session is None or not session.subject.text.strip():
+    rnd = _current_round(room)
+    if rnd is None or not rnd.subject.text.strip():
         raise RoomError("state.invalid_transition", "No subject set", "round.prepare")
-    if session.state != RoundState.IDLE:
+    if rnd.state != RoundState.IDLE:
         raise RoomError("state.invalid_transition", "Round already started", "round.prepare")
     # 2) Details. Each helper re-checks facilitator/state; order is irrelevant now
-    #    that the idle session exists.
+    #    that the idle round exists.
     if deck_id is not None:
         select_deck(room, participant, deck_id)
     if anonymous is not None:
@@ -270,11 +270,11 @@ def prepare_round(
             room.timer_seconds if timer_seconds is None else timer_seconds,
         )
     room.refresh_from_db(fields=["deck_snapshot", "timer_enabled", "timer_seconds"])
-    session.refresh_from_db(fields=["is_anonymous"])
+    rnd.refresh_from_db(fields=["is_anonymous"])
     return {
-        "subject": session.subject.text,
+        "subject": rnd.subject.text,
         "deckSnapshot": active_deck_snapshot(room),
-        "anonymous": bool(session.is_anonymous),
+        "anonymous": bool(rnd.is_anonymous),
         "timerEnabled": room.timer_enabled,
         "timerSeconds": room.timer_seconds,
     }
@@ -282,50 +282,50 @@ def prepare_round(
 
 def open_vote(room, participant):
     _require_facilitator(room, participant, "vote.open")
-    session = _current_session(room)
-    if session is None or not session.subject.text.strip():
+    rnd = _current_round(room)
+    if rnd is None or not rnd.subject.text.strip():
         raise RoomError("state.invalid_transition", "No subject set", "vote.open")
-    if session.state != RoundState.IDLE:
+    if rnd.state != RoundState.IDLE:
         raise RoomError("state.invalid_transition", "Not idle", "vote.open")
     # Freeze the deck this round is played with: the room's active deck may change
     # afterwards, and the round's values must keep their meaning (history labels).
-    session.deck_snapshot = room.deck_snapshot
-    session.state = RoundState.OPEN
-    session.opened_at = timezone.now()
-    session.vote_deadline = (
-        session.opened_at + timezone.timedelta(seconds=room.timer_seconds)
+    rnd.deck_snapshot = room.deck_snapshot
+    rnd.state = RoundState.OPEN
+    rnd.opened_at = timezone.now()
+    rnd.vote_deadline = (
+        rnd.opened_at + timezone.timedelta(seconds=room.timer_seconds)
         if room.timer_enabled
         else None
     )
-    session.save(update_fields=["deck_snapshot", "state", "opened_at", "vote_deadline"])
+    rnd.save(update_fields=["deck_snapshot", "state", "opened_at", "vote_deadline"])
     room.touch()
-    return session.vote_deadline
+    return rnd.vote_deadline
 
 
 def cast_vote(room, participant, card_value):
-    session = _current_session(room)
-    if session is None or session.state != RoundState.OPEN:
+    rnd = _current_round(room)
+    if rnd is None or rnd.state != RoundState.OPEN:
         raise RoomError("state.invalid_transition", "Voting is not open", "vote.cast")
-    if session.vote_deadline is not None and timezone.now() > session.vote_deadline:
+    if rnd.vote_deadline is not None and timezone.now() > rnd.vote_deadline:
         raise RoomError("state.invalid_transition", "Voting time is over", "vote.cast")
     if card_value not in _card_values(room):
         raise RoomError("state.invalid_transition", "Unknown card value", "vote.cast")
     Vote.objects.update_or_create(
-        session=session, participant=participant, defaults={"card_value": card_value}
+        round=rnd, participant=participant, defaults={"card_value": card_value}
     )
     room.touch()
 
 
 def reveal(room, participant):
     _require_facilitator(room, participant, "vote.reveal")
-    session = _current_session(room)
-    if session is None or session.state != RoundState.OPEN:
+    rnd = _current_round(room)
+    if rnd is None or rnd.state != RoundState.OPEN:
         raise RoomError("state.invalid_transition", "Not open", "vote.reveal")
-    if not session.votes.exists():
+    if not rnd.votes.exists():
         raise RoomError("state.invalid_transition", "No votes yet", "vote.reveal")
-    session.state = RoundState.REVEALED
-    session.revealed_at = timezone.now()
-    session.save(update_fields=["state", "revealed_at"])
+    rnd.state = RoundState.REVEALED
+    rnd.revealed_at = timezone.now()
+    rnd.save(update_fields=["state", "revealed_at"])
     room.touch()
 
 
@@ -346,55 +346,55 @@ def reveal_on_timeout(room):
     read-check-write nu (lire l'etat, puis sauvegarder) laisse une fenetre ou
     les deux lisent OPEN avant que l'un des deux n'ecrive REVEALED.
     """
-    session = _current_session(room)
-    if session is None or session.state != RoundState.OPEN:
+    rnd = _current_round(room)
+    if rnd is None or rnd.state != RoundState.OPEN:
         return False
-    if session.vote_deadline is None or timezone.now() < session.vote_deadline:
+    if rnd.vote_deadline is None or timezone.now() < rnd.vote_deadline:
         return False
     now = timezone.now()
-    updated = VoteSession.objects.filter(
-        pk=session.pk, state=RoundState.OPEN, vote_deadline__lt=now
+    updated = Round.objects.filter(
+        pk=rnd.pk, state=RoundState.OPEN, vote_deadline__lt=now
     ).update(state=RoundState.REVEALED, revealed_at=now)
     if not updated:
         return False
-    # Garde le cache en memoire (room.current_session) coherent avec la ligne
-    # tout juste ecrite : les appelants relisent l'etat via _current_session(room)
+    # Garde le cache en memoire (room.current_round) coherent avec la ligne
+    # tout juste ecrite : les appelants relisent l'etat via _current_round(room)
     # (build_state_sync, revealed_payload...) sans recharger depuis la base.
-    session.state = RoundState.REVEALED
-    session.revealed_at = now
+    rnd.state = RoundState.REVEALED
+    rnd.revealed_at = now
     room.touch()
     return True
 
 
 def act_result(room, participant, chosen_value):
     _require_facilitator(room, participant, "result.act")
-    session = _current_session(room)
-    if session is None or session.state != RoundState.REVEALED:
+    rnd = _current_round(room)
+    if rnd is None or rnd.state != RoundState.REVEALED:
         raise RoomError("state.invalid_transition", "Not revealed", "result.act")
     if chosen_value not in _card_values(room):
         raise RoomError("state.invalid_transition", "Unknown card value", "result.act")
     Result.objects.update_or_create(
-        session=session,
-        defaults={"subject": session.subject, "chosen_value": chosen_value, "decided_by": participant},
+        round=rnd,
+        defaults={"subject": rnd.subject, "chosen_value": chosen_value, "decided_by": participant},
     )
-    session.state = RoundState.ACTED
-    session.save(update_fields=["state"])
+    rnd.state = RoundState.ACTED
+    rnd.save(update_fields=["state"])
     room.touch()
     return chosen_value
 
 
 def reset_round(room, participant):
     _require_facilitator(room, participant, "vote.reset")
-    session = _current_session(room)
-    if session is None:
+    rnd = _current_round(room)
+    if rnd is None:
         raise RoomError("state.invalid_transition", "No round", "vote.reset")
-    session.votes.all().delete()
-    session.state = RoundState.IDLE
-    session.deck_snapshot = None
-    session.opened_at = None
-    session.revealed_at = None
-    session.vote_deadline = None
-    session.save(update_fields=["deck_snapshot", "state", "opened_at", "revealed_at", "vote_deadline"])
+    rnd.votes.all().delete()
+    rnd.state = RoundState.IDLE
+    rnd.deck_snapshot = None
+    rnd.opened_at = None
+    rnd.revealed_at = None
+    rnd.vote_deadline = None
+    rnd.save(update_fields=["deck_snapshot", "state", "opened_at", "revealed_at", "vote_deadline"])
     room.touch()
     return "idle"
 
@@ -408,10 +408,10 @@ def open_deadline(room):
     cote consumer, a decider s'il faut reprogrammer une tache de revelation a la
     reconnexion (une tache en memoire ne survit pas a un redemarrage du service,
     l'echeance en base si)."""
-    session = _current_session(room)
-    if session is None or session.state != RoundState.OPEN or session.vote_deadline is None:
+    rnd = _current_round(room)
+    if rnd is None or rnd.state != RoundState.OPEN or rnd.vote_deadline is None:
         return None
-    return session.vote_deadline
+    return rnd.vote_deadline
 
 
 def deadline_iso(room):
@@ -421,12 +421,12 @@ def deadline_iso(room):
 
 
 def participation(room):
-    session = _current_session(room)
+    rnd = _current_round(room)
     total = room.participants.count()
-    if session is None:
+    if rnd is None:
         return {"voted": 0, "total": total, "votedIds": []}
     voted_ids = list(
-        Vote.objects.filter(session=session).values_list("participant__public_id", flat=True)
+        Vote.objects.filter(round=rnd).values_list("participant__public_id", flat=True)
     )
     return {"voted": len(voted_ids), "total": total, "votedIds": [str(pid) for pid in voted_ids]}
 
@@ -434,7 +434,7 @@ def participation(room):
 def revealed_payload(room):
     """Resultat d'un round revele — ONLY ever called in REVEALED state.
 
-    Deux modes, choisis par le facilitateur a l'ouverture (``session.is_anonymous``) :
+    Deux modes, choisis par le facilitateur a l'ouverture (``rnd.is_anonymous``) :
 
     - **nominatif** (defaut) : le decompte + la liste participant -> carte ;
     - **anonyme** (option des equipes payantes) : le decompte SEUL. La cle ``votes``
@@ -444,8 +444,8 @@ def revealed_payload(room):
     Le mode est fige a l'ouverture et annonce aux votants avant qu'ils votent : le
     basculer une fois les votes emis exposerait des gens qui se croyaient anonymes.
     """
-    session = _current_session(room)
-    votes = list(Vote.objects.filter(session=session))
+    rnd = _current_round(room)
+    votes = list(Vote.objects.filter(round=rnd))
     counts = Counter(v.card_value for v in votes)
     tally = [
         {"cardValue": value, "count": counts[value]}
@@ -453,8 +453,8 @@ def revealed_payload(room):
         if counts.get(value)
     ]
     spread = _spread_for(_resolution_strategy(room), [v.card_value for v in votes])
-    payload = {"tally": tally, "spread": spread, "anonymous": bool(session and session.is_anonymous)}
-    if not (session and session.is_anonymous):
+    payload = {"tally": tally, "spread": spread, "anonymous": bool(rnd and rnd.is_anonymous)}
+    if not (rnd and rnd.is_anonymous):
         by_participant = {v.participant_id: v.card_value for v in votes}
         payload["votes"] = [
             {"participantId": str(p.public_id), "cardValue": by_participant[p.id]}
@@ -465,11 +465,11 @@ def revealed_payload(room):
 
 
 def participants_list(room):
-    session = _current_session(room)
+    rnd = _current_round(room)
     voted = set()
-    if session:
+    if rnd:
         voted = set(
-            Vote.objects.filter(session=session).values_list("participant_id", flat=True)
+            Vote.objects.filter(round=rnd).values_list("participant_id", flat=True)
         )
     out = []
     for p in room.participants.all():
@@ -485,9 +485,9 @@ def participants_list(room):
 
 
 def _facilitator_participant(room):
-    session = _current_session(room)
-    if session and session.facilitator_id:
-        return room.participants.filter(id=session.facilitator_id).first()
+    rnd = _current_round(room)
+    if rnd and rnd.facilitator_id:
+        return room.participants.filter(id=rnd.facilitator_id).first()
     return room.participants.filter(role=Role.FACILITATOR).first()
 
 
@@ -509,13 +509,13 @@ def can_claim(room):
 
 
 def promote_facilitator(room, participant):
-    """First claimer becomes facilitator. Authority is by session.facilitator, so the
+    """First claimer becomes facilitator. Authority is by rnd.facilitator, so the
     old facilitator returning is a plain voter (definitive transfer, §6.f) — no token
     reissue needed since control is keyed on participant identity, not a secret."""
-    session = _current_session(room)
-    if session:
-        session.facilitator = participant
-        session.save(update_fields=["facilitator"])
+    rnd = _current_round(room)
+    if rnd:
+        rnd.facilitator = participant
+        rnd.save(update_fields=["facilitator"])
     participant.role = Role.FACILITATOR
     participant.save(update_fields=["role"])
 
@@ -527,10 +527,10 @@ def transfer_facilitator(room, participant, target_public_id):
     target = room.participants.filter(public_id=target_public_id).first()
     if target is None or target.id == participant.id:
         raise RoomError("state.invalid_transition", "Unknown or self target", "facilitator.transfer")
-    session = _current_session(room)
-    if session:
-        session.facilitator = target
-        session.save(update_fields=["facilitator"])
+    rnd = _current_round(room)
+    if rnd:
+        rnd.facilitator = target
+        rnd.save(update_fields=["facilitator"])
     target.role = Role.FACILITATOR
     target.save(update_fields=["role"])
     participant.role = Role.VOTER
@@ -540,9 +540,9 @@ def transfer_facilitator(room, participant, target_public_id):
 
 def active_deck_snapshot(room):
     """The deck in play: the current round's frozen one, else the room's active one."""
-    session = room.current_session
-    if session is not None and session.deck_snapshot:
-        return session.deck_snapshot
+    rnd = room.current_round
+    if rnd is not None and rnd.deck_snapshot:
+        return rnd.deck_snapshot
     return room.deck_snapshot
 
 
@@ -567,13 +567,13 @@ def set_reveal_mode(room, participant, anonymous):
     anonymous = bool(anonymous)
     if anonymous and not _team_may_anonymise(room):
         raise RoomError("forbidden.subscription_required", "Anonymous reveal requires a subscription", "reveal.setMode")
-    session = _current_session(room)
-    if session is None:
+    rnd = _current_round(room)
+    if rnd is None:
         raise RoomError("state.invalid_transition", "No round", "reveal.setMode")
-    if session.state != RoundState.IDLE:
+    if rnd.state != RoundState.IDLE:
         raise RoomError("state.invalid_transition", "Set the mode before opening the vote", "reveal.setMode")
-    session.is_anonymous = anonymous
-    session.save(update_fields=["is_anonymous"])
+    rnd.is_anonymous = anonymous
+    rnd.save(update_fields=["is_anonymous"])
     room.touch()
     return anonymous
 
@@ -594,8 +594,8 @@ def select_deck(room, participant, deck_id):
     safe — a played round keeps its own frozen deck either way.
     """
     _require_facilitator(room, participant, "deck.select")
-    session = _current_session(room)
-    if session is not None and session.state in (RoundState.OPEN, RoundState.REVEALED):
+    rnd = _current_round(room)
+    if rnd is not None and rnd.state in (RoundState.OPEN, RoundState.REVEALED):
         raise RoomError("state.invalid_transition", "Finish the round before switching deck", "deck.select")
     snapshots = room.deck_snapshots or [room.deck_snapshot]
     chosen = next((s for s in snapshots if s and s.get("deckId") == deck_id), None)
@@ -610,18 +610,18 @@ def select_deck(room, participant, deck_id):
 def build_state_sync(participant):
     """Full current-state snapshot for a single client (contract §5.1). No history replay."""
     room = participant.room
-    session = _current_session(room)
+    rnd = _current_round(room)
     my_vote = None
     result = None
     round_state = RoundState.IDLE
     subject_text = ""
-    if session:
-        round_state = session.state
-        subject_text = session.subject.text
-        vote = Vote.objects.filter(session=session, participant=participant).first()
+    if rnd:
+        round_state = rnd.state
+        subject_text = rnd.subject.text
+        vote = Vote.objects.filter(round=rnd, participant=participant).first()
         my_vote = vote.card_value if vote else None
-        if session.state == RoundState.ACTED and hasattr(session, "result"):
-            result = session.result.chosen_value
+        if rnd.state == RoundState.ACTED and hasattr(rnd, "result"):
+            result = rnd.result.chosen_value
 
     payload = {
         # isTeam drives client-side feature gating (e.g. the timer control is
@@ -634,8 +634,8 @@ def build_state_sync(participant):
         "availableDecks": available_decks_payload(room),
         "participants": participants_list(room),
         # Le role du destinataire, et son identifiant pour qu'il se reconnaisse dans
-        # les diffusions. Le client le tenait jusqu'ici de sa session enregistree a
-        # l'arrivee, donc figee : prendre le role de facilitateur le rendait tel pour
+        # les diffusions. Le client le tenait jusqu'ici de l'etat enregistre a
+        # l'arrivee, donc fige : prendre le role de facilitateur le rendait tel pour
         # tout le monde SAUF pour lui, et recharger n'y changeait rien, le role perime
         # etant persiste. C'est le serveur qui fait autorite.
         "myRole": participant.role,
@@ -652,7 +652,7 @@ def build_state_sync(participant):
         # Announced to everyone, not just the facilitator: a voter must know whether
         # their card will be shown with their name before they play it.
         "reveal": {
-            "anonymous": bool(session and session.is_anonymous),
+            "anonymous": bool(rnd and rnd.is_anonymous),
             "canAnonymise": _team_may_anonymise(room),
         },
     }

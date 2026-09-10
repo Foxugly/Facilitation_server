@@ -2,8 +2,8 @@
 atomic call, open_vote (step 2) opens it.
 
 The key regression this guards: composing a round from scratch — including the reveal
-mode — must not error when no session exists yet (that ordering was the old
-"toggle nominative -> popup" bug). prepare_round creates the idle session first, then
+mode — must not error when no round exists yet (that ordering was the old
+"toggle nominative -> popup" bug). prepare_round creates the idle round first, then
 applies every detail against it.
 """
 import pytest
@@ -21,7 +21,7 @@ User = get_user_model()
 
 
 def _fresh_room(team=None):
-    """A room with a facilitator and a voter but NO subject/session yet — the state a
+    """A room with a facilitator and a voter but NO subject/round yet — the state a
     brand-new room is in when the facilitator first opens the panel."""
     deck = create_standard_deck()
     code = generate_unique_code(lambda c: Room.objects.filter(code=c).exists())
@@ -53,9 +53,9 @@ def test_prepare_from_scratch_creates_idle_round(db):
     # ignored (a stale client must still be able to prepare its round).
     assert summary["timerEnabled"] is False
     assert summary["anonymous"] is False
-    session = services._current_session(room)
-    assert session is not None
-    assert session.state == RoundState.IDLE  # prepared, NOT open
+    rnd = services._current_round(room)
+    assert rnd is not None
+    assert rnd.state == RoundState.IDLE  # prepared, NOT open
 
 
 @pytest.mark.django_db
@@ -118,7 +118,7 @@ def test_prepare_by_subject_id_selects_a_queued_subject(db):
     summary = services.prepare_round(room, fac, subject_id=second.id)
 
     assert summary["subject"] == "Second"
-    assert services._current_session(room).subject_id == second.id
+    assert services._current_round(room).subject_id == second.id
 
 
 @pytest.mark.django_db
