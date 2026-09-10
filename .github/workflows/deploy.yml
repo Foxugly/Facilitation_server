@@ -96,7 +96,12 @@ jobs:
             "git -C $APP show origin/main:deploy/nginx/facilitation-api.conf > /etc/nginx/sites-available/facilitation-api.conf",
             "ln -sf ../sites-available/facilitation-api.conf /etc/nginx/sites-enabled/facilitation-api.conf",
             "systemctl daemon-reload",
-            "systemctl enable facilitation-env-fetch facilitation-asgi facilitation-celery facilitation-celery-beat",
+            "# facilitation-celery{,-beat} sont VOLONTAIREMENT absents du enable ci-dessous :",
+            "# la box n'a pas la RAM pour les porter (voir CLAUDE.md, incident du 2026-09-10).",
+            "# Les units restent installees ; les activer est une decision explicite, prise hors",
+            "# bande. Un enable ici les rallumerait a chaque deploiement, et deploy.sh les",
+            "# redemarrerait dans la foulee puisqu'il se fie a is-enabled.",
+            "systemctl enable facilitation-env-fetch facilitation-asgi",
             "systemctl restart facilitation-env-fetch",
             "sudo -u django bash $APP/deploy/deploy.sh",
             "nginx -t && systemctl reload nginx"

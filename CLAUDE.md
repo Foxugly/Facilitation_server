@@ -398,10 +398,19 @@ Weighted Ranking, QCM/Poll, ROTI.
   évalue `expires_at > now` en temps réel — une room expirée est déjà traitée comme morte
   sans le sweep.
 
-  `deploy/deploy.sh` ne redémarre Celery que si l'unit est `enabled`, sinon chaque
-  déploiement reproduirait la panne. **Ne pas réactiver sans redimensionner la box**
-  (la RAM est le facteur limitant, pas le CPU) :
-  `sudo systemctl enable --now facilitation-celery facilitation-celery-beat`.
+  **La protection tient à DEUX endroits, et les deux sont nécessaires** — corriger le
+  premier seul ne sert à rien, constaté au déploiement suivant :
+
+  1. `.github/workflows/deploy.yml` n'appelle `systemctl enable` que sur
+     `facilitation-env-fetch` et `facilitation-asgi`. Il les activait toutes les quatre,
+     ce qui **réactivait Celery à chaque déploiement**, avant même que `deploy.sh` ne
+     s'exécute. Les units restent installées par le `for u in …` juste au-dessus : elles
+     sont disponibles, simplement pas activées.
+  2. `deploy/deploy.sh` ne redémarre Celery que si l'unit est `enabled` — sans quoi un
+     `restart` explicite relancerait un service pourtant désactivé.
+
+  **Ne pas réactiver sans redimensionner la box** (la RAM est le facteur limitant, pas le
+  CPU) : `sudo systemctl enable --now facilitation-celery facilitation-celery-beat`.
 
   Corollaire pour la flotte : ajouter un site à cette machine n'est plus une opération
   neutre. Vérifier `free -m` **avant**, pas après.
