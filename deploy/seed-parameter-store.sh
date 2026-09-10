@@ -40,4 +40,29 @@ put SENTRY_DSN "<SENTRY_BACKEND_DSN>"
 put SENTRY_ENVIRONMENT "PROD"
 put SENTRY_TRACES_SAMPLE_RATE "0.0"
 
+# --- Email transactionnel : Microsoft Graph app-only (standard flotte §3.14) ---
+# BLOQUANT. Sans ces quatre valeurs, EMAIL_BACKEND reste la console : aucun message
+# ne part. Comme l'inscription est gatee sur la confirmation d'adresse, PERSONNE ne
+# peut alors creer de compte — le site est en ligne mais inutilisable.
+# Meme application Azure pour toute la flotte : reprendre les valeurs d'un site
+# existant, p.ex. `aws ssm get-parameter --with-decryption --region eu-west-1 \
+#   --name /poker/prod/GRAPH_TENANT_ID --query Parameter.Value --output text`
+put    GRAPH_TENANT_ID     "<GRAPH_TENANT_ID>"
+put    GRAPH_CLIENT_ID     "<GRAPH_CLIENT_ID>"
+secret GRAPH_CLIENT_SECRET "<GRAPH_CLIENT_SECRET>"
+put    GRAPH_SENDER        "<GRAPH_SENDER>"
+
+# --- Cloudflare Turnstile (captcha sur register / forgot / magic-link) ---
+# Gate sur le secret : absent, le captcha est saute. Degrade mais fonctionnel —
+# poser une valeur des que le site est public.
+secret TURNSTILE_SECRET_KEY "<TURNSTILE_SECRET_KEY>"
+
+# --- Facturation centralisee (billing-api.foxugly.com) ---
+# Gate sur ces deux valeurs : absentes, la facturation est inerte (equipes ouvertes,
+# checkout en 503). Deployer sans elles est volontairement supporte. Le slug
+# « facilitation » (BILLING_APP_SLUG, defaut du code) doit etre enregistre aupres du
+# central, sinon aucun droit payant ne se resout.
+put    BILLING_BASE_URL   "<BILLING_BASE_URL>"
+secret BILLING_APP_SECRET "<BILLING_APP_SECRET>"
+
 echo "Seeded $P/* — remember to grant the instance role foxugly-fleet-ec2 SSM read on $P and $P/*."
