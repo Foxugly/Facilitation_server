@@ -21,7 +21,7 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 
 from decks.models import Deck
-from teams.models import Team, TeamMembership, TeamRole
+from teams.models import BackgroundStyle, Team, TeamMembership, TeamRole
 
 EMAIL = "e2e@example.com"
 PASSWORD = "e2e-password-1234"
@@ -80,6 +80,14 @@ class Command(BaseCommand):
         # que le sous-ensemble gratuit et n'a donc aucun choix a faire.
         decks = list(Deck.objects.filter(is_active=True))
         team.decks.set(decks)
+
+        # Fond impose par l'equipe : c'est ce qui pose `.room--custom-bg` sur la
+        # salle. Sans lui, le harnais de captures ne photographierait jamais ce
+        # cas — et une regle de style qui ne s'applique qu'a lui passerait
+        # inapercue, comme l'a montre l'etape 3c.
+        team.background_style = BackgroundStyle.COLOR
+        team.background_color = "#1e293b"
+        team.save(update_fields=["background_style", "background_color"])
 
         self.stdout.write(
             self.style.SUCCESS(
