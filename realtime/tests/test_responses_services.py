@@ -71,13 +71,28 @@ def test_cast_response_refuses_off_deck_card_and_off_schema_payload():
     room, fac, voter, rnd, item = _room()
     services.open_vote(room, fac)
 
+    # Carte hors du deck actif : le payload est structurellement valide (une
+    # cle "card" de type str), mais la valeur n'est pas jouable.
     with pytest.raises(RoomError) as exc:
         services.cast_response(room, voter, item.id, {"card": "99"})
     assert exc.value.rejected_type == "response.cast"
     assert not Response.objects.filter(item=item, participant=voter).exists()
 
+    # Cle en trop par rapport au payload_schema ({"card": str}).
     with pytest.raises(RoomError) as exc:
         services.cast_response(room, voter, item.id, {"card": "4", "extra": "nope"})
+    assert exc.value.rejected_type == "response.cast"
+    assert not Response.objects.filter(item=item, participant=voter).exists()
+
+    # Cle manquante : "card" est requise par le schema.
+    with pytest.raises(RoomError) as exc:
+        services.cast_response(room, voter, item.id, {})
+    assert exc.value.rejected_type == "response.cast"
+    assert not Response.objects.filter(item=item, participant=voter).exists()
+
+    # Type errone : le schema attend une str, pas un int.
+    with pytest.raises(RoomError) as exc:
+        services.cast_response(room, voter, item.id, {"card": 4})
     assert exc.value.rejected_type == "response.cast"
     assert not Response.objects.filter(item=item, participant=voter).exists()
 
@@ -97,26 +112,34 @@ def test_revealed_payload_carries_a_block_per_item_and_mirrors_the_first_in_flat
 
     payload = services.revealed_payload(room)
 
-    assert [block["itemId"] for block in payload["items"]] == [item1.id, item2.id]
-    assert payload["items"][0]["tally"] == [
+    assert [block["itemId"] for block in payload["itemResults"]] == [item1.id, item2.id]
+    assert payload["itemResults"][0]["tally"] == [
         {"cardValue": "4", "count": 1},
         {"cardValue": "6", "count": 1},
     ]
-    assert payload["items"][0]["spread"] == {"min": 4, "max": 6}
-    assert payload["items"][1]["tally"] == [{"cardValue": "2", "count": 1}]
+    assert payload["itemResults"][0]["spread"] == {"min": 4, "max": 6}
+    assert payload["itemResults"][1]["tally"] == [{"cardValue": "2", "count": 1}]
     # Cles plates historiques : recopiees du PREMIER item, pas un recalcul distinct.
-    assert payload["tally"] == payload["items"][0]["tally"]
-    assert payload["spread"] == payload["items"][0]["spread"]
+    assert payload["tally"] == payload["itemResults"][0]["tally"]
+    assert payload["spread"] == payload["itemResults"][0]["spread"]
 
 
 @pytest.mark.django_db
 def test_anonymous_round_hides_votes_on_every_item_block():
     """L'invariant d'anonymat doit tenir PAR ITEM : c'est le coeur de la tache 3.
 
+    La boucle par bloc est deliberement AVANT l'assertion sur la cle plate
+    `votes` : celle-ci est recopiee du premier bloc de `itemResults`, donc une
+    mutation qui reintroduit `votes` la fait, elle aussi, reapparaitre — si
+    l'assertion plate venait en premier, elle echouerait seule et la preuve
+    par item ne serait jamais exercee. Voir le round de correction 1 du
+    rapport pour la trace de la mutation qui a motive ce reordonnancement.
+
     Verifie par mutation en developpant ce test : retirer la garde
     `if not anonymous` autour de `block["votes"] = ...` dans
     `realtime.services.revealed_payload` fait echouer ce test (des cles
-    `votes` apparaissent alors dans `items`), la remettre le fait repasser.
+    `votes` apparaissent dans CHAQUE bloc de `itemResults`), la remettre le
+    fait repasser.
     """
     room, fac, voter, rnd, item1 = _room()
     item2 = Item.objects.create(round=rnd, text="Budget", sequence=2)
@@ -130,12 +153,12 @@ def test_anonymous_round_hides_votes_on_every_item_block():
     payload = services.revealed_payload(room)
 
     assert payload["anonymous"] is True
-    assert "votes" not in payload
-    assert len(payload["items"]) == 2
-    for block in payload["items"]:
+    assert len(payload["itemResults"]) == 2
+    for block in payload["itemResults"]:
         assert "votes" not in block
-    assert payload["items"][0]["tally"] == [{"cardValue": "4", "count": 1}]
-    assert payload["items"][1]["tally"] == [{"cardValue": "2", "count": 1}]
+    assert "votes" not in payload
+    assert payload["itemResults"][0]["tally"] == [{"cardValue": "4", "count": 1}]
+    assert payload["itemResults"][1]["tally"] == [{"cardValue": "2", "count": 1}]
     # Ceinture et bretelles : l'identifiant du votant n'apparait nulle part.
     assert str(voter.public_id) not in str(payload)
 
@@ -154,4 +177,33 @@ def test_build_state_sync_carries_my_responses_and_my_vote():
     assert state["myResponses"] == {
         str(item1.id): {"card": "4"},
         str(item2.id): {"card": "2"},
+    }
+
+
+@pytest.mark.django_db
+def test_participation_requires_answering_every_item_of_the_round():
+    """« A repondu » ne veut plus dire « a repondu a UN item » (tache 3, point 4
+    de la relecture) : `_completed_participant_ids` compte les Response via
+    `round=rnd` tandis que `n_items` vient de `rnd.items` — deux sources, donc
+    exactement le genre d'ecart qu'un test doit figer plutot que verifier a la
+    main."""
+    room, fac, voter, rnd, item1 = _room()
+    item2 = Item.objects.create(round=rnd, text="Budget", sequence=2)
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, item1.id, {"card": "4"})
+
+    # A mi-chemin : un seul des deux items a une reponse. Pas complet.
+    midway = services.participation(room)
+    assert midway == {"voted": 0, "total": 2, "votedIds": []}
+    midway_list = {p["participantId"]: p["hasVoted"] for p in services.participants_list(room)}
+    assert midway_list[str(voter.public_id)] is False
+
+    services.cast_response(room, voter, item2.id, {"card": "2"})
+
+    # Les deux items repondus : complet.
+    done = services.participation(room)
+    assert done == {"voted": 1, "total": 2, "votedIds": [str(voter.public_id)]}
+    assert {p["participantId"]: p["hasVoted"] for p in services.participants_list(room)} == {
+        str(fac.public_id): False,
+        str(voter.public_id): True,
     }

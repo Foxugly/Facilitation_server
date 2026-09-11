@@ -36,9 +36,16 @@ class RoomError(Exception):
         self.rejected_type = rejected_type
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ActivitySpec:
-    """Ce qu'une strategie de resolution dit du depouillement."""
+    """Ce qu'une strategie de resolution dit du depouillement.
+
+    ``eq=False`` : ``payload_schema`` est un dict, non hachable — laisser
+    ``frozen=True`` generer ``__eq__``/``__hash__`` sur les champs ferait
+    lever ``TypeError`` au premier ``hash(spec)``. Rien n'en depend
+    aujourd'hui, mais rien n'empeche non plus qu'un futur registre range des
+    `ActivitySpec` dans un ``set`` ou une cle de dict.
+    """
 
     #: L'echelle est-elle ORDINALE, c'est-a-dire un ecart min/max a-t-il un sens ?
     #: Un vote romain (+1 / 0 / -1) ou un jeu de pictogrammes n'ont pas d'ordre :
@@ -71,9 +78,25 @@ class ActivitySpec:
     #: registre ait a le repeter.
     aggregate: Callable[[list, list[str]], dict] = field(default=None)
 
+    #: Une reponse deja conforme au `payload_schema` porte-t-elle une valeur
+    #: JOUABLE ? Signature : (payload, card_values) -> bool. Vit dans le
+    #: registre pour la meme raison que `aggregate` : une activite au payload
+    #: different de `{"card": ...}` (ex. `{"dots": 3}`) ne doit pas heriter
+    #: d'une regle « la carte appartient au deck » qui ne la concerne pas.
+    #: Laisse a None : `__post_init__` branche le defaut poker (appartenance
+    #: au deck actif) si l'entree du registre n'en fournit pas.
+    validate_value: Callable[[dict, list[str]], bool] = field(default=None)
+
     def __post_init__(self):
         if self.aggregate is None:
             object.__setattr__(self, "aggregate", _default_aggregate(self.ordinal))
+        if self.validate_value is None:
+            object.__setattr__(self, "validate_value", _default_validate_value)
+
+
+def _default_validate_value(payload, card_values):
+    """La regle du poker : la carte jouee doit appartenir au deck actif."""
+    return payload.get("card") in card_values
 
 
 def _default_aggregate(ordinal):
@@ -111,11 +134,6 @@ DEFAULT_SPEC = ActivitySpec()
 def spec_for(strategy: str | None) -> ActivitySpec:
     """La specification d'une strategie, ou le defaut prudent."""
     return ACTIVITY_REGISTRY.get(strategy or "", DEFAULT_SPEC)
-
-
-def is_ordinal(strategy: str | None) -> bool:
-    """Vrai si un ecart min/max a un sens sur cette echelle."""
-    return spec_for(strategy).ordinal
 
 
 def validate_payload(strategy, payload):

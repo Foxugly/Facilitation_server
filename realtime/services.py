@@ -10,7 +10,7 @@ from collections import Counter
 from django.conf import settings
 from django.utils import timezone
 
-from realtime.activities import RoomError, is_ordinal, spec_for, validate_payload
+from realtime.activities import RoomError, spec_for, validate_payload
 
 from rooms.models import (
     Item,
@@ -57,21 +57,6 @@ def _resolution_strategy(room):
     rnd = room.current_round
     snapshot = (rnd.deck_snapshot if rnd and rnd.deck_snapshot else room.deck_snapshot)
     return (snapshot or {}).get("resolutionStrategy", "")
-
-
-def _spread_for(strategy, card_values):
-    """Ecart min/max des votes, ou {None, None} si l'echelle n'est pas ordinale.
-
-    Sans ce garde-fou, un vote romain calculerait son ecart sur les seules valeurs
-    passant isdigit() : « +1 » et « -1 » echouent, « 0 » reussit, et l'ecran
-    afficherait « 0 - 0 » — un faux consensus — sous un vote pourtant partage.
-    """
-    if not is_ordinal(strategy):
-        return {"min": None, "max": None}
-    numeric = [int(v) for v in card_values if v.isdigit()]
-    if not numeric:
-        return {"min": None, "max": None}
-    return {"min": min(numeric), "max": max(numeric)}
 
 
 def resolve_participant(code, token):
@@ -470,10 +455,14 @@ def cast_response(room, participant, item_id, payload):
         # Y compris un item d'un AUTRE round : `rnd.items` ne contient que ceux
         # du round courant, un id valide ailleurs n'y figure pas.
         raise RoomError("state.invalid_transition", "Unknown item", "response.cast")
-    validate_payload(_resolution_strategy(room), payload)
-    card_value = payload.get("card", "")
-    if card_value not in _card_values(room):
+    strategy = _resolution_strategy(room)
+    validate_payload(strategy, payload)
+    # La regle "la valeur est jouable" vit dans le registre (`validate_value`),
+    # pas ici : une activite au payload different de {"card": ...} ne doit pas
+    # heriter de la regle "la carte appartient au deck", qui ne la concerne pas.
+    if not spec_for(strategy).validate_value(payload, _card_values(room)):
         raise RoomError("state.invalid_transition", "Unknown card value", "response.cast")
+    card_value = payload.get("card", "")
     Response.objects.update_or_create(
         item=item,
         participant=participant,
@@ -608,7 +597,7 @@ def deadline_iso(room):
 
 def _completed_participant_ids(rnd):
     """Participants ayant repondu a TOUS les items du round (tache 3) : « a
-    voté » n'est plus « a repondu a un item », qui laisserait passer pour
+    vote » n'est plus « a repondu a un item », qui laisserait passer pour
     complet un participant a mi-chemin. Tant qu'un round ne porte qu'un seul
     item — le cas du poker aujourd'hui — identique a l'ancien comportement.
     """
@@ -637,12 +626,17 @@ def participation(room):
 def revealed_payload(room):
     """Resultat d'un round revele — ONLY ever called in REVEALED state.
 
-    Depuis la tache 3, porte un bloc PAR ITEM (``items``), chacun agrege par
-    l'``aggregate`` que declare le registre pour la strategie active — le
+    Depuis la tache 3, porte un bloc PAR ITEM (``itemResults``), chacun agrege
+    par l'``aggregate`` que declare le registre pour la strategie active — le
     decompte ne vit plus ici, ``revealed_payload`` ne fait plus que
     l'assembler. Les cles plates historiques (``tally``, ``spread``,
     ``votes``) restent emises, recopiees du PREMIER item, le temps que
-    Facilitation_frontend bascule sur ``items``.
+    Facilitation_frontend bascule sur ``itemResults``.
+
+    ``itemResults`` et non ``items`` : ``state.sync`` emet deja une cle
+    ``items`` de forme differente (``[{id, text, sequence}]``, la liste des
+    items du round). Meme nom, deux formes : un client qui fusionne les deux
+    payloads ecraserait silencieusement sa liste d'items avec le decompte.
 
     Deux modes, choisis par le facilitateur a l'ouverture (``rnd.is_anonymous``) :
 
@@ -650,8 +644,8 @@ def revealed_payload(room):
     - **anonyme** (option des equipes payantes) : le decompte SEUL. La cle ``votes``
       n'est alors pas emise du tout — masquer cote client serait de la facade, une
       trame WS etant lisible dans les outils de developpement du navigateur.
-      L'invariant tient PAR ITEM : aucun bloc de ``items`` ne porte ``votes``
-      sur un round anonyme, pas seulement les cles plates.
+      L'invariant tient PAR ITEM : aucun bloc de ``itemResults`` ne porte
+      ``votes`` sur un round anonyme, pas seulement les cles plates.
 
     Le mode est fige a l'ouverture et annonce aux votants avant qu'ils votent : le
     basculer une fois les votes emis exposerait des gens qui se croyaient anonymes.
@@ -660,6 +654,9 @@ def revealed_payload(room):
     anonymous = bool(rnd and rnd.is_anonymous)
     spec = spec_for(_resolution_strategy(room))
     card_values = _card_values(room)
+    # Hisse hors de la boucle : meme requete pour chaque item, sinon un round a
+    # N items la relance N fois pour le meme resultat.
+    participants = list(room.participants.all())
     items_out = []
     for item in (rnd.items.all() if rnd else []):
         item_responses = responses_of(rnd, item)
@@ -674,7 +671,7 @@ def revealed_payload(room):
             by_participant = {r.participant_id: r.card_value for r in item_responses}
             block["votes"] = [
                 {"participantId": str(p.public_id), "cardValue": by_participant[p.id]}
-                for p in room.participants.all()
+                for p in participants
                 if p.id in by_participant
             ]
         items_out.append(block)
@@ -684,7 +681,7 @@ def revealed_payload(room):
         "anonymous": anonymous,
     }
     payload = {
-        "items": items_out,
+        "itemResults": items_out,
         "anonymous": anonymous,
         "tally": first["tally"],
         "spread": first["spread"],
