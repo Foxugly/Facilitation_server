@@ -22,7 +22,9 @@ d'atelier préparé en amont puis joué** (modèle Wooclap) :
 Trois conséquences structurent tout le reste :
 
 1. **Les items appartiennent au round**, pas à la room. Un round est une activité
-   jouée sur N items.
+   jouée sur N items. Un item est aussi bien un sujet posé par le facilitateur
+   qu'un **post-it écrit par un participant** : c'est le type d'activité qui dit
+   qui a le droit d'en créer.
 2. **Le type d'activité se choisit par round**, pas par room. Le scénario mélange
    les activités dans n'importe quel ordre.
 3. **Le chaînage est une liaison déclarée à la préparation, résolue en copie au
@@ -37,6 +39,8 @@ Trois conséquences structurent tout le reste :
 | Scénario | File de rounds préparés portés par la room, chacun avec ses items. `Room.subjects` disparaît. |
 | Type d'activité | Par round (`Round.vote_type` + `Round.config`). `Room.vote_type` n'est plus que le défaut à la création. |
 | Chaînage | Liaison déclarée (`Round.source_round` + règle), **copie** des items au démarrage, `Item.origin_item` pour la traçabilité. Jamais une référence vivante. |
+| Création d'items | Déclarée par le registre : facilitateur seul (poker) ou tous les participants (brainstorming). `Item.author` porte l'auteur. |
+| Subset du chaînage | **Mode choisi par liaison** : automatique (tout / top N) ou manuel (le facilitateur coche au démarrage du round consommateur). |
 | Stratégie | Strangler additif en cinq livraisons, chacune verte et déployable, le poker fonctionnant à chaque étape. |
 
 Approches écartées : la bascule en une seule migration (diff énorme, rien de
@@ -67,6 +71,12 @@ Room ──< Round (séquentiels, le scénario) ──< Item ──< Response
 
 - `round` (FK, CASCADE), `text` (300), `sequence`, `created_at`.
 - `origin_item` (FK self, null, SET_NULL) : l'item dont celui-ci est la copie.
+- `author` (FK `Participant`, null, SET_NULL) : qui l'a écrit. **Toujours
+  renseigné** quand un participant crée le post-it ; null quand c'est le
+  facilitateur qui pose un sujet au nom de la room. L'anonymat d'un
+  brainstorming est, comme pour `Response`, une **politique d'affichage
+  appliquée côté serveur** — le serveur n'émet pas la clé `author`, il ne la
+  vide pas en base.
 
 **`Response`** — ex-`Vote` :
 
@@ -117,7 +127,14 @@ Le contrat (`docs/superpowers/specs/delegation-poker-realtime-contract.md`) est
 **étendu, pas doublé**. `session.join` reste tel quel (exception assumée au ban du
 mot « session »).
 
-### Entrants (facilitateur sauf mention)
+### Entrants
+
+**Qui a le droit d'émettre `item.*` n'est pas fixé par le contrat mais par le
+registre** (`items_authored_by`). Pour le poker c'est le facilitateur seul, via
+`_require_facilitator` comme aujourd'hui ; pour un brainstorming, tout
+participant, et il ne peut alors modifier ou supprimer que **ses propres** items
+— le facilitateur, lui, peut toujours éditer et retirer n'importe lequel. Les
+autres messages restent facilitateur.
 
 | Message | Remplace | Livraison |
 |---|---|---|
@@ -160,7 +177,7 @@ du round courant.
 
 ## 6. Registre d'activités
 
-`realtime/activities.py` — `ActivitySpec` gagne quatre champs, et reste la
+`realtime/activities.py` — `ActivitySpec` gagne cinq champs, et reste la
 **seule** chose à toucher pour ajouter une activité :
 
 - `config_schema` / `payload_schema` : validation de `Round.config` et de
@@ -168,7 +185,10 @@ du round courant.
 - `aggregate(responses, items) -> results` : l'agrégateur, aujourd'hui dispersé
   dans `services.revealed_payload`.
 - `consumes` / `produces` (`items` / `results` / `none`) : ce que le chaînage a le
-  droit de brancher sur quoi. Le registre front déclare déjà ces deux champs, avec
+  droit de brancher sur quoi.
+- `items_authored_by` (`facilitator` | `participants`) : qui crée les items. C'est
+  ce champ, et non une condition en dur dans le consumer, qui autorise
+  `item.add` — sans quoi ajouter le brainstorming toucherait `consumers.py`. Le registre front déclare déjà ces deux champs, avec
   `consumes: 'subjects'` — à renommer en `'items'` dans la livraison 5a, pour que
   les deux registres parlent le même vocabulaire.
 
@@ -179,26 +199,44 @@ fichiers.
 
 ## 7. Chaînage
 
-À la préparation, un round déclare sa source :
+À la préparation, un round déclare sa source et **le mode de sélection** :
 
 ```
 Round.source_round = <round amont>
-Round.source_rule  = {"take": "results" | "items", "top": 3 | null}
+Round.source_rule  = {
+  "take": "items" | "results",       // ce qu'on reprend de la source
+  "mode": "auto" | "manual",         // comment le subset se décide
+  "top": 3 | null                    // mode auto : tout (null) ou les N premiers
+}
 ```
 
-Au moment où le round devient courant, le serveur **copie** : chaque élément
-retenu de la source devient un `Item` du round consommateur, `origin_item`
-renseigné. Le facilitateur peut ensuite éditer, supprimer, réordonner ces items
-avant d'ouvrir — c'est une copie, la source n'en sait rien.
+Un round sans `source_round` part de zéro : items saisis à la main, ou post-its
+écrits par les participants. « On ne reprend rien » est donc l'absence de
+liaison, pas une règle particulière.
 
-- Un round sans source : items saisis à la main (cas du poker).
-- « Send to Dot Voting » à chaud = la même opération, déclenchée pendant la séance
+**Mode `auto`** — au moment où le round devient courant, le serveur copie tout
+(ou les `top` premiers selon le classement produit par l'agrégateur de la
+source). Aucune intervention.
+
+**Mode `manual`** — le serveur présente au facilitateur les candidats de la
+source ; il coche ce qui passe, et la copie n'a lieu qu'à sa validation. C'est le
+mode qui correspond à l'atelier réel : on ne sait pas d'avance ce qu'un
+brainstorming produira, et un post-it hors-sujet doit pouvoir être écarté.
+
+Dans les deux cas la copie est identique : chaque élément retenu devient un
+`Item` du round consommateur, `origin_item` renseigné, et `author` recopié quand
+la source est un jeu de post-its — l'auteur d'une idée ne se perd pas en passant
+à l'étape suivante. Le facilitateur peut ensuite éditer, réordonner ou supprimer
+ces items avant d'ouvrir : c'est une copie, la source n'en sait rien.
+
+- « Send to Dot Voting » à chaud = une liaison `manual` créée pendant la séance
   plutôt que déclarée d'avance. Un seul chemin de code.
 - Source encore ouverte : autorisée (copie de l'état à l'instant T).
 - Ré-ouvrir la source **n'actualise pas** les copies déjà faites ; l'UI doit le
   signaler. Décision reprise telle quelle de `CLAUDE.md`.
 - Le registre refuse une liaison dont le `produces` de la source ne correspond pas
-  au `consumes` de la cible.
+  au `consumes` de la cible, et refuse `top` sur une source dont l'agrégateur ne
+  produit aucun classement.
 
 ## 8. Découpage
 
@@ -207,11 +245,11 @@ poker jouable de bout en bout, et les e2e front verts quand le contrat bouge.
 
 | # | Livraison | Contenu | Vérification |
 |---|---|---|---|
-| **5a** | `Item` | `Subject` → `Item` sur le round, migration de données, `Result.item`, `history` repointé, events `item.*` + `round.select`, `state.sync.items[]`, alias hérités. Front : `items[]` au lieu de `subject`. | e2e `vote-cycle`, `round-flow`, `team-room` verts sans modification fonctionnelle visible. |
+| **5a** | `Item` | `Subject` → `Item` sur le round, `Item.author` (inutilisé par le poker, mais le champ existe), migration de données, `Result.item`, `history` repointé, events `item.*` + `round.select`, `state.sync.items[]`, alias hérités. Front : `items[]` au lieu de `subject`. | e2e `vote-cycle`, `round-flow`, `team-room` verts sans modification fonctionnelle visible. |
 | **5b** | `Response` | `Vote` → `Response` + `payload` + `item`, unicité `(item, participant)`, agrégation par item, `response.cast`. Suppression des alias 5a. | Un round poker à 2 items se dépouille item par item. |
-| **5c** | Type par round | `Round.vote_type` + `config`, validation par le registre, `round.configure`. | Deux rounds de types différents dans une même room. |
+| **5c** | Type par round | `Round.vote_type` + `config`, validation par le registre, `round.configure`, **`items_authored_by` appliqué** (le poker reste facilitateur-seul, la porte est ouverte pour le brainstorming). | Deux rounds de types différents dans une même room ; `item.add` refusé à un votant sur un round poker. |
 | **5d** | Scénario préparé | `Round.sequence`, file de rounds, `scenario.*`, écran de préparation front. | Un scénario de 3 rounds préparé avant l'ouverture de la room, joué dans l'ordre. |
-| **5e** | Chaînage | `source_round`, `source_rule`, résolution en copie, `origin_item`, garde-fous du registre. | Round 1 poker → round 2 alimenté par ses résultats. |
+| **5e** | Chaînage | `source_round`, `source_rule` (`auto` et `manual`), résolution en copie, `origin_item`, recopie de `author`, garde-fous du registre, écran de sélection manuelle côté front. | Round 1 poker → round 2 alimenté par ses résultats, en auto **et** en manuel. |
 
 Dot Voting (étape 6) vient après 5e et, si le découpage tient sa promesse, ne
 touche que le registre plus deux composants Angular.
