@@ -225,7 +225,9 @@ def reorder_items(room, participant, item_ids):
     _require_facilitator(room, participant, "item.reorder")
     rnd = current_round(room)
     known = {i.id: i for i in (rnd.items.all() if rnd else [])}
-    if set(item_ids) != set(known):
+    # len() en plus du set() : sans elle, [1, 1, 2] passe pour {1, 2} et laisse une
+    # sequence non contigue -- le serveur fait autorite, pas de trou de validation.
+    if len(item_ids) != len(known) or set(item_ids) != set(known):
         raise RoomError("state.invalid_transition", "Item set mismatch", "item.reorder")
     for index, item_id in enumerate(item_ids, start=1):
         item = known[item_id]
@@ -474,12 +476,22 @@ def act_result(room, participant, chosen_value):
     # `history.api_views` lit encore `r.subject.text`, donc on en cree un minimal a
     # la volee plutot que de laisser tomber cette contrainte. Le lecteur reel est
     # desormais `item` ; `subject` est un doublon transitoire, comme le reste du
-    # design (§5) jusqu'a ce qu'une migration retire la colonne.
+    # design (§5) jusqu'a ce qu'une migration retire la colonne -- ce bloc entier
+    # (la creation de secours ET l'ecriture sur rnd.subject ci-dessous) disparait
+    # alors avec elle.
+    #
+    # On memorise la ligne creee sur `rnd.subject` : `select_round` remet un round
+    # ACTED a IDLE sans jamais toucher au subject (le nouveau flux ne le renseigne
+    # plus), donc un round rejoue plusieurs fois doit retomber sur LE MEME Subject
+    # de secours plutot que d'en semer un nouveau a chaque acte -- sans quoi celui
+    # du Result precedent perd sa derniere reference des le suivant.
     subject = rnd.subject
     if subject is None:
         subject = Subject.objects.create(
             room=room, text=item.text if item else "", sequence=room.subjects.count() + 1
         )
+        rnd.subject = subject
+        rnd.save(update_fields=["subject"])
     Result.objects.update_or_create(
         round=rnd,
         defaults={"subject": subject, "item": item, "chosen_value": chosen_value, "decided_by": participant},

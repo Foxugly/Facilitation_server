@@ -87,6 +87,22 @@ def test_reorder_items_renumbers_the_sequence(room_with_facilitator):
 
 
 @pytest.mark.django_db
+def test_reorder_items_rejects_duplicate_ids(room_with_facilitator):
+    """Le serveur fait autorite : [a, a] passerait le seul controle d'ensemble
+    (set([a, a]) == {a}) et laisserait une sequence non contigue."""
+    room, fac, _ = room_with_facilitator
+    services.set_current_item(room, fac, "A")
+    services.add_item(room, fac, "B")
+    room.refresh_from_db()
+    a = services.items_payload(room.current_round)[0]
+
+    with pytest.raises(RoomError) as exc:
+        services.reorder_items(room, fac, [a["id"], a["id"]])
+
+    assert exc.value.rejected_type == "item.reorder"
+
+
+@pytest.mark.django_db
 def test_agenda_lists_rounds_and_select_round_resets_to_idle(room_with_facilitator):
     """L'agenda designe desormais des ROUNDS. Le front renvoie l'id qu'il a recu,
     donc l'alias `subject.select` continue de fonctionner sans le savoir."""
