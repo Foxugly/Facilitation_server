@@ -13,7 +13,7 @@ from decks.seed import create_standard_deck
 from realtime import services
 from realtime.services import RoomError
 from rooms.codes import generate_token, generate_unique_code
-from rooms.models import Participant, Role, Room, RoundState, Subject
+from rooms.models import Participant, Role, Room, RoundState
 from rooms.snapshot import build_deck_snapshot
 from teams.models import Team, TeamMembership, TeamRole
 
@@ -111,14 +111,16 @@ def test_prepare_anonymous_on_free_room_is_refused(db):
 
 @pytest.mark.django_db
 def test_prepare_by_subject_id_selects_a_queued_subject(db):
+    """`subject_id` designe desormais un ROUND (design 2026-09-11 §5) : queuer un
+    second sujet, c'est ouvrir un second round via `add_scenario_item`."""
     room, fac, _ = _fresh_room()
     services.prepare_round(room, fac, subject_text="First")
-    second = Subject.objects.create(room=room, text="Second", sequence=2)
+    second_round_id = services.add_scenario_item(room, fac, "Second")
 
-    summary = services.prepare_round(room, fac, subject_id=second.id)
+    summary = services.prepare_round(room, fac, subject_id=second_round_id)
 
     assert summary["subject"] == "Second"
-    assert services._current_round(room).subject_id == second.id
+    assert services._current_round(room).id == second_round_id
 
 
 @pytest.mark.django_db

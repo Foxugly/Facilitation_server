@@ -136,13 +136,15 @@ def test_select_subject_clears_stale_deadline_after_reveal(room_with_facilitator
     room, facilitator, voter = room_with_facilitator
     services.set_timer(room, facilitator, True, 30)
     services.set_subject(room, facilitator, "Recrutement")
-    subject_id = services._current_round(room).subject_id
+    # L'alias `subject.select` designe desormais un ROUND (design 2026-09-11 §5) :
+    # l'id a reprendre est celui du round courant, plus celui du Subject legacy.
+    round_id = services._current_round(room).id
     services.open_vote(room, facilitator)
     assert services._current_round(room).vote_deadline is not None
     services.cast_vote(room, voter, "4")
     services.reveal(room, facilitator)
 
-    services.select_subject(room, facilitator, subject_id)
+    services.select_subject(room, facilitator, round_id)
 
     rnd = services._current_round(room)
     assert rnd.state == RoundState.IDLE

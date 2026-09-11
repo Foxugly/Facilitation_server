@@ -117,7 +117,9 @@ async def _wait_for_timer_task(code, timeout=2.0):
 
 
 def _current_subject_id(code):
-    return Room.objects.get(code=code).current_round.subject_id
+    # `subject.select` designe desormais un ROUND (design 2026-09-11 §5) : l'id a
+    # renvoyer est celui du round courant, pas du Subject legacy.
+    return Room.objects.get(code=code).current_round_id
 
 
 @pytest.mark.django_db(transaction=True)
