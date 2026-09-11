@@ -4,6 +4,7 @@
 seule table pour toutes les activites, jamais une table par activite.
 """
 import pytest
+from django.db import IntegrityError, transaction
 
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Item, Participant, Response, Room, Round, RoundState
@@ -74,9 +75,29 @@ def test_same_participant_can_respond_to_two_items_of_the_same_round(standard_de
 
 
 @pytest.mark.django_db
-def test_responding_twice_to_the_same_item_overwrites_the_first_response(standard_deck):
-    """Repondre deux fois au MEME item n'en cree pas une seconde : la
-    contrainte (item, participant) fait ecraser la premiere reponse."""
+def test_two_responses_to_the_same_item_violate_the_unique_constraint(standard_deck):
+    """La contrainte (item, participant) rejette elle-meme un second INSERT
+    direct sur le meme couple - pas une logique applicative qui l'imiterait.
+    Le second create() doit lever IntegrityError."""
+    room, rnd, item = _round_with_item(standard_deck)
+    p = Participant.objects.create(room=room, token=generate_token(), display_name="Alex")
+    Response.objects.create(round=rnd, participant=p, item=item, card_value="4", payload={"card": "4"})
+
+    with pytest.raises(IntegrityError):
+        with transaction.atomic():
+            # atomic() imbrique : le savepoint absorbe l'echec SQL, la
+            # transaction de test (pytest-django) reste utilisable ensuite.
+            Response.objects.create(round=rnd, participant=p, item=item, card_value="8", payload={"card": "8"})
+
+    assert Response.objects.filter(item=item, participant=p).count() == 1
+    assert Response.objects.get(item=item, participant=p).card_value == "4"
+
+
+@pytest.mark.django_db
+def test_update_or_create_overwrites_the_response_to_the_same_item(standard_deck):
+    """Cote applicatif (pas la contrainte elle-meme) : update_or_create() sur
+    (item, participant) ecrase la reponse existante au lieu d'en creer une
+    seconde - le chemin qu'empruntera le futur cast d'une reponse par item."""
     room, rnd, item = _round_with_item(standard_deck)
     p = Participant.objects.create(room=room, token=generate_token(), display_name="Alex")
 

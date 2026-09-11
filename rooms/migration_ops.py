@@ -66,7 +66,7 @@ def votes_to_responses(apps):
     Response = apps.get_model("rooms", "Response")
     Item = apps.get_model("rooms", "Item")
 
-    for response in Response.objects.all().select_related("round"):
+    for response in Response.objects.all():
         item = Item.objects.filter(round_id=response.round_id).order_by("sequence", "id").first()
         if item is None:
             # Aucun item : impossible depuis 0011, mais inventer un item ici
