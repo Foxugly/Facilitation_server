@@ -192,7 +192,7 @@ class Response(models.Model):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=("round", "participant"), name="uniq_vote_round_participant"),
+            models.UniqueConstraint(fields=("item", "participant"), name="uniq_response_item_participant"),
         ]
 
     def __str__(self):

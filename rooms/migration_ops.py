@@ -52,3 +52,26 @@ def subjects_to_items(apps):
             )
         result.item = item
         result.save(update_fields=["item"])
+
+
+def votes_to_responses(apps):
+    """Rattache chaque reponse a l'item de son round et transpose sa valeur de
+    carte en payload (design section 3).
+
+    Le payload est la forme commune a toutes les activites : le poker y ecrit
+    {"card": "<valeur>"}, une activite a venir y ecrira sa propre structure. La
+    colonne `card_value` reste remplie jusqu'en 0015 - le front de production
+    l'attend encore au moment ou cette migration tourne.
+    """
+    Response = apps.get_model("rooms", "Response")
+    Item = apps.get_model("rooms", "Item")
+
+    for response in Response.objects.all().select_related("round"):
+        item = Item.objects.filter(round_id=response.round_id).order_by("sequence", "id").first()
+        if item is None:
+            # Aucun item : impossible depuis 0011, mais inventer un item ici
+            # fabriquerait un sujet que personne n'a jamais pose.
+            continue
+        response.item = item
+        response.payload = {"card": response.card_value}
+        response.save(update_fields=["item", "payload"])

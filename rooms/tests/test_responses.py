@@ -56,3 +56,38 @@ def test_payload_defaults_to_an_empty_dict(standard_deck):
     r = Response.objects.create(round=rnd, participant=p, item=item)
 
     assert r.payload == {}
+
+
+@pytest.mark.django_db
+def test_same_participant_can_respond_to_two_items_of_the_same_round(standard_deck):
+    """La contrainte d'unicite porte desormais sur (item, participant), pas
+    (round, participant) : un participant peut repondre a deux items du meme
+    round - deux lignes distinctes, pas un IntegrityError."""
+    room, rnd, item_a = _round_with_item(standard_deck)
+    item_b = Item.objects.create(round=rnd, text="Delai ?", sequence=2)
+    p = Participant.objects.create(room=room, token=generate_token(), display_name="Alex")
+
+    Response.objects.create(round=rnd, participant=p, item=item_a, card_value="4", payload={"card": "4"})
+    Response.objects.create(round=rnd, participant=p, item=item_b, card_value="8", payload={"card": "8"})
+
+    assert Response.objects.filter(round=rnd, participant=p).count() == 2
+
+
+@pytest.mark.django_db
+def test_responding_twice_to_the_same_item_overwrites_the_first_response(standard_deck):
+    """Repondre deux fois au MEME item n'en cree pas une seconde : la
+    contrainte (item, participant) fait ecraser la premiere reponse."""
+    room, rnd, item = _round_with_item(standard_deck)
+    p = Participant.objects.create(room=room, token=generate_token(), display_name="Alex")
+
+    Response.objects.update_or_create(
+        item=item, participant=p, defaults={"round": rnd, "card_value": "4", "payload": {"card": "4"}}
+    )
+    Response.objects.update_or_create(
+        item=item, participant=p, defaults={"round": rnd, "card_value": "8", "payload": {"card": "8"}}
+    )
+
+    assert Response.objects.filter(item=item, participant=p).count() == 1
+    r = Response.objects.get(item=item, participant=p)
+    assert r.card_value == "8"
+    assert r.payload == {"card": "8"}
