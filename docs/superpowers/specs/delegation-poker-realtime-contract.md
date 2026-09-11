@@ -168,7 +168,7 @@ Codes attendus (liste extensible) : `protocol.version`, `forbidden.not_facilitat
 
 > Ajouté 2026-09-11, livraison 5a (`docs/superpowers/plans/2026-09-11-5a-items-du-round.md`).
 > Le round porte désormais **N items séquentiels** (`Round.items`, migrations 0010-0012),
-> et non plus un sujet unique. Le WS gagne cinq nouvelles intentions et quatre nouveaux
+> et non plus un sujet unique. Le WS gagne cinq nouvelles intentions et cinq nouveaux
 > faits ; les anciens messages `subject.*`/`agenda.updated` restent en service comme
 > **alias hérités**, décrits en 8.1.b.
 
@@ -184,7 +184,8 @@ Entrants (facilitateur seul, comme les autres intentions de contrôle) :
 | `item.reorder` | `{ itemIds: [] }` | Refixe la séquence des items du round courant. Refusé si l'ensemble d'ids ne correspond pas exactement aux items existants. |
 | `round.select` | `{ roundId }` | Reprend un round du scénario (le remet à `idle` s'il ne l'était pas). Ex-`subject.select`. |
 
-Sortants (tous) :
+Sortants (tous) — **exhaustif**, y compris les faits déjà documentés en §5 quand une de
+ces intentions les déclenche aussi :
 
 | `type` | `payload` | Émis après |
 |--------|-----------|------------|
@@ -193,6 +194,12 @@ Sortants (tous) :
 | `item.removed` | `{ roundId, items, itemId }` | `item.remove` |
 | `item.reordered` | `{ roundId, items, itemId: null }` | `item.reorder` |
 | `round.selected` | `{ roundId, items, text, nextState: "idle" }` | `round.select` |
+| `agenda.updated` (§5) | `{ agenda }` | `item.add`, `item.update`, `item.remove`, `round.select` |
+| `subject.updated` (§5) | `{ text }` | `item.add`, `item.update`, `round.select` |
+| `vote.wasReset` (§5) | `{ nextState: "idle" }` | `round.select` |
+
+`item.reorder` est la seule des cinq intentions à ne déclencher **aucun** fait annexe :
+elle émet uniquement `item.reordered`.
 
 Forme commune `{roundId, items, itemId}` : `roundId` est l'id du round courant (`null` s'il
 n'y en a aucun), `items` la liste complète et à jour des items de ce round

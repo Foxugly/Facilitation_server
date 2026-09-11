@@ -340,7 +340,7 @@ facilitateur puisse reformuler un sujet sans réécrire l'historique de l'activi
 ## Plan, dans l'ordre
 
 1. ~~**Renommer `VoteSession` → `Round`**, migrations comprises.~~ ✅ **fait** — migration
-   `0009_votesession_to_round`, 258 passed. Côté back uniquement : le contrat WS est
+   `0009_votesession_to_round`, 240 passed. Côté back uniquement : le contrat WS est
    inchangé, donc `Facilitation_frontend` n'a rien à reprendre.
 2. **Étoffer l'e2e front** — il n'y a qu'un seul spec, `vote-cycle.spec.ts`. C'est le filet
    qui protège le poker pendant l'extraction.
