@@ -125,6 +125,7 @@ Envoyé à un seul client (au `join` initial, à la reconnexion, à l'arrivée d
 
 - `myVote` = **le vote du client destinataire uniquement** (les autres restent secrets tant que `roundState !== "revealed"`).
 - Si `roundState === "revealed"`, `state.sync` inclut aussi le `tally` (un retardataire qui arrive en `revealed` **voit les résultats**, et votera au tour suivant). Comme `vote.revealed`, il s'agit d'un décompte anonyme : jamais de lien participant → carte.
+- **Depuis 5a** (§8.1), `state.sync` porte aussi `items` — la liste des items du round courant, même forme que dans les faits `item.*` (`[{id, text, sequence}]`) — et `round` — `{id, state}` du round courant (`id: null` si aucun round actif). `subject` reste émis en doublon, en alias déprécié : les deux coexistent jusqu'à la bascule front de 5b (§8.1.b).
 
 ---
 
@@ -160,6 +161,56 @@ Codes attendus (liste extensible) : `protocol.version`, `forbidden.not_facilitat
 - **Heartbeat** : `ping`/`pong` applicatif toutes les ~20 s (Channels ne détecte pas seul une connexion morte). Après **N pongs manqués**, le serveur considère la connexion perdue → présence à jour, garde-fou éventuel.
 - **Reconnexion** : le client retente avec backoff, rejoue `session.join` (token) → reçoit `state.sync`. **Restauration complète** (salle + vote + rôle).
 - **Format** : JSON, enveloppe §2. Un `type` inconnu du serveur → `error` (`protocol.version` ou `state.invalid_transition`), jamais d'application partielle.
+
+---
+
+## 8.1 Items du round (5a)
+
+> Ajouté 2026-09-11, livraison 5a (`docs/superpowers/plans/2026-09-11-5a-items-du-round.md`).
+> Le round porte désormais **N items séquentiels** (`Round.items`, migrations 0010-0012),
+> et non plus un sujet unique. Le WS gagne cinq nouvelles intentions et quatre nouveaux
+> faits ; les anciens messages `subject.*`/`agenda.updated` restent en service comme
+> **alias hérités**, décrits en 8.1.b.
+
+### 8.1.a Nouveaux événements
+
+Entrants (facilitateur seul, comme les autres intentions de contrôle) :
+
+| `type` | `payload` | Effet |
+|--------|-----------|-------|
+| `item.add` | `{ text }` | Ajoute un item au round courant (en crée un si aucun round actif). |
+| `item.update` | `{ itemId, text }` | Réécrit le texte d'un item existant. |
+| `item.remove` | `{ itemId }` | Retire un item du round courant. Refusé si l'item porte déjà un `Result` (ne réécrit pas l'historique). |
+| `item.reorder` | `{ itemIds: [] }` | Refixe la séquence des items du round courant. Refusé si l'ensemble d'ids ne correspond pas exactement aux items existants. |
+| `round.select` | `{ roundId }` | Reprend un round du scénario (le remet à `idle` s'il ne l'était pas). Ex-`subject.select`. |
+
+Sortants (tous) :
+
+| `type` | `payload` | Émis après |
+|--------|-----------|------------|
+| `item.added` | `{ roundId, items, itemId }` | `item.add` |
+| `item.updated` | `{ roundId, items, itemId }` | `item.update` |
+| `item.removed` | `{ roundId, items, itemId }` | `item.remove` |
+| `item.reordered` | `{ roundId, items, itemId: null }` | `item.reorder` |
+| `round.selected` | `{ roundId, items, text, nextState: "idle" }` | `round.select` |
+
+Forme commune `{roundId, items, itemId}` : `roundId` est l'id du round courant (`null` s'il
+n'y en a aucun), `items` la liste complète et à jour des items de ce round
+(`[{id, text, sequence}]`, ordre du facilitateur), `itemId` l'item concerné par l'action
+(`null` pour `item.reorder`, qui touche tous les items à la fois). `round.selected` porte en
+plus `text` (le texte du premier item du round sélectionné, pour compatibilité avec les
+clients qui n'affichent qu'un sujet) et `nextState`, toujours `"idle"`.
+
+### 8.1.b Alias hérités — supprimés en 5b
+
+> Note datée 2026-09-11 : `subject.set`, `subject.add`, `subject.select` (entrants) et
+> `subject.updated`, `agenda.updated` (sortants) sont des **alias hérités** vers les
+> intentions ci-dessus, conservés le temps que `Facilitation_frontend` bascule sur
+> `item.*`/`round.select`. Forme de payload et comportement **inchangés** (§4, §5) — aucune
+> intention n'a été retirée. `subject.select` délègue intégralement à `round.select` et
+> hérite donc aussi de ses diffusions (`vote.wasReset`, `round.selected`), en plus de
+> `subject.updated`/`agenda.updated`. **Ces alias seront supprimés en 5b** : ne pas leur
+> ajouter de nouveau comportement, ne construire aucune fonctionnalité neuve dessus.
 
 ---
 

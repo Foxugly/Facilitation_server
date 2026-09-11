@@ -38,7 +38,7 @@ gunicorn/WSGI, parce que Channels l'exige. La brique temps réel est isolée dan
 |---|---|---|
 | `Room` | l'atelier / la réunion. Persiste sur toute la séance. | existe |
 | `Round` | une activité lancée dans la room. | **existe** (ex-`VoteSession`, migration 0009) |
-| `Item` | un sujet manipulé par une activité. | **à renommer depuis `Subject`** |
+| `Item` | un sujet manipulé par une activité. | **existe** (migrations 0010-0012) |
 | `Response` | la contribution d'un participant à un round. | **à renommer depuis `Vote`** |
 
 **Le mot « Session » est banni du domaine.** Il entrait en collision frontale avec l'ancien
@@ -71,7 +71,7 @@ py -m venv .venv
 ```
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 240 passed
+.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 258 passed
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py # un fichier
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py::test_nom -x
 .\.venv\Scripts\python.exe -m pytest -k "reveal and not deck"
@@ -340,15 +340,19 @@ facilitateur puisse reformuler un sujet sans réécrire l'historique de l'activi
 ## Plan, dans l'ordre
 
 1. ~~**Renommer `VoteSession` → `Round`**, migrations comprises.~~ ✅ **fait** — migration
-   `0009_votesession_to_round`, 240 passed. Côté back uniquement : le contrat WS est
+   `0009_votesession_to_round`, 258 passed. Côté back uniquement : le contrat WS est
    inchangé, donc `Facilitation_frontend` n'a rien à reprendre.
 2. **Étoffer l'e2e front** — il n'y a qu'un seul spec, `vote-cycle.spec.ts`. C'est le filet
    qui protège le poker pendant l'extraction.
 3. **Extraire le poker** de `room.component` en première activité. Rendu identique, donc
    vérifiable à l'œil.
 4. **Registre d'activités**, back et front.
-5. **N items par round** : `Round.subject` (FK unique) → jeu d'items, `Response.card_value`
-   (CharField) → payload JSON. **Additif** : le poker garde ses champs actuels.
+5. **N items par round**, désormais un programme en cinq livraisons **5a → 5e**, détaillé
+   dans `docs/superpowers/specs/2026-09-11-scenario-et-items-design.md` (conception) et
+   `docs/superpowers/plans/2026-09-11-5a-items-du-round.md` (plan). **5a est faite** :
+   `Round.items` (migrations 0010-0012), les intentions `item.*` + `round.select`, et
+   `items`/`round` dans `state.sync` (contrat §8.1). Les alias `subject.*`/`agenda.updated`
+   restent en service et meurent en 5b. **Additif** : le poker garde ses champs actuels.
 6. **Dot Voting** — première activité neuve. Choisie avant Weighted Ranking parce qu'elle
    exerce le modèle N-items sans le risque du drag & drop tactile.
 
@@ -357,7 +361,7 @@ Weighted Ranking, QCM/Poll, ROTI.
 
 ## Règles de travail
 
-- **`pytest` vert à chaque commit.** Référence actuelle : 240 passed.
+- **`pytest` vert à chaque commit.** Référence actuelle : 258 passed.
 - Le poker existant doit continuer à fonctionner **à chaque étape**. Aucune étape ne livre
   une régression « qu'on corrigera après ».
 - Étapes petites et testables. Pas de réécriture de masse.
@@ -376,9 +380,10 @@ Weighted Ranking, QCM/Poll, ROTI.
   description. L'API REST actuelle se limite à créer / rejoindre une room.
 - **DRF uniquement.** Aucune trace de Django Ninja dans le dépôt ; ne pas l'introduire sans
   décision explicite.
-- **`Room.owner`, `can_facilitate`, `can_administer`, `facilitator_live_view`, `origin_item`
+- **`Room.owner`, `can_facilitate`, `can_administer`, `facilitator_live_view`
   n'existent pas.** Seul `Team.owner` existe. L'autorité en room passe aujourd'hui par
-  `rooms.Role.FACILITATOR` + `_require_facilitator`.
+  `rooms.Role.FACILITATOR` + `_require_facilitator`. `origin_item` **existe** (`Item.origin_item`,
+  migration 0010) mais est **inutilisé jusqu'en 5e** (chaînage entre activités).
 - **`reveal_on_timeout` révèle automatiquement**, alors que la cible veut un reveal manuel.
 - **CLOSED n'existe pas** dans `RoundState`.
 
