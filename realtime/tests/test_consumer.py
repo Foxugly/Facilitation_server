@@ -116,9 +116,7 @@ async def _wait_for_timer_task(code, timeout=2.0):
     return consumers._timer_tasks.get(code)
 
 
-def _current_subject_id(code):
-    # `subject.select` designe desormais un ROUND (design 2026-09-11 §5) : l'id a
-    # renvoyer est celui du round courant, pas du Subject legacy.
+def _current_round_id(code):
     return Room.objects.get(code=code).current_round_id
 
 
@@ -413,7 +411,7 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     # 4) subject.select on the very subject/round currently open must cancel B
     # immediately (the _cancel_timeout() call in the subject.select branch). Without
     # it, B would survive untouched here.
-    subject_id = await database_sync_to_async(_current_subject_id)(code)
+    subject_id = await database_sync_to_async(_current_round_id)(code)
     await fac.send_json_to({"v": 1, "type": "subject.select", "payload": {"subjectId": subject_id}})
     await _drain_until(voter, "agenda.updated")
     assert code not in consumers._timer_tasks, (
