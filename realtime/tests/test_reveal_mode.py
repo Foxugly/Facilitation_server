@@ -11,7 +11,7 @@ from decks.seed import create_standard_deck
 from realtime import services
 from realtime.services import RoomError
 from rooms.codes import generate_token, generate_unique_code
-from rooms.models import Participant, Role, Room, RoundState, Subject, Round
+from rooms.models import Item, Participant, Role, Room, RoundState, Round
 from rooms.snapshot import build_deck_snapshot
 from teams.models import Team, TeamMembership, TeamRole
 
@@ -26,8 +26,8 @@ def _room(team=None):
     room.save()
     fac = Participant.objects.create(room=room, token=generate_token(), display_name="Sam", role=Role.FACILITATOR)
     voter = Participant.objects.create(room=room, token=generate_token(), display_name="Alex", role=Role.VOTER)
-    subject = Subject.objects.create(room=room, text="Deploys")
-    rnd = Round.objects.create(room=room, subject=subject, facilitator=fac)
+    rnd = Round.objects.create(room=room, facilitator=fac)
+    Item.objects.create(round=rnd, text="Deploys", sequence=1)
     room.current_round = rnd
     room.save(update_fields=["current_round"])
     return room, fac, voter, rnd

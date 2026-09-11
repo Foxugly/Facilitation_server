@@ -12,7 +12,7 @@ from decks.seed import create_standard_deck
 from realtime import services
 from realtime.services import RoomError
 from rooms.codes import generate_token, generate_unique_code
-from rooms.models import Participant, Role, Room, RoundState, Subject, Round
+from rooms.models import Item, Participant, Role, Room, RoundState, Round
 from rooms.snapshot import build_deck_snapshot
 from teams.models import Team, TeamMembership, TeamRole
 
@@ -82,8 +82,8 @@ def test_cannot_switch_to_a_deck_the_room_did_not_freeze(room_with_two_decks):
 def test_cannot_switch_mid_round(room_with_two_decks):
     """Votes already cast reference the current deck's values."""
     room, fac, _, _, other = room_with_two_decks
-    subject = Subject.objects.create(room=room, text="Deploys")
-    rnd = Round.objects.create(room=room, subject=subject, facilitator=fac, state=RoundState.OPEN)
+    rnd = Round.objects.create(room=room, facilitator=fac, state=RoundState.OPEN)
+    Item.objects.create(round=rnd, text="Deploys", sequence=1)
     room.current_round = rnd
     room.save(update_fields=["current_round"])
 
@@ -96,8 +96,8 @@ def test_cannot_switch_mid_round(room_with_two_decks):
 def test_open_round_freezes_its_deck_and_survives_a_later_switch(room_with_two_decks):
     """A past round keeps its own deck, so history can't be relabelled by a switch."""
     room, fac, _, standard, other = room_with_two_decks
-    subject = Subject.objects.create(room=room, text="Deploys")
-    rnd = Round.objects.create(room=room, subject=subject, facilitator=fac)
+    rnd = Round.objects.create(room=room, facilitator=fac)
+    Item.objects.create(round=rnd, text="Deploys", sequence=1)
     room.current_round = rnd
     room.save(update_fields=["current_round"])
 
@@ -131,8 +131,8 @@ def test_vote_values_follow_the_round_deck_not_the_room(room_with_two_decks):
     """A card valid in the room's new deck must not be accepted in a round frozen
     on the old one."""
     room, fac, voter, _, other = room_with_two_decks
-    subject = Subject.objects.create(room=room, text="Deploys")
-    rnd = Round.objects.create(room=room, subject=subject, facilitator=fac)
+    rnd = Round.objects.create(room=room, facilitator=fac)
+    Item.objects.create(round=rnd, text="Deploys", sequence=1)
     room.current_round = rnd
     room.save(update_fields=["current_round"])
     services.open_vote(room, fac)  # freezes the standard deck (values "1".."7")

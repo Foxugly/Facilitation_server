@@ -13,12 +13,12 @@ from django.utils import timezone
 from realtime.activities import is_ordinal
 
 from rooms.models import (
+    Item,
     Participant,
     Result,
     Role,
     Room,
     RoundState,
-    Subject,
     Vote,
     Round,
 )
@@ -104,12 +104,12 @@ def set_connected(participant, connected):
     participant.save(update_fields=["is_connected", "last_seen_at"])
 
 
-def _current_round(room):
+def current_round(room):
     return room.current_round
 
 
 def _require_facilitator(room, participant, rejected_type):
-    rnd = _current_round(room)
+    rnd = current_round(room)
     # Authority is the round facilitator; before any round exists, the room's
     # sole facilitator participant holds it (contract §2).
     if rnd and rnd.facilitator_id:
@@ -123,70 +123,194 @@ def touch(room):
     room.touch()
 
 
-def set_subject(room, participant, text):
-    _require_facilitator(room, participant, "subject.set")
-    rnd = _current_round(room)
-    if rnd and rnd.state == RoundState.IDLE:
-        rnd.subject.text = text
-        rnd.subject.save(update_fields=["text"])
+def items_payload(rnd):
+    """Les items d'un round, dans l'ordre du facilitateur."""
+    if rnd is None:
+        return []
+    return [{"id": i.id, "text": i.text, "sequence": i.sequence} for i in rnd.items.all()]
+
+
+def _new_round(room, participant, text):
+    """Un round neuf portant un premier item. Le scenario est une file de rounds :
+    poser un nouveau sujet, c'est ouvrir un round de plus."""
+    rnd = Round.objects.create(room=room, state=RoundState.IDLE, facilitator=participant)
+    Item.objects.create(round=rnd, text=text, sequence=1)
+    return rnd
+
+
+def _first_item(rnd):
+    return rnd.items.first() if rnd else None
+
+
+def set_current_item(room, participant, text):
+    """Ex-`set_subject`, semantique inchangee : on reecrit l'item du round courant
+    s'il est encore idle, sinon on ouvre un round neuf."""
+    _require_facilitator(room, participant, "item.update")
+    rnd = current_round(room)
+    first = _first_item(rnd)
+    if rnd and rnd.state == RoundState.IDLE and first:
+        first.text = text
+        first.save(update_fields=["text"])
     else:
-        seq = room.subjects.count() + 1
-        subject = Subject.objects.create(room=room, text=text, sequence=seq)
-        rnd = Round.objects.create(
-            room=room, subject=subject, state=RoundState.IDLE, facilitator=participant
-        )
+        rnd = _new_round(room, participant, text)
         room.current_round = rnd
         room.save(update_fields=["current_round"])
     room.touch()
     return text
 
 
-def current_subject_text(room):
-    s = _current_round(room)
-    return s.subject.text if s else ""
+def current_item_text(room):
+    """Ex-`current_subject_text`."""
+    first = _first_item(current_round(room))
+    return first.text if first else ""
+
+
+def add_item(room, participant, text):
+    """Ajoute un item AU ROUND COURANT — le N-items du design §3."""
+    _require_facilitator(room, participant, "item.add")
+    text = (text or "").strip()
+    if not text:
+        raise RoomError("state.invalid_transition", "Empty item", "item.add")
+    rnd = current_round(room)
+    if rnd is None:
+        rnd = _new_round(room, participant, text)
+        room.current_round = rnd
+        room.save(update_fields=["current_round"])
+        item = _first_item(rnd)
+    else:
+        seq = rnd.items.count() + 1
+        item = Item.objects.create(round=rnd, text=text, sequence=seq)
+    room.touch()
+    return {"id": item.id, "text": item.text, "sequence": item.sequence}
+
+
+def _item_of_room(room, item_id, rejected_type):
+    item = Item.objects.filter(id=item_id, round__room=room).select_related("round").first()
+    if item is None:
+        raise RoomError("state.invalid_transition", "Unknown item", rejected_type)
+    return item
+
+
+def update_item(room, participant, item_id, text):
+    _require_facilitator(room, participant, "item.update")
+    text = (text or "").strip()
+    if not text:
+        raise RoomError("state.invalid_transition", "Empty item", "item.update")
+    item = _item_of_room(room, item_id, "item.update")
+    # Meme garde que remove_item, et pour la meme raison : `history` affiche
+    # `Result.item.text` (history/api_views.py), donc reformuler un item deja acte
+    # reecrirait retroactivement le rapport deja envoye aux managers.
+    if item.results.exists():
+        raise RoomError("state.invalid_transition", "Item already decided", "item.update")
+    item.text = text
+    item.save(update_fields=["text"])
+    room.touch()
+    return {"id": item.id, "text": item.text, "sequence": item.sequence}
+
+
+def remove_item(room, participant, item_id):
+    _require_facilitator(room, participant, "item.remove")
+    item = _item_of_room(room, item_id, "item.remove")
+    # Un round en vol (open/revealed/acted) ne perd pas ses items : les votes deja
+    # emis les designent, et `act_result` se retrouverait sans item ou accrocher son
+    # resultat — `Result.item` est NOT NULL, l'IntegrityError qui s'ensuivait
+    # n'etait pas un RoomError et fermait la socket du facilitateur.
+    if item.round.state != RoundState.IDLE:
+        raise RoomError("state.invalid_transition", "Round already started", "item.remove")
+    # Un item deja acte porte un resultat fige : le retirer reecrirait
+    # l'historique, que le design interdit explicitement. Garde distincte de la
+    # precedente : un round acte puis reinitialise est IDLE et garde son Result.
+    if item.results.exists():
+        raise RoomError("state.invalid_transition", "Item already decided", "item.remove")
+    rnd = item.round
+    item.delete()
+    for index, remaining in enumerate(rnd.items.all(), start=1):
+        if remaining.sequence != index:
+            remaining.sequence = index
+            remaining.save(update_fields=["sequence"])
+    room.touch()
+    return item_id
+
+
+def reorder_items(room, participant, item_ids):
+    _require_facilitator(room, participant, "item.reorder")
+    rnd = current_round(room)
+    known = {i.id: i for i in (rnd.items.all() if rnd else [])}
+    # len() en plus du set() : sans elle, [1, 1, 2] passe pour {1, 2} et laisse une
+    # sequence non contigue -- le serveur fait autorite, pas de trou de validation.
+    if len(item_ids) != len(known) or set(item_ids) != set(known):
+        raise RoomError("state.invalid_transition", "Item set mismatch", "item.reorder")
+    for index, item_id in enumerate(item_ids, start=1):
+        item = known[item_id]
+        item.sequence = index
+        item.save(update_fields=["sequence"])
+    room.touch()
+    return items_payload(rnd)
 
 
 def build_agenda(room):
-    """The scenario: every subject of the room with its status (current / done / pending)
-    and, when acted, its retained value."""
-    current_id = room.current_round.subject_id if room.current_round_id else None
+    """Le scenario : chaque ROUND de la salle avec son etat et, s'il a ete acte, la
+    valeur retenue. L'`id` est desormais un id de round — le front le renvoie tel
+    quel, donc l'alias `subject.select` reste juste sans rien savoir du changement.
+    """
+    current_id = room.current_round_id
     out = []
-    for s in room.subjects.all().order_by("sequence").prefetch_related("rounds__result"):
-        result = None
-        acted = next((rd for rd in s.rounds.all() if rd.state == RoundState.ACTED and hasattr(rd, "result")), None)
-        if acted:
-            result = acted.result.chosen_value
-        status = "current" if s.id == current_id else ("done" if result is not None else "pending")
-        out.append({"id": s.id, "text": s.text, "status": status, "result": result})
+    for rnd in room.rounds.all().order_by("created_at", "id").prefetch_related("items", "results"):
+        first = rnd.items.first()
+        # Le filtre d'etat n'est pas decoratif : `vote.reset` remet le round a IDLE
+        # en LAISSANT son Result en place. Sans lui, un round reinitialise
+        # reapparaitrait « done », avec l'ancienne valeur, alors qu'il est a rejouer.
+        acted = rnd.results.first() if rnd.state == RoundState.ACTED else None
+        result = acted.chosen_value if acted else None
+        status = "current" if rnd.id == current_id else ("done" if result is not None else "pending")
+        out.append({
+            "id": rnd.id,
+            "text": first.text if first else "",
+            "status": status,
+            "result": result,
+            "items": items_payload(rnd),
+        })
     return out
 
 
-def add_subject(room, participant, text):
-    """Add a subject to the scenario. The first one auto-becomes the current vote."""
-    _require_facilitator(room, participant, "subject.add")
-    text = (text or "").strip()
-    if not text:
-        raise RoomError("state.invalid_transition", "Empty subject", "subject.add")
-    seq = room.subjects.count() + 1
-    subject = Subject.objects.create(room=room, text=text, sequence=seq)
-    if room.current_round_id is None:
-        rnd = Round.objects.create(room=room, subject=subject, state=RoundState.IDLE, facilitator=participant)
-        room.current_round = rnd
-        room.save(update_fields=["current_round"])
-    room.touch()
-    return subject.id
+def _replay_round(room, participant, source):
+    """Un round NEUF portant une COPIE des items de `source` (design §4).
+
+    Copie et non reference : le facilitateur doit pouvoir reformuler le sujet du
+    nouveau tour sans reecrire l'historique du precedent. `origin_item` remonte a
+    l'item d'origine — la premiere copie, comme le fait la migration de donnees —
+    et l'auteur suit l'item, un post-it ne perdant pas son auteur en changeant de
+    round (design §7).
+    """
+    rnd = Round.objects.create(room=room, state=RoundState.IDLE, facilitator=participant)
+    for item in source.items.all():
+        Item.objects.create(
+            round=rnd,
+            text=item.text,
+            sequence=item.sequence,
+            author=item.author,
+            origin_item=item.origin_item or item,
+        )
+    return rnd
 
 
-def select_subject(room, participant, subject_id):
-    """Pick a scenario subject to vote on next → resets the round to idle for it."""
-    _require_facilitator(room, participant, "subject.select")
-    subject = room.subjects.filter(id=subject_id).first()
-    if subject is None:
-        raise RoomError("state.invalid_transition", "Unknown subject", "subject.select")
-    rnd = subject.rounds.exclude(state=RoundState.ACTED).first()
+def select_round(room, participant, round_id):
+    """Ex-`select_subject` : reprendre un round du scenario le remet a idle.
+
+    Un round ACTE n'est jamais rejoue EN PLACE : on ouvre un round neuf portant une
+    copie de ses items, exactement comme l'ancien `select_subject` creait un round
+    de plus des que le precedent etait acte. Le rejouer en place laisserait le deck
+    fige du tour precedent (premier vote rejete en « Unknown card value » apres un
+    changement de deck), collerait son mode d'anonymat, et ECRASERAIT son Result au
+    lieu d'en produire un second.
+    """
+    _require_facilitator(room, participant, "round.select")
+    rnd = room.rounds.filter(id=round_id).first()
     if rnd is None:
-        rnd = Round.objects.create(room=room, subject=subject, state=RoundState.IDLE, facilitator=participant)
-    else:
+        raise RoomError("state.invalid_transition", "Unknown round", "round.select")
+    if rnd.state == RoundState.ACTED:
+        rnd = _replay_round(room, participant, rnd)
+    elif rnd.state != RoundState.IDLE:
         rnd.state = RoundState.IDLE
         rnd.opened_at = None
         rnd.revealed_at = None
@@ -197,7 +321,23 @@ def select_subject(room, participant, subject_id):
     room.current_round = rnd
     room.save(update_fields=["current_round"])
     room.touch()
-    return subject.text
+    first = rnd.items.first()
+    return {"roundId": rnd.id, "items": items_payload(rnd), "text": first.text if first else ""}
+
+
+def add_scenario_item(room, participant, text):
+    """Ex-`add_subject` : ajoute une entree au scenario, donc un ROUND de plus.
+    Retourne l'id du round cree — c'est lui que l'agenda designe."""
+    _require_facilitator(room, participant, "item.add")
+    text = (text or "").strip()
+    if not text:
+        raise RoomError("state.invalid_transition", "Empty item", "item.add")
+    rnd = _new_round(room, participant, text)
+    if room.current_round_id is None:
+        room.current_round = rnd
+        room.save(update_fields=["current_round"])
+    room.touch()
+    return rnd.id
 
 
 def set_timer(room, participant, enabled, seconds):
@@ -245,13 +385,15 @@ def prepare_round(
     error). Reuses the single-setting services so the rules stay in one place.
     """
     _require_facilitator(room, participant, "round.prepare")
-    # 1) Make the chosen subject the current one (creating/resetting its round).
+    # 1) Make the chosen round current (creating/resetting it). `subject_id` designe
+    # desormais un ROUND (build_agenda l'a toujours appele `id`) : l'alias vit sans
+    # le savoir.
     if subject_id is not None:
-        select_subject(room, participant, subject_id)
+        select_round(room, participant, subject_id)
     elif subject_text is not None and subject_text.strip():
-        set_subject(room, participant, subject_text.strip())
-    rnd = _current_round(room)
-    if rnd is None or not rnd.subject.text.strip():
+        set_current_item(room, participant, subject_text.strip())
+    rnd = current_round(room)
+    if rnd is None or not (_first_item(rnd) and _first_item(rnd).text.strip()):
         raise RoomError("state.invalid_transition", "No subject set", "round.prepare")
     if rnd.state != RoundState.IDLE:
         raise RoomError("state.invalid_transition", "Round already started", "round.prepare")
@@ -273,7 +415,7 @@ def prepare_round(
     room.refresh_from_db(fields=["deck_snapshot", "timer_enabled", "timer_seconds"])
     rnd.refresh_from_db(fields=["is_anonymous"])
     return {
-        "subject": rnd.subject.text,
+        "subject": current_item_text(room),
         "deckSnapshot": active_deck_snapshot(room),
         "anonymous": bool(rnd.is_anonymous),
         "timerEnabled": room.timer_enabled,
@@ -283,8 +425,8 @@ def prepare_round(
 
 def open_vote(room, participant):
     _require_facilitator(room, participant, "vote.open")
-    rnd = _current_round(room)
-    if rnd is None or not rnd.subject.text.strip():
+    rnd = current_round(room)
+    if rnd is None or not (_first_item(rnd) and _first_item(rnd).text.strip()):
         raise RoomError("state.invalid_transition", "No subject set", "vote.open")
     if rnd.state != RoundState.IDLE:
         raise RoomError("state.invalid_transition", "Not idle", "vote.open")
@@ -304,7 +446,7 @@ def open_vote(room, participant):
 
 
 def cast_vote(room, participant, card_value):
-    rnd = _current_round(room)
+    rnd = current_round(room)
     if rnd is None or rnd.state != RoundState.OPEN:
         raise RoomError("state.invalid_transition", "Voting is not open", "vote.cast")
     if rnd.vote_deadline is not None and timezone.now() > rnd.vote_deadline:
@@ -319,7 +461,7 @@ def cast_vote(room, participant, card_value):
 
 def reveal(room, participant):
     _require_facilitator(room, participant, "vote.reveal")
-    rnd = _current_round(room)
+    rnd = current_round(room)
     if rnd is None or rnd.state != RoundState.OPEN:
         raise RoomError("state.invalid_transition", "Not open", "vote.reveal")
     if not rnd.votes.exists():
@@ -347,7 +489,7 @@ def reveal_on_timeout(room):
     read-check-write nu (lire l'etat, puis sauvegarder) laisse une fenetre ou
     les deux lisent OPEN avant que l'un des deux n'ecrive REVEALED.
     """
-    rnd = _current_round(room)
+    rnd = current_round(room)
     if rnd is None or rnd.state != RoundState.OPEN:
         return False
     if rnd.vote_deadline is None or timezone.now() < rnd.vote_deadline:
@@ -359,7 +501,7 @@ def reveal_on_timeout(room):
     if not updated:
         return False
     # Garde le cache en memoire (room.current_round) coherent avec la ligne
-    # tout juste ecrite : les appelants relisent l'etat via _current_round(room)
+    # tout juste ecrite : les appelants relisent l'etat via current_round(room)
     # (build_state_sync, revealed_payload...) sans recharger depuis la base.
     rnd.state = RoundState.REVEALED
     rnd.revealed_at = now
@@ -369,14 +511,21 @@ def reveal_on_timeout(room):
 
 def act_result(room, participant, chosen_value):
     _require_facilitator(room, participant, "result.act")
-    rnd = _current_round(room)
+    rnd = current_round(room)
     if rnd is None or rnd.state != RoundState.REVEALED:
         raise RoomError("state.invalid_transition", "Not revealed", "result.act")
     if chosen_value not in _card_values(room):
         raise RoomError("state.invalid_transition", "Unknown card value", "result.act")
+    item = _first_item(rnd)
+    if item is None:
+        # `Result.item` est NOT NULL : sans ce refus, update_or_create leverait une
+        # IntegrityError, que le consumer ne rattrape pas (il ne connait que
+        # RoomError) et qui coutait sa socket au facilitateur.
+        raise RoomError("state.invalid_transition", "No item to act on", "result.act")
     Result.objects.update_or_create(
         round=rnd,
-        defaults={"subject": rnd.subject, "chosen_value": chosen_value, "decided_by": participant},
+        item=item,
+        defaults={"chosen_value": chosen_value, "decided_by": participant},
     )
     rnd.state = RoundState.ACTED
     rnd.save(update_fields=["state"])
@@ -386,7 +535,7 @@ def act_result(room, participant, chosen_value):
 
 def reset_round(room, participant):
     _require_facilitator(room, participant, "vote.reset")
-    rnd = _current_round(room)
+    rnd = current_round(room)
     if rnd is None:
         raise RoomError("state.invalid_transition", "No round", "vote.reset")
     rnd.votes.all().delete()
@@ -409,7 +558,7 @@ def open_deadline(room):
     cote consumer, a decider s'il faut reprogrammer une tache de revelation a la
     reconnexion (une tache en memoire ne survit pas a un redemarrage du service,
     l'echeance en base si)."""
-    rnd = _current_round(room)
+    rnd = current_round(room)
     if rnd is None or rnd.state != RoundState.OPEN or rnd.vote_deadline is None:
         return None
     return rnd.vote_deadline
@@ -422,7 +571,7 @@ def deadline_iso(room):
 
 
 def participation(room):
-    rnd = _current_round(room)
+    rnd = current_round(room)
     total = room.participants.count()
     if rnd is None:
         return {"voted": 0, "total": total, "votedIds": []}
@@ -445,7 +594,7 @@ def revealed_payload(room):
     Le mode est fige a l'ouverture et annonce aux votants avant qu'ils votent : le
     basculer une fois les votes emis exposerait des gens qui se croyaient anonymes.
     """
-    rnd = _current_round(room)
+    rnd = current_round(room)
     votes = list(Vote.objects.filter(round=rnd))
     counts = Counter(v.card_value for v in votes)
     tally = [
@@ -466,7 +615,7 @@ def revealed_payload(room):
 
 
 def participants_list(room):
-    rnd = _current_round(room)
+    rnd = current_round(room)
     voted = set()
     if rnd:
         voted = set(
@@ -486,7 +635,7 @@ def participants_list(room):
 
 
 def _facilitator_participant(room):
-    rnd = _current_round(room)
+    rnd = current_round(room)
     if rnd and rnd.facilitator_id:
         return room.participants.filter(id=rnd.facilitator_id).first()
     return room.participants.filter(role=Role.FACILITATOR).first()
@@ -513,7 +662,7 @@ def promote_facilitator(room, participant):
     """First claimer becomes facilitator. Authority is by rnd.facilitator, so the
     old facilitator returning is a plain voter (definitive transfer, §6.f) — no token
     reissue needed since control is keyed on participant identity, not a secret."""
-    rnd = _current_round(room)
+    rnd = current_round(room)
     if rnd:
         rnd.facilitator = participant
         rnd.save(update_fields=["facilitator"])
@@ -528,7 +677,7 @@ def transfer_facilitator(room, participant, target_public_id):
     target = room.participants.filter(public_id=target_public_id).first()
     if target is None or target.id == participant.id:
         raise RoomError("state.invalid_transition", "Unknown or self target", "facilitator.transfer")
-    rnd = _current_round(room)
+    rnd = current_round(room)
     if rnd:
         rnd.facilitator = target
         rnd.save(update_fields=["facilitator"])
@@ -568,7 +717,7 @@ def set_reveal_mode(room, participant, anonymous):
     anonymous = bool(anonymous)
     if anonymous and not _team_may_anonymise(room):
         raise RoomError("forbidden.subscription_required", "Anonymous reveal requires a subscription", "reveal.setMode")
-    rnd = _current_round(room)
+    rnd = current_round(room)
     if rnd is None:
         raise RoomError("state.invalid_transition", "No round", "reveal.setMode")
     if rnd.state != RoundState.IDLE:
@@ -595,7 +744,7 @@ def select_deck(room, participant, deck_id):
     safe — a played round keeps its own frozen deck either way.
     """
     _require_facilitator(room, participant, "deck.select")
-    rnd = _current_round(room)
+    rnd = current_round(room)
     if rnd is not None and rnd.state in (RoundState.OPEN, RoundState.REVEALED):
         raise RoomError("state.invalid_transition", "Finish the round before switching deck", "deck.select")
     snapshots = room.deck_snapshots or [room.deck_snapshot]
@@ -611,18 +760,18 @@ def select_deck(room, participant, deck_id):
 def build_state_sync(participant):
     """Full current-state snapshot for a single client (contract §5.1). No history replay."""
     room = participant.room
-    rnd = _current_round(room)
+    rnd = current_round(room)
     my_vote = None
     result = None
     round_state = RoundState.IDLE
-    subject_text = ""
+    subject_text = current_item_text(room)
     if rnd:
         round_state = rnd.state
-        subject_text = rnd.subject.text
         vote = Vote.objects.filter(round=rnd, participant=participant).first()
         my_vote = vote.card_value if vote else None
-        if rnd.state == RoundState.ACTED and hasattr(rnd, "result"):
-            result = rnd.result.chosen_value
+        if rnd.state == RoundState.ACTED:
+            acted = rnd.results.first()
+            result = acted.chosen_value if acted else None
 
     payload = {
         # isTeam drives client-side feature gating (e.g. the timer control is
@@ -648,6 +797,11 @@ def build_state_sync(participant):
         "result": result,
         "facilitatorPresent": facilitator_present(room),
         "agenda": build_agenda(room),
+        # Les items du round courant. `subject` reste emis a cote, en doublon
+        # deprecie, le temps que Facilitation_frontend bascule (design §5) : les
+        # alias meurent en 5b, pas avant.
+        "items": items_payload(rnd),
+        "round": {"id": rnd.id if rnd else None, "state": round_state},
         "deadline": deadline_iso(room),
         "timer": {"enabled": room.timer_enabled, "seconds": room.timer_seconds},
         # Announced to everyone, not just the facilitator: a voter must know whether
@@ -674,3 +828,10 @@ def build_state_sync(participant):
             {k: v for k, v in revealed_payload(room).items() if k in ("tally", "spread", "votes")}
         )
     return payload
+
+
+current_subject_text = current_item_text
+# Idem pour les tests existants qui appelaient encore le nom prive avant que
+# `current_round` ne devienne public (tache 3). A supprimer avec le nettoyage
+# de ces tests.
+_current_round = current_round

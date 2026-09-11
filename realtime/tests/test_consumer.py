@@ -116,8 +116,8 @@ async def _wait_for_timer_task(code, timeout=2.0):
     return consumers._timer_tasks.get(code)
 
 
-def _current_subject_id(code):
-    return Room.objects.get(code=code).current_round.subject_id
+def _current_round_id(code):
+    return Room.objects.get(code=code).current_round_id
 
 
 @pytest.mark.django_db(transaction=True)
@@ -374,7 +374,7 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     task_a = consumers._timer_tasks.get(code)
     assert task_a is not None and not task_a.done()
 
-    # 2) subject.set while OPEN creates a brand new IDLE round (services.set_subject
+    # 2) subject.set while OPEN creates a brand new IDLE round (services.set_current_item
     # always takes the "create a new subject+round" branch when the current one
     # isn't idle) -- but the subject.set branch of _dispatch never touches
     # _timer_tasks. Task A is left exactly as it was: still tracked, still alive.
@@ -411,7 +411,7 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     # 4) subject.select on the very subject/round currently open must cancel B
     # immediately (the _cancel_timeout() call in the subject.select branch). Without
     # it, B would survive untouched here.
-    subject_id = await database_sync_to_async(_current_subject_id)(code)
+    subject_id = await database_sync_to_async(_current_round_id)(code)
     await fac.send_json_to({"v": 1, "type": "subject.select", "payload": {"subjectId": subject_id}})
     await _drain_until(voter, "agenda.updated")
     assert code not in consumers._timer_tasks, (

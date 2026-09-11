@@ -106,14 +106,34 @@ class Participant(models.Model):
         return f"{self.display_name} ({self.role})"
 
 
-class Subject(models.Model):
-    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="subjects")
+class Item(models.Model):
+    """Un sujet manipule par une activite : un point d'agenda pose par le
+    facilitateur, ou un post-it ecrit par un participant.
+
+    Porte par le ROUND (design 2026-09-11 §3) : les items d'un round passe ne
+    bougent plus, meme si le meme sujet est rejoue ou reformule plus tard.
+    """
+
+    round = models.ForeignKey("rooms.Round", on_delete=models.CASCADE, related_name="items")
     text = models.CharField(max_length=300)
     sequence = models.PositiveSmallIntegerField(default=1)
+    # Qui l'a ecrit. Null quand le facilitateur pose un sujet au nom de la salle.
+    # L'anonymat d'un brainstorming est une politique d'AFFICHAGE cote serveur
+    # (on n'emet pas la cle), jamais un champ vide en base — meme regle que
+    # Vote.participant.
+    author = models.ForeignKey(
+        Participant, on_delete=models.SET_NULL, null=True, blank=True, related_name="items"
+    )
+    # L'item dont celui-ci est la copie, quand une activite reprend la sortie de
+    # la precedente (chainage, livraison 5e). Copie et NON reference : reformuler
+    # ici ne doit pas reecrire l'historique de l'activite source.
+    origin_item = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="copies"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ("room", "sequence")
+        ordering = ("round", "sequence", "id")
 
     def __str__(self):
         return self.text
@@ -121,7 +141,6 @@ class Subject(models.Model):
 
 class Round(models.Model):
     room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="rounds")
-    subject = models.ForeignKey(Subject, on_delete=models.PROTECT, related_name="rounds")
     state = models.CharField(max_length=10, choices=RoundState.choices, default=RoundState.IDLE)
     facilitator = models.ForeignKey(
         Participant, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
@@ -163,11 +182,16 @@ class Vote(models.Model):
 
 
 class Result(models.Model):
-    round = models.OneToOneField(Round, on_delete=models.CASCADE, related_name="result")
-    subject = models.ForeignKey(Subject, on_delete=models.PROTECT, related_name="results")
+    round = models.ForeignKey(Round, on_delete=models.CASCADE, related_name="results")
+    item = models.ForeignKey(Item, on_delete=models.PROTECT, related_name="results")
     chosen_value = models.CharField(max_length=32)
     decided_by = models.ForeignKey(Participant, on_delete=models.SET_NULL, null=True, blank=True)
     decided_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("round", "item"), name="uniq_result_round_item"),
+        ]
 
     def __str__(self):
         return f"Result<{self.pk}> {self.chosen_value}"

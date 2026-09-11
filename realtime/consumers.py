@@ -69,20 +69,51 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             return await self._error("token.unknown", "Unknown participant", mtype, cid)
         room = participant.room
 
-        if mtype == "subject.set":
-            text = await database_sync_to_async(services.set_subject)(room, participant, payload.get("text", ""))
+        # --- items du round (design 2026-09-11 §5) -----------------------
+        if mtype == "item.add":
+            item = await database_sync_to_async(services.add_item)(room, participant, payload.get("text", ""))
+            await self._broadcast_items(room, "item.added", item["id"])
+            await self._broadcast_agenda(room)
+            await self._broadcast_current_item(room)
+        elif mtype == "item.update":
+            item = await database_sync_to_async(services.update_item)(
+                room, participant, payload.get("itemId"), payload.get("text", "")
+            )
+            await self._broadcast_items(room, "item.updated", item["id"])
+            await self._broadcast_agenda(room)
+            await self._broadcast_current_item(room)
+        elif mtype == "item.remove":
+            item_id = await database_sync_to_async(services.remove_item)(room, participant, payload.get("itemId"))
+            await self._broadcast_items(room, "item.removed", item_id)
+            await self._broadcast_agenda(room)
+        elif mtype == "item.reorder":
+            await database_sync_to_async(services.reorder_items)(room, participant, payload.get("itemIds") or [])
+            await self._broadcast_items(room, "item.reordered", None)
+        elif mtype == "round.select":
+            out = await database_sync_to_async(services.select_round)(
+                room, participant, payload.get("roundId")
+            )
+            self._cancel_timeout(room.code)
+            await self._broadcast("vote.wasReset", {"nextState": "idle"})
+            await self._broadcast("round.selected", {**out, "nextState": "idle"})
+            # Herite : le front d'aujourd'hui n'ecoute que ceux-la (alias, 5b).
+            await self._broadcast("subject.updated", {"text": out["text"]})
+            await self._broadcast_agenda(room)
+        # --- alias herites, supprimes en 5b -----------------------------
+        elif mtype == "subject.set":
+            # Alias herite : emet UNIQUEMENT subject.updated + agenda.updated, comme
+            # avant (Interfaces du brief task-4). Pas de item.updated ici : ce
+            # message en plus depasse la limite de 8 messages tolerable par
+            # _drain_until dans les tests existants du consumer.
+            text = await database_sync_to_async(services.set_current_item)(room, participant, payload.get("text", ""))
             await self._broadcast("subject.updated", {"text": text})
             await self._broadcast_agenda(room)
         elif mtype == "subject.add":
-            await database_sync_to_async(services.add_subject)(room, participant, payload.get("text", ""))
+            await database_sync_to_async(services.add_scenario_item)(room, participant, payload.get("text", ""))
             await self._broadcast_agenda(room)
-            await self._broadcast_current_subject(room)
+            await self._broadcast_current_item(room)
         elif mtype == "subject.select":
-            text = await database_sync_to_async(services.select_subject)(room, participant, payload.get("subjectId"))
-            self._cancel_timeout(room.code)
-            await self._broadcast("vote.wasReset", {"nextState": "idle"})
-            await self._broadcast("subject.updated", {"text": text})
-            await self._broadcast_agenda(room)
+            return await self._dispatch("round.select", {"roundId": payload.get("subjectId")}, cid)
         elif mtype == "round.prepare":
             summary = await database_sync_to_async(services.prepare_round)(
                 room,
@@ -201,8 +232,15 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         agenda = await database_sync_to_async(services.build_agenda)(room)
         await self._broadcast("agenda.updated", {"agenda": agenda})
 
-    async def _broadcast_current_subject(self, room):
-        text = await database_sync_to_async(services.current_subject_text)(room)
+    async def _broadcast_items(self, room, mtype, item_id):
+        rnd = await database_sync_to_async(services.current_round)(room)
+        items = await database_sync_to_async(services.items_payload)(rnd)
+        await self._broadcast(mtype, {
+            "roundId": rnd.id if rnd else None, "items": items, "itemId": item_id,
+        })
+
+    async def _broadcast_current_item(self, room):
+        text = await database_sync_to_async(services.current_item_text)(room)
         await self._broadcast("subject.updated", {"text": text})
 
     async def _emit(self, mtype, payload, cid=None):
