@@ -19,7 +19,7 @@ from rooms.models import (
     Role,
     Room,
     RoundState,
-    Vote,
+    Response,
     Round,
 )
 
@@ -317,7 +317,7 @@ def select_round(room, participant, round_id):
         rnd.vote_deadline = None
         rnd.facilitator = participant
         rnd.save(update_fields=["state", "opened_at", "revealed_at", "vote_deadline", "facilitator"])
-        rnd.votes.all().delete()
+        rnd.responses.all().delete()
     room.current_round = rnd
     room.save(update_fields=["current_round"])
     room.touch()
@@ -453,7 +453,7 @@ def cast_vote(room, participant, card_value):
         raise RoomError("state.invalid_transition", "Voting time is over", "vote.cast")
     if card_value not in _card_values(room):
         raise RoomError("state.invalid_transition", "Unknown card value", "vote.cast")
-    Vote.objects.update_or_create(
+    Response.objects.update_or_create(
         round=rnd, participant=participant, defaults={"card_value": card_value}
     )
     room.touch()
@@ -464,7 +464,7 @@ def reveal(room, participant):
     rnd = current_round(room)
     if rnd is None or rnd.state != RoundState.OPEN:
         raise RoomError("state.invalid_transition", "Not open", "vote.reveal")
-    if not rnd.votes.exists():
+    if not rnd.responses.exists():
         raise RoomError("state.invalid_transition", "No votes yet", "vote.reveal")
     rnd.state = RoundState.REVEALED
     rnd.revealed_at = timezone.now()
@@ -538,7 +538,7 @@ def reset_round(room, participant):
     rnd = current_round(room)
     if rnd is None:
         raise RoomError("state.invalid_transition", "No round", "vote.reset")
-    rnd.votes.all().delete()
+    rnd.responses.all().delete()
     rnd.state = RoundState.IDLE
     rnd.deck_snapshot = None
     rnd.opened_at = None
@@ -576,7 +576,7 @@ def participation(room):
     if rnd is None:
         return {"voted": 0, "total": total, "votedIds": []}
     voted_ids = list(
-        Vote.objects.filter(round=rnd).values_list("participant__public_id", flat=True)
+        Response.objects.filter(round=rnd).values_list("participant__public_id", flat=True)
     )
     return {"voted": len(voted_ids), "total": total, "votedIds": [str(pid) for pid in voted_ids]}
 
@@ -595,7 +595,7 @@ def revealed_payload(room):
     basculer une fois les votes emis exposerait des gens qui se croyaient anonymes.
     """
     rnd = current_round(room)
-    votes = list(Vote.objects.filter(round=rnd))
+    votes = list(Response.objects.filter(round=rnd))
     counts = Counter(v.card_value for v in votes)
     tally = [
         {"cardValue": value, "count": counts[value]}
@@ -619,7 +619,7 @@ def participants_list(room):
     voted = set()
     if rnd:
         voted = set(
-            Vote.objects.filter(round=rnd).values_list("participant_id", flat=True)
+            Response.objects.filter(round=rnd).values_list("participant_id", flat=True)
         )
     out = []
     for p in room.participants.all():
@@ -767,7 +767,7 @@ def build_state_sync(participant):
     subject_text = current_item_text(room)
     if rnd:
         round_state = rnd.state
-        vote = Vote.objects.filter(round=rnd, participant=participant).first()
+        vote = Response.objects.filter(round=rnd, participant=participant).first()
         my_vote = vote.card_value if vote else None
         if rnd.state == RoundState.ACTED:
             acted = rnd.results.first()

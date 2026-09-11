@@ -120,7 +120,7 @@ class Item(models.Model):
     # Qui l'a ecrit. Null quand le facilitateur pose un sujet au nom de la salle.
     # L'anonymat d'un brainstorming est une politique d'AFFICHAGE cote serveur
     # (on n'emet pas la cle), jamais un champ vide en base — meme regle que
-    # Vote.participant.
+    # Response.participant.
     author = models.ForeignKey(
         Participant, on_delete=models.SET_NULL, null=True, blank=True, related_name="items"
     )
@@ -165,10 +165,28 @@ class Round(models.Model):
         return f"Round<{self.pk}> {self.state}"
 
 
-class Vote(models.Model):
-    round = models.ForeignKey(Round, on_delete=models.CASCADE, related_name="votes")
+class Response(models.Model):
+    """La reponse est la contribution d'un participant a un ITEM (design section 3).
+
+    UNE seule table pour toutes les activites, jamais une table par activite : le
+    poker y ecrit encore card_value, une activite future y ecrira un payload JSON
+    valide par le schema que declare son type.
+    """
+
+    round = models.ForeignKey(Round, on_delete=models.CASCADE, related_name="responses")
     participant = models.ForeignKey(Participant, on_delete=models.CASCADE, related_name="votes")
-    card_value = models.CharField(max_length=32)  # ∈ snapshot cards[].value; secret until reveal
+    # L'item auquel cette reponse repond. Nullable le temps du transvasement
+    # (migration 0014) ; passe non-null en 0015.
+    item = models.ForeignKey(
+        "rooms.Item", on_delete=models.CASCADE, related_name="responses", null=True, blank=True
+    )
+    # La contribution elle-meme, validee par le schema que declare le type
+    # d'activite (design section 3, section 6). UNE table pour toutes les
+    # activites : le poker y ecrit {"card": "<valeur>"}, un dot voting y ecrira
+    # {"dots": 3}.
+    payload = models.JSONField(default=dict, blank=True)
+    # Ancienne forme, conservee le temps de la bascule du front. Supprimee en 0015.
+    card_value = models.CharField(max_length=32, blank=True, default="")  # ∈ snapshot cards[].value; secret until reveal
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -178,7 +196,7 @@ class Vote(models.Model):
         ]
 
     def __str__(self):
-        return f"Vote<{self.pk}> p={self.participant_id}"
+        return f"Response<{self.pk}> p={self.participant_id}"
 
 
 class Result(models.Model):
