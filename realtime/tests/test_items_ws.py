@@ -84,3 +84,35 @@ async def test_state_sync_carries_items_and_subject():
     assert [i["text"] for i in sync["payload"]["items"]] == ["Budget ?"]
     await fac.disconnect()
     await fac2.disconnect()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_item_remove_on_a_revealed_round_does_not_close_the_socket():
+    """C1, vu du fil : `remove_item` sans garde d'etat laissait `result.act` sans
+    item, et l'IntegrityError qui suivait n'etant pas un RoomError, `receive_json`
+    la laissait remonter — la socket du facilitateur se fermait en pleine seance.
+    Le refus doit etre un `error` ordinaire, et le round rester actable."""
+    code, fac_token, voter_token = await database_sync_to_async(_make_room)()
+    fac, _ = await _join(fac_token, code)
+    voter, _ = await _join(voter_token, code)
+
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget ?"}})
+    added = await _drain_until(fac, "item.added")
+    item_id = added["payload"]["itemId"]
+    await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
+    await _drain_until(fac, "vote.opened")
+    await voter.send_json_to({"v": 1, "type": "vote.cast", "payload": {"cardValue": "4"}})
+    await _drain_until(fac, "participation.update", pred=lambda p: p["voted"] == 1)
+    await fac.send_json_to({"v": 1, "type": "vote.reveal", "payload": {}})
+    await _drain_until(fac, "vote.revealed")
+
+    await fac.send_json_to({"v": 1, "type": "item.remove", "payload": {"itemId": item_id}})
+    err = await _drain_until(fac, "error")
+    assert err["payload"]["rejectedType"] == "item.remove"
+
+    await fac.send_json_to({"v": 1, "type": "result.act", "payload": {"chosenValue": "4"}})
+    acted = await _drain_until(fac, "result.acted")
+    assert acted["payload"]["chosenValue"] == "4"
+
+    await fac.disconnect()
+    await voter.disconnect()

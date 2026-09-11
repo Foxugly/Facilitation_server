@@ -197,6 +197,11 @@ def update_item(room, participant, item_id, text):
     if not text:
         raise RoomError("state.invalid_transition", "Empty item", "item.update")
     item = _item_of_room(room, item_id, "item.update")
+    # Meme garde que remove_item, et pour la meme raison : `history` affiche
+    # `Result.item.text` (history/api_views.py), donc reformuler un item deja acte
+    # reecrirait retroactivement le rapport deja envoye aux managers.
+    if item.results.exists():
+        raise RoomError("state.invalid_transition", "Item already decided", "item.update")
     item.text = text
     item.save(update_fields=["text"])
     room.touch()
@@ -206,8 +211,15 @@ def update_item(room, participant, item_id, text):
 def remove_item(room, participant, item_id):
     _require_facilitator(room, participant, "item.remove")
     item = _item_of_room(room, item_id, "item.remove")
+    # Un round en vol (open/revealed/acted) ne perd pas ses items : les votes deja
+    # emis les designent, et `act_result` se retrouverait sans item ou accrocher son
+    # resultat — `Result.item` est NOT NULL, l'IntegrityError qui s'ensuivait
+    # n'etait pas un RoomError et fermait la socket du facilitateur.
+    if item.round.state != RoundState.IDLE:
+        raise RoomError("state.invalid_transition", "Round already started", "item.remove")
     # Un item deja acte porte un resultat fige : le retirer reecrirait
-    # l'historique, que le design interdit explicitement.
+    # l'historique, que le design interdit explicitement. Garde distincte de la
+    # precedente : un round acte puis reinitialise est IDLE et garde son Result.
     if item.results.exists():
         raise RoomError("state.invalid_transition", "Item already decided", "item.remove")
     rnd = item.round
@@ -245,7 +257,10 @@ def build_agenda(room):
     out = []
     for rnd in room.rounds.all().order_by("created_at", "id").prefetch_related("items", "results"):
         first = rnd.items.first()
-        acted = rnd.results.first()
+        # Le filtre d'etat n'est pas decoratif : `vote.reset` remet le round a IDLE
+        # en LAISSANT son Result en place. Sans lui, un round reinitialise
+        # reapparaitrait « done », avec l'ancienne valeur, alors qu'il est a rejouer.
+        acted = rnd.results.first() if rnd.state == RoundState.ACTED else None
         result = acted.chosen_value if acted else None
         status = "current" if rnd.id == current_id else ("done" if result is not None else "pending")
         out.append({
@@ -258,13 +273,44 @@ def build_agenda(room):
     return out
 
 
+def _replay_round(room, participant, source):
+    """Un round NEUF portant une COPIE des items de `source` (design §4).
+
+    Copie et non reference : le facilitateur doit pouvoir reformuler le sujet du
+    nouveau tour sans reecrire l'historique du precedent. `origin_item` remonte a
+    l'item d'origine — la premiere copie, comme le fait la migration de donnees —
+    et l'auteur suit l'item, un post-it ne perdant pas son auteur en changeant de
+    round (design §7).
+    """
+    rnd = Round.objects.create(room=room, state=RoundState.IDLE, facilitator=participant)
+    for item in source.items.all():
+        Item.objects.create(
+            round=rnd,
+            text=item.text,
+            sequence=item.sequence,
+            author=item.author,
+            origin_item=item.origin_item or item,
+        )
+    return rnd
+
+
 def select_round(room, participant, round_id):
-    """Ex-`select_subject` : reprendre un round du scenario le remet a idle."""
+    """Ex-`select_subject` : reprendre un round du scenario le remet a idle.
+
+    Un round ACTE n'est jamais rejoue EN PLACE : on ouvre un round neuf portant une
+    copie de ses items, exactement comme l'ancien `select_subject` creait un round
+    de plus des que le precedent etait acte. Le rejouer en place laisserait le deck
+    fige du tour precedent (premier vote rejete en « Unknown card value » apres un
+    changement de deck), collerait son mode d'anonymat, et ECRASERAIT son Result au
+    lieu d'en produire un second.
+    """
     _require_facilitator(room, participant, "round.select")
     rnd = room.rounds.filter(id=round_id).first()
     if rnd is None:
         raise RoomError("state.invalid_transition", "Unknown round", "round.select")
-    if rnd.state != RoundState.IDLE:
+    if rnd.state == RoundState.ACTED:
+        rnd = _replay_round(room, participant, rnd)
+    elif rnd.state != RoundState.IDLE:
         rnd.state = RoundState.IDLE
         rnd.opened_at = None
         rnd.revealed_at = None
@@ -471,6 +517,11 @@ def act_result(room, participant, chosen_value):
     if chosen_value not in _card_values(room):
         raise RoomError("state.invalid_transition", "Unknown card value", "result.act")
     item = _first_item(rnd)
+    if item is None:
+        # `Result.item` est NOT NULL : sans ce refus, update_or_create leverait une
+        # IntegrityError, que le consumer ne rattrape pas (il ne connait que
+        # RoomError) et qui coutait sa socket au facilitateur.
+        raise RoomError("state.invalid_transition", "No item to act on", "result.act")
     Result.objects.update_or_create(
         round=rnd,
         item=item,

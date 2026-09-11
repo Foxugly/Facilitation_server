@@ -8,7 +8,7 @@ import pytest
 from realtime import services
 from realtime.services import RoomError
 from rooms.codes import generate_token, generate_unique_code
-from rooms.models import Participant, Role, Room, RoundState
+from rooms.models import Item, Participant, Role, Room, RoundState
 from rooms.snapshot import build_deck_snapshot
 
 
@@ -132,3 +132,61 @@ def test_state_sync_carries_items_and_the_legacy_subject(room_with_facilitator):
     assert state["subject"] == "Budget ?"
     assert [i["text"] for i in state["items"]] == ["Budget ?"]
     assert state["round"]["id"] == Room.objects.get(pk=room.pk).current_round_id
+
+
+@pytest.mark.django_db
+def test_cannot_remove_an_item_from_a_round_in_flight(room_with_facilitator):
+    """C1 : retirer le dernier item d'un round revele laissait `act_result` sans
+    item ou accrocher son `Result` (colonne NOT NULL) — l'IntegrityError qui
+    s'ensuivait n'est pas un RoomError et fermait la socket du facilitateur."""
+    room, fac, voter = room_with_facilitator
+    services.set_current_item(room, fac, "Budget ?")
+    item_id = services.items_payload(services.current_round(room))[0]["id"]
+    services.open_vote(room, fac)
+    services.cast_vote(room, voter, "4")
+    services.reveal(room, fac)
+
+    with pytest.raises(RoomError) as exc:
+        services.remove_item(room, fac, item_id)
+
+    assert exc.value.rejected_type == "item.remove"
+    # Le round est reste actable : la garde protege, elle ne bloque pas.
+    assert services.act_result(room, fac, "4") == "4"
+
+
+@pytest.mark.django_db
+def test_act_result_refuses_a_round_left_without_item(room_with_facilitator):
+    """Defense en profondeur derriere la garde ci-dessus : si un item disparaissait
+    par un autre chemin (cascade, script d'admin), `result.act` doit rendre un
+    RoomError — le consumer ne rattrape que celui-la."""
+    room, fac, voter = room_with_facilitator
+    services.set_current_item(room, fac, "Budget ?")
+    services.open_vote(room, fac)
+    services.cast_vote(room, voter, "4")
+    services.reveal(room, fac)
+    Item.objects.filter(round=services.current_round(room)).delete()
+
+    with pytest.raises(RoomError) as exc:
+        services.act_result(room, fac, "4")
+
+    assert exc.value.rejected_type == "result.act"
+
+
+@pytest.mark.django_db
+def test_cannot_rewrite_an_item_already_decided(room_with_facilitator):
+    """I2 : `history/api_views.py` affiche `Result.item.text`. Reformuler un item
+    deja acte changerait retroactivement le rapport envoye aux managers — meme
+    garde que `remove_item`, qui refusait deja."""
+    room, fac, voter = room_with_facilitator
+    services.set_current_item(room, fac, "Budget ?")
+    item_id = services.items_payload(services.current_round(room))[0]["id"]
+    services.open_vote(room, fac)
+    services.cast_vote(room, voter, "4")
+    services.reveal(room, fac)
+    services.act_result(room, fac, "4")
+
+    with pytest.raises(RoomError) as exc:
+        services.update_item(room, fac, item_id, "Budget 2027 ?")
+
+    assert exc.value.rejected_type == "item.update"
+    assert Item.objects.get(id=item_id).text == "Budget ?"
