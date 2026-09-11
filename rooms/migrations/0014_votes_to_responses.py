@@ -1,15 +1,17 @@
-"""Transvase les votes en reponses a un item, puis bascule la contrainte
-d'unicite de (round, participant) vers (item, participant).
+"""Transvase les votes en reponses a un item.
 
 Le sens arriere du RunPython est un noop : `item` et `payload` retombent avec
 0013 (AddField), inutile de les vider a la main.
 
-La bascule de contrainte est placee APRES le transvasement (RunPython), pas
-avant : la poser plus tot porterait sur des `item` encore nuls. Sans risque
-sur les donnees existantes - tant que cette livraison tourne, un round ne
-porte qu'un item, donc les deux contraintes sont equivalentes ici.
+La bascule de contrainte d'unicite (round, participant) -> (item, participant)
+part dans 0015, une migration separee. PostgreSQL refuse un ALTER TABLE tant
+que des evenements de trigger restent en attente a la suite d'un RunPython qui
+ecrit sur la meme table, dans la MEME transaction - sqlite n'a pas cette
+contrainte, d'ou un ecart entre suite locale verte et CI rouge. Scinder en deux
+migrations donne a chacune sa propre transaction : les ecritures de celle-ci
+sont validees avant que 0015 ne touche au schema.
 """
-from django.db import migrations, models
+from django.db import migrations
 
 from rooms.migration_ops import votes_to_responses
 
@@ -26,12 +28,4 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.RunPython(forwards, migrations.RunPython.noop),
-        migrations.RemoveConstraint(
-            model_name='response',
-            name='uniq_vote_round_participant',
-        ),
-        migrations.AddConstraint(
-            model_name='response',
-            constraint=models.UniqueConstraint(fields=('item', 'participant'), name='uniq_response_item_participant'),
-        ),
     ]
