@@ -88,11 +88,12 @@ def test_reorder_items_renumbers_the_sequence(room_with_facilitator):
 
 @pytest.mark.django_db
 def test_reorder_items_rejects_duplicate_ids(room_with_facilitator):
-    """Le serveur fait autorite : [a, a] passerait le seul controle d'ensemble
-    (set([a, a]) == {a}) et laisserait une sequence non contigue."""
+    """Round a UN SEUL item : set([a, a]) == {a} == known, donc seule la
+    comparaison de longueur peut rejeter ce doublon. Avec un second item present
+    (b non repris dans item_ids), le controle d'ensemble suffirait deja a lui
+    seul et le test ne demontrerait rien sur la garde de longueur."""
     room, fac, _ = room_with_facilitator
     services.set_current_item(room, fac, "A")
-    services.add_item(room, fac, "B")
     room.refresh_from_db()
     a = services.items_payload(room.current_round)[0]
 
