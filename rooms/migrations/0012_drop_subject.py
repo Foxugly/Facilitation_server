@@ -5,6 +5,18 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
+    """Suppression de `Subject`. IRREVERSIBLE SUR UNE BASE PEUPLEE.
+
+    Django sait ecrire le sens arriere (les `RemoveField` se reinversent en
+    `AddField`), mais le resultat ne s'applique pas : reinstaller
+    `Result.subject` / `Round.subject`, deux FK NOT NULL, echoue sur PostgreSQL
+    des que les tables ne sont pas vides — et 0011 est un `noop` en face, donc
+    rien ne repeuplerait ces colonnes ensuite. Le test de migration ne traverse le
+    sens arriere que sur une base vide : il ne dit RIEN de ce cas.
+
+    En prod, revenir en arriere = restaurer une sauvegarde anterieure a 0010, pas
+    `migrate rooms 0011`.
+    """
 
     dependencies = [
         ('rooms', '0011_subjects_to_items'),

@@ -37,9 +37,18 @@ def subjects_to_items(apps):
 
     for result in Result.objects.all().select_related("round"):
         # Un round porte exactement un item a ce stade : celui du subject qu'il
-        # jouait. `first()` sur l'ordre du modele suffit donc, et restera juste
-        # quand un round en portera N (le resultat suivra son propre item).
+        # jouait. `first()` suffit donc ICI, et seulement ici — des qu'un round
+        # portera N items, le resultat devra suivre SON item (`result.subject`),
+        # pas le premier venu. Cette migration est figee sur l'etat d'avant 5a.
         item = Item.objects.filter(round_id=result.round_id).order_by("sequence", "id").first()
-        if item is not None:
-            result.item = item
-            result.save(update_fields=["item"])
+        if item is None:
+            # Impossible par construction (tout round joue vient d'un subject, et la
+            # boucle ci-dessus lui a cree un item). Echouer bruyamment plutot que
+            # d'ignorer : 0012 rend `Result.item_id` NOT NULL dix lignes plus loin et
+            # ne saurait dire que « column "item_id" contains null values ».
+            raise RuntimeError(
+                f"Result {result.pk} : le round {result.round_id} n'a aucun item. "
+                "Transvasement incomplet — 0012 echouerait en NOT NULL sans dire pourquoi."
+            )
+        result.item = item
+        result.save(update_fields=["item"])
