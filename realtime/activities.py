@@ -12,8 +12,28 @@ Clef = `VoteType.resolution_strategy`, l'identifiant que la DB porte et que le
 code route (P1). PAS `VoteType.code` : deux types de vote peuvent partager une
 strategie de resolution — un deck Fibonacci et un deck en t-shirt sizes se
 depouillent tous deux comme une echelle ordinale.
+
+Le registre porte aussi, depuis la tache 3, le schema de payload et
+l'agregateur d'une activite : ajouter une activite ne doit toucher QUE ce
+fichier, jamais `realtime/services.py`.
 """
+from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
+
+
+class RoomError(Exception):
+    """Definie ici (et non dans `services.py`) pour que `validate_payload`
+    puisse la lever sans creer d'import circulaire : `services` importe deja
+    ce module. `services.py` la reexpose (`from realtime.activities import
+    RoomError`) pour que le code et les tests existants qui font
+    `from realtime.services import RoomError` continuent de fonctionner."""
+
+    def __init__(self, code, message="", rejected_type=None):
+        super().__init__(message or code)
+        self.code = code
+        self.message = message or code
+        self.rejected_type = rejected_type
 
 
 @dataclass(frozen=True)
@@ -37,6 +57,45 @@ class ActivitySpec:
     #: deux cotes.
     team_options: tuple[str, ...] = field(default=("timer", "anonymous", "deck"))
 
+    #: Les cles attendues dans `Response.payload`, et leur type. Le domaine les
+    #: valide AVANT d'ecrire : une activite qui ajoute une cle ne touche que ce
+    #: fichier, jamais `services.cast_response`.
+    payload_schema: dict = field(default_factory=lambda: {"card": str})
+
+    #: Responses d'un item -> decompte. Vit ici et non dans `services` pour que
+    #: l'objectif tienne : ajouter une activite ne doit toucher que ce fichier.
+    #: Signature : (responses, card_values) -> {"tally": [...], "spread": {...}}.
+    #: Laisse a None dans la declaration : `__post_init__` la lie au drapeau
+    #: `ordinal` de cette meme specification, pour que le comptage par defaut
+    #: (celui du poker aujourd'hui) reste inchange sans que chaque entree du
+    #: registre ait a le repeter.
+    aggregate: Callable[[list, list[str]], dict] = field(default=None)
+
+    def __post_init__(self):
+        if self.aggregate is None:
+            object.__setattr__(self, "aggregate", _default_aggregate(self.ordinal))
+
+
+def _default_aggregate(ordinal):
+    """Le comptage actuel du poker (`Counter` + ecart ordinal), inchange par la
+    tache 3 : c'est lui que toute strategie sans agregateur explicite recoit."""
+
+    def aggregate(responses, card_values):
+        counts = Counter(r.card_value for r in responses)
+        tally = [
+            {"cardValue": value, "count": counts[value]}
+            for value in card_values
+            if counts.get(value)
+        ]
+        spread = {"min": None, "max": None}
+        if ordinal:
+            numeric = [int(r.card_value) for r in responses if r.card_value.isdigit()]
+            if numeric:
+                spread = {"min": min(numeric), "max": max(numeric)}
+        return {"tally": tally, "spread": spread}
+
+    return aggregate
+
 
 #: Strategie -> specification. Une strategie absente retombe sur le defaut, qui
 #: est volontairement NON ordinal : mieux vaut ne pas afficher d'ecart que d'en
@@ -57,3 +116,20 @@ def spec_for(strategy: str | None) -> ActivitySpec:
 def is_ordinal(strategy: str | None) -> bool:
     """Vrai si un ecart min/max a un sens sur cette echelle."""
     return spec_for(strategy).ordinal
+
+
+def validate_payload(strategy, payload):
+    """Verifie que `payload` porte exactement les cles du `payload_schema` de la
+    strategie, avec le bon type — ni cle manquante, ni cle en trop, ni type
+    errone. Leve `RoomError` plutot que de laisser `cast_response` ecrire un
+    payload que l'activite ne sait pas relire."""
+    schema = spec_for(strategy).payload_schema
+    if not isinstance(payload, dict) or set(payload.keys()) != set(schema.keys()):
+        raise RoomError(
+            "state.invalid_transition", "Payload does not match schema", "response.cast"
+        )
+    for key, expected_type in schema.items():
+        if not isinstance(payload.get(key), expected_type):
+            raise RoomError(
+                "state.invalid_transition", "Payload does not match schema", "response.cast"
+            )
