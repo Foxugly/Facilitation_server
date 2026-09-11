@@ -221,6 +221,59 @@ clients qui n'affichent qu'un sujet) et `nextState`, toujours `"idle"`.
 
 ---
 
+## 8.2 Réponses par item (5b)
+
+> Ajouté 2026-09-11, livraison 5b (`.superpowers/sdd/2026-09-11-5b-responses/`). Le domaine
+> écrit et agrège désormais une réponse **par item** (`Response.payload`, validé par le
+> registre d'activités — `ActivitySpec.validate_value`), et non plus un vote unique par
+> round. Le WS gagne une intention ouverte à tous les participants ; `vote.cast` et les
+> clés plates de `vote.revealed` deviennent des **alias hérités**, décrits en 8.2.b.
+
+### 8.2.a Nouvel événement
+
+Entrant, **ouvert à tous les participants** (pas une intention de contrôle : pas de garde
+facilitateur, contrairement à `item.*` en 8.1.a) :
+
+| `type` | `payload` | Effet |
+|--------|-----------|-------|
+| `response.cast` | `{ itemId, payload }` | Enregistre/**remplace** la réponse de l'émetteur pour cet item (`payload` validé par le schéma que déclare le registre pour l'activité active). Autorisé **tant que le round est `open`**. Refusé si `itemId` n'appartient pas au round courant (`error` `state.invalid_transition`, `rejectedType: "response.cast"`). |
+
+Sortant : `participation.update` (§5), diffusé après `response.cast` exactement comme après
+`vote.cast` — la forme du fait ne change pas (`{ voted, total, votedIds }`, jamais de valeur).
+
+`vote.revealed` (§5) gagne une clé `itemResults` — **et non `items`**, déjà pris par la forme
+`[{id, text, sequence}]` de `state.sync`/8.1 : fusionner les deux sous le même nom écraserait
+silencieusement l'un des deux côté client. Forme :
+
+```json
+{
+  "itemResults": [
+    { "itemId": 42, "tally": [{ "cardValue": "5", "count": 2 }], "spread": { "min": 5, "max": 5 }, "anonymous": false, "votes": [ /* si nominatif */ ] }
+  ],
+  "anonymous": false,
+  "tally": [ /* copie du premier bloc de itemResults, alias herite — voir 8.2.b */ ],
+  "spread": { /* idem */ },
+  "votes": [ /* idem, absent si round anonyme */ ],
+  "reason": "timeout" | "facilitator"
+}
+```
+
+Un bloc `itemResults[]` n'émet jamais `votes` sur un round anonyme — l'invariant §6.a tient
+**par item**, pas seulement sur les clés plates.
+
+### 8.2.b Alias hérités — supprimés en fin de 5b
+
+> Note datée 2026-09-11 : `vote.cast` (entrant) et les clés plates `tally`/`spread`/`votes`
+> de `vote.revealed` (sortant) sont des **alias hérités**. `vote.cast {cardValue}` délègue
+> intégralement à `response.cast` (résout le premier item du round courant, façade
+> `services.cast_vote`) et produit exactement les mêmes diffusions qu'avant 5b — c'est ce
+> qui permet à `Facilitation_frontend` (non modifié) de continuer à jouer pendant la
+> fenêtre. Les clés plates de `vote.revealed` restent recopiées du **premier** bloc de
+> `itemResults`. **Ces alias seront supprimés en fin de 5b** : ne pas leur ajouter de
+> nouveau comportement, ne construire aucune fonctionnalité neuve dessus.
+
+---
+
 ## 9. Hors périmètre (Phase 1)
 
 - ❌ `facilitator.transfer` **volontaire** (Phase 2) — seul le garde-fou §6.f réassigne en Phase 1.
