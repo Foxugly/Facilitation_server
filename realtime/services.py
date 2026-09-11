@@ -10,7 +10,7 @@ from collections import Counter
 from django.conf import settings
 from django.utils import timezone
 
-from realtime.activities import is_ordinal
+from realtime.activities import RoomError, spec_for, validate_payload
 
 from rooms.models import (
     Item,
@@ -19,7 +19,7 @@ from rooms.models import (
     Role,
     Room,
     RoundState,
-    Vote,
+    Response,
     Round,
 )
 
@@ -29,12 +29,11 @@ TIMER_MAX_SECONDS = 60
 TIMER_STEP_SECONDS = 5
 
 
-class RoomError(Exception):
-    def __init__(self, code, message="", rejected_type=None):
-        super().__init__(message or code)
-        self.code = code
-        self.message = message or code
-        self.rejected_type = rejected_type
+# `RoomError` vit desormais dans `realtime.activities` (pour que
+# `validate_payload` puisse la lever sans import circulaire) et est reexportee
+# ici : le code et les tests existants qui font `from realtime.services import
+# RoomError` (`realtime/consumers.py` compris) continuent de fonctionner sans
+# modification.
 
 
 def _card_values(room):
@@ -58,21 +57,6 @@ def _resolution_strategy(room):
     rnd = room.current_round
     snapshot = (rnd.deck_snapshot if rnd and rnd.deck_snapshot else room.deck_snapshot)
     return (snapshot or {}).get("resolutionStrategy", "")
-
-
-def _spread_for(strategy, card_values):
-    """Ecart min/max des votes, ou {None, None} si l'echelle n'est pas ordinale.
-
-    Sans ce garde-fou, un vote romain calculerait son ecart sur les seules valeurs
-    passant isdigit() : « +1 » et « -1 » echouent, « 0 » reussit, et l'ecran
-    afficherait « 0 - 0 » — un faux consensus — sous un vote pourtant partage.
-    """
-    if not is_ordinal(strategy):
-        return {"min": None, "max": None}
-    numeric = [int(v) for v in card_values if v.isdigit()]
-    if not numeric:
-        return {"min": None, "max": None}
-    return {"min": min(numeric), "max": max(numeric)}
 
 
 def resolve_participant(code, token):
@@ -317,7 +301,7 @@ def select_round(room, participant, round_id):
         rnd.vote_deadline = None
         rnd.facilitator = participant
         rnd.save(update_fields=["state", "opened_at", "revealed_at", "vote_deadline", "facilitator"])
-        rnd.votes.all().delete()
+        rnd.responses.all().delete()
     room.current_round = rnd
     room.save(update_fields=["current_round"])
     room.touch()
@@ -445,18 +429,59 @@ def open_vote(room, participant):
     return rnd.vote_deadline
 
 
-def cast_vote(room, participant, card_value):
+def responses_of(rnd, item):
+    """Les reponses d'un item donne (tache 3) : le decompte par item n'a plus
+    le droit de lire `rnd.responses` en vrac, un round pouvant en porter
+    plusieurs."""
+    return list(Response.objects.filter(round=rnd, item=item))
+
+
+def cast_response(room, participant, item_id, payload):
+    """Ecrit la reponse d'un participant a UN item (design section 3).
+
+    Reprend les gardes de l'ancien `cast_vote` (round ouvert, echeance non
+    depassee, valeur dans le deck) et y ajoute : l'item doit appartenir au
+    round courant, et le payload doit passer le schema que declare le
+    registre pour la strategie active. Chemin unique d'ecriture : `cast_vote`
+    n'est plus qu'une facade par-dessus celui-ci.
+    """
     rnd = current_round(room)
     if rnd is None or rnd.state != RoundState.OPEN:
-        raise RoomError("state.invalid_transition", "Voting is not open", "vote.cast")
+        raise RoomError("state.invalid_transition", "Voting is not open", "response.cast")
     if rnd.vote_deadline is not None and timezone.now() > rnd.vote_deadline:
-        raise RoomError("state.invalid_transition", "Voting time is over", "vote.cast")
-    if card_value not in _card_values(room):
-        raise RoomError("state.invalid_transition", "Unknown card value", "vote.cast")
-    Vote.objects.update_or_create(
-        round=rnd, participant=participant, defaults={"card_value": card_value}
+        raise RoomError("state.invalid_transition", "Voting time is over", "response.cast")
+    item = rnd.items.filter(id=item_id).first()
+    if item is None:
+        # Y compris un item d'un AUTRE round : `rnd.items` ne contient que ceux
+        # du round courant, un id valide ailleurs n'y figure pas.
+        raise RoomError("state.invalid_transition", "Unknown item", "response.cast")
+    strategy = _resolution_strategy(room)
+    validate_payload(strategy, payload)
+    # La regle "la valeur est jouable" vit dans le registre (`validate_value`),
+    # pas ici : une activite au payload different de {"card": ...} ne doit pas
+    # heriter de la regle "la carte appartient au deck", qui ne la concerne pas.
+    if not spec_for(strategy).validate_value(payload, _card_values(room)):
+        raise RoomError("state.invalid_transition", "Unknown card value", "response.cast")
+    card_value = payload.get("card", "")
+    Response.objects.update_or_create(
+        item=item,
+        participant=participant,
+        defaults={"round": rnd, "payload": payload, "card_value": card_value},
     )
     room.touch()
+    return payload
+
+
+def cast_vote(room, participant, card_value):
+    """Facade poker : resout le premier item du round courant et delegue a
+    `cast_response`, pour que les regles de vote ne vivent qu'a un seul
+    endroit. Le front actuel (et le contrat WS `vote.cast`) ne connait
+    qu'une carte par round — c'est cette facade qui traduit."""
+    rnd = current_round(room)
+    item = _first_item(rnd)
+    if item is None:
+        raise RoomError("state.invalid_transition", "Voting is not open", "vote.cast")
+    cast_response(room, participant, item.id, {"card": card_value})
 
 
 def reveal(room, participant):
@@ -464,7 +489,7 @@ def reveal(room, participant):
     rnd = current_round(room)
     if rnd is None or rnd.state != RoundState.OPEN:
         raise RoomError("state.invalid_transition", "Not open", "vote.reveal")
-    if not rnd.votes.exists():
+    if not rnd.responses.exists():
         raise RoomError("state.invalid_transition", "No votes yet", "vote.reveal")
     rnd.state = RoundState.REVEALED
     rnd.revealed_at = timezone.now()
@@ -538,7 +563,7 @@ def reset_round(room, participant):
     rnd = current_round(room)
     if rnd is None:
         raise RoomError("state.invalid_transition", "No round", "vote.reset")
-    rnd.votes.all().delete()
+    rnd.responses.all().delete()
     rnd.state = RoundState.IDLE
     rnd.deck_snapshot = None
     rnd.opened_at = None
@@ -570,19 +595,48 @@ def deadline_iso(room):
     return deadline.isoformat() if deadline is not None else None
 
 
+def _completed_participant_ids(rnd):
+    """Participants ayant repondu a TOUS les items du round (tache 3) : « a
+    vote » n'est plus « a repondu a un item », qui laisserait passer pour
+    complet un participant a mi-chemin. Tant qu'un round ne porte qu'un seul
+    item — le cas du poker aujourd'hui — identique a l'ancien comportement.
+    """
+    n_items = rnd.items.count()
+    if n_items == 0:
+        return set()
+    counts = Counter(Response.objects.filter(round=rnd).values_list("participant_id", flat=True))
+    return {pid for pid, count in counts.items() if count >= n_items}
+
+
 def participation(room):
     rnd = current_round(room)
     total = room.participants.count()
     if rnd is None:
         return {"voted": 0, "total": total, "votedIds": []}
-    voted_ids = list(
-        Vote.objects.filter(round=rnd).values_list("participant__public_id", flat=True)
-    )
-    return {"voted": len(voted_ids), "total": total, "votedIds": [str(pid) for pid in voted_ids]}
+    complete_ids = _completed_participant_ids(rnd)
+    voted_ids = [
+        str(pid)
+        for pid in room.participants.filter(id__in=complete_ids).values_list(
+            "public_id", flat=True
+        )
+    ]
+    return {"voted": len(voted_ids), "total": total, "votedIds": voted_ids}
 
 
 def revealed_payload(room):
     """Resultat d'un round revele — ONLY ever called in REVEALED state.
+
+    Depuis la tache 3, porte un bloc PAR ITEM (``itemResults``), chacun agrege
+    par l'``aggregate`` que declare le registre pour la strategie active — le
+    decompte ne vit plus ici, ``revealed_payload`` ne fait plus que
+    l'assembler. Les cles plates historiques (``tally``, ``spread``,
+    ``votes``) restent emises, recopiees du PREMIER item, le temps que
+    Facilitation_frontend bascule sur ``itemResults``.
+
+    ``itemResults`` et non ``items`` : ``state.sync`` emet deja une cle
+    ``items`` de forme differente (``[{id, text, sequence}]``, la liste des
+    items du round). Meme nom, deux formes : un client qui fusionne les deux
+    payloads ecraserait silencieusement sa liste d'items avec le decompte.
 
     Deux modes, choisis par le facilitateur a l'ouverture (``rnd.is_anonymous``) :
 
@@ -590,37 +644,56 @@ def revealed_payload(room):
     - **anonyme** (option des equipes payantes) : le decompte SEUL. La cle ``votes``
       n'est alors pas emise du tout — masquer cote client serait de la facade, une
       trame WS etant lisible dans les outils de developpement du navigateur.
+      L'invariant tient PAR ITEM : aucun bloc de ``itemResults`` ne porte
+      ``votes`` sur un round anonyme, pas seulement les cles plates.
 
     Le mode est fige a l'ouverture et annonce aux votants avant qu'ils votent : le
     basculer une fois les votes emis exposerait des gens qui se croyaient anonymes.
     """
     rnd = current_round(room)
-    votes = list(Vote.objects.filter(round=rnd))
-    counts = Counter(v.card_value for v in votes)
-    tally = [
-        {"cardValue": value, "count": counts[value]}
-        for value in _card_values(room)
-        if counts.get(value)
-    ]
-    spread = _spread_for(_resolution_strategy(room), [v.card_value for v in votes])
-    payload = {"tally": tally, "spread": spread, "anonymous": bool(rnd and rnd.is_anonymous)}
-    if not (rnd and rnd.is_anonymous):
-        by_participant = {v.participant_id: v.card_value for v in votes}
-        payload["votes"] = [
-            {"participantId": str(p.public_id), "cardValue": by_participant[p.id]}
-            for p in room.participants.all()
-            if p.id in by_participant
-        ]
+    anonymous = bool(rnd and rnd.is_anonymous)
+    spec = spec_for(_resolution_strategy(room))
+    card_values = _card_values(room)
+    # Hisse hors de la boucle : meme requete pour chaque item, sinon un round a
+    # N items la relance N fois pour le meme resultat.
+    participants = list(room.participants.all())
+    items_out = []
+    for item in (rnd.items.all() if rnd else []):
+        item_responses = responses_of(rnd, item)
+        counted = spec.aggregate(item_responses, card_values)
+        block = {
+            "itemId": item.id,
+            "tally": counted["tally"],
+            "spread": counted["spread"],
+            "anonymous": anonymous,
+        }
+        if not anonymous:
+            by_participant = {r.participant_id: r.card_value for r in item_responses}
+            block["votes"] = [
+                {"participantId": str(p.public_id), "cardValue": by_participant[p.id]}
+                for p in participants
+                if p.id in by_participant
+            ]
+        items_out.append(block)
+    first = items_out[0] if items_out else {
+        "tally": [],
+        "spread": {"min": None, "max": None},
+        "anonymous": anonymous,
+    }
+    payload = {
+        "itemResults": items_out,
+        "anonymous": anonymous,
+        "tally": first["tally"],
+        "spread": first["spread"],
+    }
+    if "votes" in first:
+        payload["votes"] = first["votes"]
     return payload
 
 
 def participants_list(room):
     rnd = current_round(room)
-    voted = set()
-    if rnd:
-        voted = set(
-            Vote.objects.filter(round=rnd).values_list("participant_id", flat=True)
-        )
+    complete = _completed_participant_ids(rnd) if rnd else set()
     out = []
     for p in room.participants.all():
         out.append(
@@ -628,7 +701,7 @@ def participants_list(room):
                 "participantId": str(p.public_id),
                 "username": p.display_name,
                 "role": p.role,
-                "hasVoted": p.id in voted,
+                "hasVoted": p.id in complete,
             }
         )
     return out
@@ -762,13 +835,23 @@ def build_state_sync(participant):
     room = participant.room
     rnd = current_round(room)
     my_vote = None
+    my_responses = {}
     result = None
     round_state = RoundState.IDLE
     subject_text = current_item_text(room)
     if rnd:
         round_state = rnd.state
-        vote = Vote.objects.filter(round=rnd, participant=participant).first()
-        my_vote = vote.card_value if vote else None
+        # Un round peut desormais porter plusieurs items, donc plusieurs
+        # Response pour ce participant (tache 3) : `myResponses` les porte
+        # toutes, `myVote` reste celle du PREMIER item — le seul que le front
+        # actuel connaisse — pour que le poker n'ait rien a changer.
+        my_responses_list = list(Response.objects.filter(round=rnd, participant=participant))
+        my_responses = {str(r.item_id): r.payload for r in my_responses_list}
+        first_item = _first_item(rnd)
+        first_response = next(
+            (r for r in my_responses_list if first_item and r.item_id == first_item.id), None
+        )
+        my_vote = first_response.card_value if first_response else None
         if rnd.state == RoundState.ACTED:
             acted = rnd.results.first()
             result = acted.chosen_value if acted else None
@@ -794,6 +877,7 @@ def build_state_sync(participant):
         # main par l'une ou l'autre forme des la revelation.
         "resultLayout": room.result_layout,
         "myVote": my_vote,
+        "myResponses": my_responses,
         "result": result,
         "facilitatorPresent": facilitator_present(room),
         "agenda": build_agenda(room),

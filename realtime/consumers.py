@@ -144,6 +144,16 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self._broadcast("vote.opened", {"deadline": deadline_iso})
             await self._broadcast_participation(room)
             self._schedule_timeout(room.code, deadline)
+        elif mtype == "response.cast":
+            # Ouvert a tous les participants (pas une intention de controle : pas
+            # de garde facilitateur). `cast_response` retourne le payload ecrit,
+            # jamais rediffuse : la valeur reste secrete jusqu'au reveal
+            # (contrat §0.1, invariant d'anonymat).
+            await database_sync_to_async(services.cast_response)(
+                room, participant, payload.get("itemId"), payload.get("payload") or {}
+            )
+            await self._broadcast_participation(room)
+        # --- alias herite, supprime en fin de 5b (contrat §8.2.b) --------
         elif mtype == "vote.cast":
             await database_sync_to_async(services.cast_vote)(room, participant, payload.get("cardValue"))
             await self._broadcast_participation(room)

@@ -29,3 +29,16 @@ if env.bool("E2E", default=False):  # noqa: F405
         **REST_FRAMEWORK,  # noqa: F405
         "DEFAULT_THROTTLE_RATES": {k: "100000/min" for k in REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]},  # noqa: F405
     }
+
+# --- sqlite et la concurrence ASGI -------------------------------------------
+# Le dev local sert a la fois des requetes HTTP et des consumers WebSocket qui
+# ecrivent, chacun sur son thread : deux ecritures qui se croisent font lever a
+# sqlite un « database is locked » immediat, et la creation de salle repond 500.
+# Observe sur la suite e2e, ou l'echec tombait sur un test sans rapport (celui du
+# secret des votes) et disparaissait en isolation.
+#
+# `timeout` fait attendre le verrou au lieu d'abandonner tout de suite. Ce n'est
+# pas un reglage de production : la prod est en PostgreSQL, qui n'a pas ce verrou
+# global. D'ou son placement ici et non dans base.py.
+if DATABASES["default"]["ENGINE"].endswith("sqlite3"):  # noqa: F405
+    DATABASES["default"].setdefault("OPTIONS", {})["timeout"] = 20  # noqa: F405
