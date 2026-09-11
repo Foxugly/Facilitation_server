@@ -245,7 +245,7 @@ poker jouable de bout en bout, et les e2e front verts quand le contrat bouge.
 
 | # | Livraison | Contenu | Vérification |
 |---|---|---|---|
-| **5a** | `Item` | `Subject` → `Item` sur le round, `Item.author` (inutilisé par le poker, mais le champ existe), migration de données, `Result.item`, `history` repointé, events `item.*` + `round.select`, `state.sync.items[]`, alias hérités. Front : `items[]` au lieu de `subject`. | e2e `vote-cycle`, `round-flow`, `team-room` verts sans modification fonctionnelle visible. |
+| **5a** | `Item` | `Subject` → `Item` sur le round, `Item.author` (inutilisé par le poker, mais le champ existe), migration de données, `Result.item`, `history` repointé, events `item.*` + `round.select`, `state.sync.items[]`, alias hérités. **Back seul** : les alias rendent le front inchangé, il bascule en 5b. | e2e `vote-cycle`, `round-flow`, `team-room` verts **contre le dépôt front non modifié**. |
 | **5b** | `Response` | `Vote` → `Response` + `payload` + `item`, unicité `(item, participant)`, agrégation par item, `response.cast`. Suppression des alias 5a. | Un round poker à 2 items se dépouille item par item. |
 | **5c** | Type par round | `Round.vote_type` + `config`, validation par le registre, `round.configure`, **`items_authored_by` appliqué** (le poker reste facilitateur-seul, la porte est ouverte pour le brainstorming). | Deux rounds de types différents dans une même room ; `item.add` refusé à un votant sur un round poker. |
 | **5d** | Scénario préparé | `Round.sequence`, file de rounds, `scenario.*`, écran de préparation front. | Un scénario de 3 rounds préparé avant l'ouverture de la room, joué dans l'ordre. |
