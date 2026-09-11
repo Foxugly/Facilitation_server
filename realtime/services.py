@@ -902,14 +902,24 @@ def build_state_sync(participant):
     # retourner les cartes du tapis. Sans lui, recharger laissait les cartes face
     # cachee alors que le decompte, lui, s'affichait.
     #
+    # ``itemResults`` est recopie dans le meme mouvement que les cles plates
+    # heritees : c'est la forme d'avenir (bloc par item), et l'omettre laissait
+    # un arrivant sur un round deja revele avec un itemResults vide tant qu'une
+    # nouvelle revelation ne survenait pas pendant sa connexion.
+    #
     # L'invariant d'anonymat est preserve sans effort : ``revealed_payload`` n'emet
-    # aucune cle ``votes`` sur un round anonyme, et c'est bien lui qui decide ici.
+    # aucune cle ``votes`` sur un round anonyme — ni dans les cles plates, ni dans
+    # aucun bloc de ``itemResults`` — et c'est bien lui qui decide ici.
     #
     # ACTED est inclus car le client traite « revele » et « acte » comme un seul etat
     # d'affichage : l'omettre laissait le meme trou apres la globalisation.
     if round_state in (RoundState.REVEALED, RoundState.ACTED):
         payload.update(
-            {k: v for k, v in revealed_payload(room).items() if k in ("tally", "spread", "votes")}
+            {
+                k: v
+                for k, v in revealed_payload(room).items()
+                if k in ("tally", "spread", "votes", "itemResults")
+            }
         )
     return payload
 

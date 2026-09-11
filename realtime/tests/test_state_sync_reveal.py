@@ -99,6 +99,46 @@ def test_state_sync_of_an_acted_round_still_carries_the_detail(db):
 
 
 @pytest.mark.django_db
+def test_state_sync_of_an_anonymous_revealed_round_emits_no_link_in_item_results(paid_team):
+    """Meme invariant que les cles plates, mais dans le bloc par item (``itemResults``) :
+    un arrivant sur un round anonyme deja revele ne doit voir aucun lien
+    participant -> carte, ni dans les cles plates, ni dans aucun bloc de ``itemResults``.
+    """
+    room, fac, voter, _ = _room(team=paid_team)
+    services.set_reveal_mode(room, fac, True)
+    services.open_vote(room, fac)
+    services.cast_vote(room, voter, "4")
+    services.reveal(room, fac)
+
+    payload = services.build_state_sync(voter)
+
+    assert payload["itemResults"], "itemResults doit etre renseigne des la connexion"
+    for block in payload["itemResults"]:
+        assert "votes" not in block
+        assert block["tally"] == [{"cardValue": "4", "count": 1}]
+
+
+@pytest.mark.django_db
+def test_state_sync_of_a_nominative_revealed_round_carries_item_results(db):
+    """Un arrivant sur un round nominatif deja revele recoit ``itemResults``
+    renseigne, avec le decompte attendu — pas seulement les cles plates heritees.
+    """
+    room, fac, voter, _ = _room()
+    services.open_vote(room, fac)
+    services.cast_vote(room, voter, "4")
+    services.cast_vote(room, fac, "6")
+    services.reveal(room, fac)
+
+    payload = services.build_state_sync(voter)
+
+    assert len(payload["itemResults"]) == 1
+    block = payload["itemResults"][0]
+    assert block["tally"] == [{"cardValue": "4", "count": 1}, {"cardValue": "6", "count": 1}]
+    assert block["spread"] == {"min": 4, "max": 6}
+    assert {v["participantId"] for v in block["votes"]} == {str(voter.public_id), str(fac.public_id)}
+
+
+@pytest.mark.django_db
 def test_state_sync_of_an_open_round_leaks_nothing(db):
     """Avant la revelation, personne ne doit connaitre la carte d'un autre."""
     room, fac, voter, _ = _room()
