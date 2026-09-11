@@ -38,7 +38,7 @@ def _level_name(deck_snapshot, value):
 def _entries_for(team, day):
     results = (
         Result.objects.filter(round__room__team=team, decided_at__date=day)
-        .select_related("subject", "round__room")
+        .select_related("item", "round__room")
         .order_by("decided_at")
     )
     out = []
@@ -46,7 +46,7 @@ def _entries_for(team, day):
         room = r.round.room
         out.append(
             {
-                "subject": r.subject.text,
+                "subject": r.item.text,
                 "chosenValue": r.chosen_value,
                 "levelName": _level_name(r.round.deck_snapshot or room.deck_snapshot, r.chosen_value),
                 "roomCode": room.code,
