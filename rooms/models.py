@@ -106,19 +106,6 @@ class Participant(models.Model):
         return f"{self.display_name} ({self.role})"
 
 
-class Subject(models.Model):
-    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="subjects")
-    text = models.CharField(max_length=300)
-    sequence = models.PositiveSmallIntegerField(default=1)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ("room", "sequence")
-
-    def __str__(self):
-        return self.text
-
-
 class Item(models.Model):
     """Un sujet manipule par une activite : un point d'agenda pose par le
     facilitateur, ou un post-it ecrit par un participant.
@@ -154,9 +141,6 @@ class Item(models.Model):
 
 class Round(models.Model):
     room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="rounds")
-    subject = models.ForeignKey(
-        Subject, on_delete=models.PROTECT, related_name="rounds", null=True, blank=True
-    )
     state = models.CharField(max_length=10, choices=RoundState.choices, default=RoundState.IDLE)
     facilitator = models.ForeignKey(
         Participant, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
@@ -198,12 +182,16 @@ class Vote(models.Model):
 
 
 class Result(models.Model):
-    round = models.OneToOneField(Round, on_delete=models.CASCADE, related_name="result")
-    subject = models.ForeignKey(Subject, on_delete=models.PROTECT, related_name="results")
-    item = models.ForeignKey(Item, on_delete=models.PROTECT, related_name="results", null=True, blank=True)
+    round = models.ForeignKey(Round, on_delete=models.CASCADE, related_name="results")
+    item = models.ForeignKey(Item, on_delete=models.PROTECT, related_name="results")
     chosen_value = models.CharField(max_length=32)
     decided_by = models.ForeignKey(Participant, on_delete=models.SET_NULL, null=True, blank=True)
     decided_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("round", "item"), name="uniq_result_round_item"),
+        ]
 
     def __str__(self):
         return f"Result<{self.pk}> {self.chosen_value}"

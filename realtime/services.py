@@ -19,7 +19,6 @@ from rooms.models import (
     Role,
     Room,
     RoundState,
-    Subject,
     Vote,
     Round,
 )
@@ -244,9 +243,10 @@ def build_agenda(room):
     """
     current_id = room.current_round_id
     out = []
-    for rnd in room.rounds.all().order_by("created_at", "id").prefetch_related("items", "result"):
+    for rnd in room.rounds.all().order_by("created_at", "id").prefetch_related("items", "results"):
         first = rnd.items.first()
-        result = rnd.result.chosen_value if hasattr(rnd, "result") else None
+        acted = rnd.results.first()
+        result = acted.chosen_value if acted else None
         status = "current" if rnd.id == current_id else ("done" if result is not None else "pending")
         out.append({
             "id": rnd.id,
@@ -471,30 +471,10 @@ def act_result(room, participant, chosen_value):
     if chosen_value not in _card_values(room):
         raise RoomError("state.invalid_transition", "Unknown card value", "result.act")
     item = _first_item(rnd)
-    # Result.subject reste NOT NULL en base (aucune migration dans cette tache) :
-    # un round issu du nouveau flux n'a plus de Subject (rnd.subject est None).
-    # `history.api_views` lit encore `r.subject.text`, donc on en cree un minimal a
-    # la volee plutot que de laisser tomber cette contrainte. Le lecteur reel est
-    # desormais `item` ; `subject` est un doublon transitoire, comme le reste du
-    # design (§5) jusqu'a ce qu'une migration retire la colonne -- ce bloc entier
-    # (la creation de secours ET l'ecriture sur rnd.subject ci-dessous) disparait
-    # alors avec elle.
-    #
-    # On memorise la ligne creee sur `rnd.subject` : `select_round` remet un round
-    # ACTED a IDLE sans jamais toucher au subject (le nouveau flux ne le renseigne
-    # plus), donc un round rejoue plusieurs fois doit retomber sur LE MEME Subject
-    # de secours plutot que d'en semer un nouveau a chaque acte -- sans quoi celui
-    # du Result precedent perd sa derniere reference des le suivant.
-    subject = rnd.subject
-    if subject is None:
-        subject = Subject.objects.create(
-            room=room, text=item.text if item else "", sequence=room.subjects.count() + 1
-        )
-        rnd.subject = subject
-        rnd.save(update_fields=["subject"])
     Result.objects.update_or_create(
         round=rnd,
-        defaults={"subject": subject, "item": item, "chosen_value": chosen_value, "decided_by": participant},
+        item=item,
+        defaults={"chosen_value": chosen_value, "decided_by": participant},
     )
     rnd.state = RoundState.ACTED
     rnd.save(update_fields=["state"])
@@ -738,8 +718,9 @@ def build_state_sync(participant):
         round_state = rnd.state
         vote = Vote.objects.filter(round=rnd, participant=participant).first()
         my_vote = vote.card_value if vote else None
-        if rnd.state == RoundState.ACTED and hasattr(rnd, "result"):
-            result = rnd.result.chosen_value
+        if rnd.state == RoundState.ACTED:
+            acted = rnd.results.first()
+            result = acted.chosen_value if acted else None
 
     payload = {
         # isTeam drives client-side feature gating (e.g. the timer control is
@@ -798,10 +779,6 @@ def build_state_sync(participant):
     return payload
 
 
-# Alias herites, le temps que le consumer bascule (tache 4). A supprimer ensuite.
-set_subject = set_current_item
-add_subject = add_scenario_item
-select_subject = select_round
 current_subject_text = current_item_text
 # Idem pour les tests existants qui appelaient encore le nom prive avant que
 # `current_round` ne devienne public (tache 3). A supprimer avec le nettoyage

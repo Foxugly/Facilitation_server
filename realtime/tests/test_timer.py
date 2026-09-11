@@ -88,7 +88,7 @@ def test_set_timer_snaps_to_five_second_steps(room_with_facilitator):
 @pytest.mark.django_db
 def test_open_vote_sets_no_deadline_when_disabled(room_with_facilitator):
     room, facilitator, _ = room_with_facilitator
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     assert services.open_vote(room, facilitator) is None
     assert services._current_round(room).vote_deadline is None
 
@@ -97,7 +97,7 @@ def test_open_vote_sets_no_deadline_when_disabled(room_with_facilitator):
 def test_open_vote_sets_deadline_when_enabled(room_with_facilitator):
     room, facilitator, _ = room_with_facilitator
     services.set_timer(room, facilitator, True, 30)
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     before = timezone.now()
     deadline = services.open_vote(room, facilitator)
     assert deadline is not None
@@ -109,7 +109,7 @@ def test_open_vote_sets_deadline_when_enabled(room_with_facilitator):
 def test_vote_after_deadline_is_refused(room_with_facilitator):
     room, facilitator, voter = room_with_facilitator
     services.set_timer(room, facilitator, True, 30)
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
     rnd = services._current_round(room)
     rnd.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
@@ -122,7 +122,7 @@ def test_vote_after_deadline_is_refused(room_with_facilitator):
 def test_reset_clears_the_deadline(room_with_facilitator):
     room, facilitator, _ = room_with_facilitator
     services.set_timer(room, facilitator, True, 30)
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
     services.reset_round(room, facilitator)
     assert services._current_round(room).vote_deadline is None
@@ -135,16 +135,16 @@ def test_select_subject_clears_stale_deadline_after_reveal(room_with_facilitator
     conserver aucune echeance perimee en base (hygiene de donnees)."""
     room, facilitator, voter = room_with_facilitator
     services.set_timer(room, facilitator, True, 30)
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     # L'alias `subject.select` designe desormais un ROUND (design 2026-09-11 §5) :
-    # l'id a reprendre est celui du round courant, plus celui du Subject legacy.
+    # l'id a reprendre est celui du round courant.
     round_id = services._current_round(room).id
     services.open_vote(room, facilitator)
     assert services._current_round(room).vote_deadline is not None
     services.cast_vote(room, voter, "4")
     services.reveal(room, facilitator)
 
-    services.select_subject(room, facilitator, round_id)
+    services.select_round(room, facilitator, round_id)
 
     rnd = services._current_round(room)
     assert rnd.state == RoundState.IDLE
@@ -156,7 +156,7 @@ def test_deadline_iso_hides_stale_deadline_outside_open_round(room_with_facilita
     """Defense en profondeur : meme si une echeance traine en base sur un round
     non-OPEN, deadline_iso() ne doit jamais la divulguer."""
     room, facilitator, _ = room_with_facilitator
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     rnd = services._current_round(room)
     assert rnd.state == RoundState.IDLE
     rnd.vote_deadline = timezone.now() + timezone.timedelta(seconds=30)
@@ -169,7 +169,7 @@ def test_deadline_iso_hides_stale_deadline_outside_open_round(room_with_facilita
 def test_reveal_on_timeout_reveals_when_deadline_passed(room_with_facilitator):
     room, facilitator, voter = room_with_facilitator
     services.set_timer(room, facilitator, True, 30)
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
     services.cast_vote(room, voter, "4")
     rnd = services._current_round(room)
@@ -184,7 +184,7 @@ def test_reveal_on_timeout_reveals_when_deadline_passed(room_with_facilitator):
 def test_reveal_on_timeout_is_a_noop_before_deadline(room_with_facilitator):
     room, facilitator, _ = room_with_facilitator
     services.set_timer(room, facilitator, True, 30)
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
 
     assert services.reveal_on_timeout(room) is False
@@ -197,7 +197,7 @@ def test_reveal_on_timeout_works_with_zero_votes(room_with_facilitator):
     a une revelation manuelle qui exige au moins un vote."""
     room, facilitator, _ = room_with_facilitator
     services.set_timer(room, facilitator, True, 30)
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
     rnd = services._current_round(room)
     rnd.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
@@ -210,7 +210,7 @@ def test_reveal_on_timeout_works_with_zero_votes(room_with_facilitator):
 @pytest.mark.django_db
 def test_reveal_on_timeout_is_a_noop_without_timer(room_with_facilitator):
     room, facilitator, _ = room_with_facilitator
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
     assert services.reveal_on_timeout(room) is False
 
@@ -219,7 +219,7 @@ def test_reveal_on_timeout_is_a_noop_without_timer(room_with_facilitator):
 def test_revealed_payload_is_nominative_by_default(room_with_facilitator):
     """Defaut : le resultat montre qui a vote quoi."""
     room, facilitator, voter = room_with_facilitator
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
     services.cast_vote(room, facilitator, "4")
     services.cast_vote(room, voter, "4")
@@ -237,7 +237,7 @@ def test_revealed_payload_emits_no_link_when_anonymous(room_with_facilitator):
     """Mode anonyme : aucun lien participant -> carte n'est emis (option payante,
     posee ici directement sur le round pour tester la charge utile seule)."""
     room, facilitator, voter = room_with_facilitator
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     room.current_round.is_anonymous = True
     room.current_round.save(update_fields=["is_anonymous"])
     services.open_vote(room, facilitator)
@@ -255,7 +255,7 @@ def test_revealed_payload_emits_no_link_when_anonymous(room_with_facilitator):
 @pytest.mark.django_db
 def test_revealed_payload_counts_votes_per_value(room_with_facilitator):
     room, facilitator, voter = room_with_facilitator
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
     services.cast_vote(room, facilitator, "4")
     services.cast_vote(room, voter, "4")
@@ -268,7 +268,7 @@ def test_revealed_payload_counts_votes_per_value(room_with_facilitator):
 def test_revealed_payload_omits_values_without_votes(room_with_facilitator):
     """Seules les valeurs ayant au moins une voix apparaissent."""
     room, facilitator, voter = room_with_facilitator
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
     services.cast_vote(room, facilitator, "1")
     services.cast_vote(room, voter, "7")
@@ -283,7 +283,7 @@ def test_revealed_payload_omits_values_without_votes(room_with_facilitator):
 def test_revealed_payload_empty_when_no_votes(room_with_facilitator):
     room, facilitator, _ = room_with_facilitator
     services.set_timer(room, facilitator, True, 10)
-    services.set_subject(room, facilitator, "Recrutement")
+    services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
     rnd = services._current_round(room)
     rnd.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)

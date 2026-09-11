@@ -374,7 +374,7 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     task_a = consumers._timer_tasks.get(code)
     assert task_a is not None and not task_a.done()
 
-    # 2) subject.set while OPEN creates a brand new IDLE round (services.set_subject
+    # 2) subject.set while OPEN creates a brand new IDLE round (services.set_current_item
     # always takes the "create a new subject+round" branch when the current one
     # isn't idle) -- but the subject.set branch of _dispatch never touches
     # _timer_tasks. Task A is left exactly as it was: still tracked, still alive.
