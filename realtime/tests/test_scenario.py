@@ -121,6 +121,57 @@ def test_removing_a_round_that_carries_a_result_is_refused(room_with_facilitator
 
 
 @pytest.mark.django_db
+def test_removing_an_open_round_abandoned_for_another_is_refused(room_with_facilitator):
+    """Round de correction 1 : la garde d'origine ne testait que le pointeur
+    `room.current_round_id`, or `select_round` n'impose pas de fermer un round
+    avant d'en designer un autre comme courant. A est ouvert, des reponses
+    arrivent, puis le facilitateur bascule sur B SANS reveler ni acter A : A
+    cesse d'etre courant tout en restant `open`, sans jamais porter de
+    `Result`. Sans la garde d'ETAT (`rnd.state != RoundState.IDLE`), ce round
+    abandonne en vol redevenait retirable -- exactement le contournement en
+    deux gestes que la garde du round courant pretendait fermer en un seul."""
+    room, fac, voter = room_with_facilitator
+    a_id, b_id, _c_id = _three_rounds(room, fac)
+    services.open_vote(room, fac)
+    cast_first_item(room, voter, "4")
+    services.select_round(room, fac, b_id)  # bascule sans reveler ni acter A
+    room.refresh_from_db()
+    assert room.current_round_id == b_id
+    assert Round.objects.get(id=a_id).state == RoundState.OPEN
+
+    with pytest.raises(RoomError) as exc:
+        services.remove_round(room, fac, a_id)
+
+    assert exc.value.rejected_type == "round.remove"
+    assert Round.objects.filter(id=a_id).exists()
+
+
+@pytest.mark.django_db
+def test_removing_an_acted_round_reset_to_idle_is_still_refused(room_with_facilitator):
+    """Brief tache 2 : le sous-cas acte-puis-reinitialise. `vote.reset` remet
+    le round a `idle` mais NE SUPPRIME PAS son `Result` (c'est le but du
+    reset : rejouer sans perdre la trace du tour precedent) -- la garde sur
+    `rnd.results.exists()` continue donc de proteger ce round meme si la
+    garde d'etat, elle, ne le verrait plus (il est bien redevenu `idle`).
+    Le courant bascule sur C pour isoler cette garde de celle sur le round
+    courant."""
+    room, fac, voter = room_with_facilitator
+    a_id, b_id, c_id = _three_rounds(room, fac)
+    services.select_round(room, fac, b_id)
+    _act(room, fac, voter, "4")
+    services.reset_round(room, fac)
+    services.select_round(room, fac, c_id)
+    assert Round.objects.get(id=b_id).state == RoundState.IDLE
+    assert Round.objects.get(id=b_id).results.exists()
+
+    with pytest.raises(RoomError) as exc:
+        services.remove_round(room, fac, b_id)
+
+    assert exc.value.rejected_type == "round.remove"
+    assert Round.objects.filter(id=b_id).exists()
+
+
+@pytest.mark.django_db
 def test_removing_the_current_round_is_refused(room_with_facilitator):
     """Choix arrete (design, voir le commentaire de `remove_round`) : on refuse
     plutot que de designer un autre round courant a la place du facilitateur.

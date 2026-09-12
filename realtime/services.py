@@ -459,6 +459,12 @@ def reorder_rounds(room, participant, round_ids):
     Facilitateur seul, meme raisonnement que `reorder_items` : reordonner
     porte sur la file ENTIERE, pas sur une contribution propre -- ce n'est pas
     un droit d'auteur, c'est un geste de facilitation.
+
+    Deplacer un round deja ACTE est autorise, y compris celui qui vient
+    d'etre acte : la sequence ne pilote que l'AFFICHAGE de l'agenda dans la
+    salle, jamais l'historique (`history/`), qui se trie sur `decided_at`, pas
+    sur `Round.sequence`. Changer son rang dans la file ne reecrit donc rien
+    -- a la difference de `remove_round`, qui protege le `Result` lui-meme.
     """
     _require_facilitator(room, participant, "round.reorder")
     known = {rnd.id: rnd for rnd in room.rounds.all()}
@@ -475,24 +481,39 @@ def reorder_rounds(room, participant, round_ids):
 
 
 def remove_round(room, participant, round_id):
-    """Retire un round du scenario (tache 2).
+    """Retire un round du scenario (tache 2). On n'elague que ce qui n'a pas
+    encore vecu -- regle resserree au round de correction 1 -- : un round
+    n'est retirable que s'il reunit les TROIS conditions ci-dessous. C'est
+    explicable en une phrase a un facilitateur : « on ne retire qu'un round
+    prepare qui n'est pas a l'ecran ».
 
-    Deux gardes, dans cet ordre :
-    1. Un round qui porte un `Result` n'est jamais retire -- l'historique ne se
-       reecrit pas, meme garde et meme motif que `remove_item` pour un item
-       deja acte.
-    2. Le round COURANT n'est jamais retire non plus -- choix arrete ici,
-       pas laisse au hasard de l'implementation. L'autre lecture possible
-       (accepter et designer un autre round comme courant) forcerait un choix
-       arbitraire -- lequel devient courant ? le suivant par sequence ? le
-       premier round `pending` ? -- au nom du facilitateur, qui n'a pourtant
-       rien demande d'autre que "retirer CE round". Pire : un participant
-       connecte regarde le round courant en direct (state.sync/agenda) ; le
-       faire basculer vers un AUTRE round sans geste explicite du facilitateur
-       serait un changement d'activite impose silencieusement sous ses yeux.
-       Refuser est sans surprise : le facilitateur choisit explicitement son
-       nouveau round courant via `select_round` avant de pouvoir retirer
-       l'ancien.
+    1. Il ne porte aucun `Result` -- l'historique ne se reecrit pas, meme
+       garde et meme motif que `remove_item` pour un item deja acte. Un round
+       ACTE puis remis a `idle` (`vote.reset`) reste protege : son `Result`
+       survit au reset (c'est le but de `vote.reset`), donc cette garde
+       continue de le couvrir meme si la garde d'etat ci-dessous, elle, ne le
+       verrait plus.
+    2. Il est `idle`. Pas seulement "il n'est pas le round courant" : la
+       premiere version de cette garde ne testait que le pointeur
+       `room.current_round_id`, or `select_round` n'impose pas de fermer un
+       round avant d'en designer un autre comme courant -- un round `open`
+       avec des reponses vivantes cesse d'etre courant sans jamais etre acte,
+       donc sans jamais porter de `Result`. Sans la garde d'ETAT, ce round
+       abandonne en vol redevenait retirable des qu'on basculait ailleurs :
+       exactement le contournement, en deux gestes au lieu d'un, de la raison
+       d'etre de la garde suivante -- un round en cours de vote disparaissait
+       alors silencieusement.
+    3. Il n'est pas le round COURANT -- choix arrete ici, pas laisse au hasard
+       de l'implementation. L'autre lecture possible (accepter et designer un
+       autre round comme courant) forcerait un choix arbitraire -- lequel
+       devient courant ? le suivant par sequence ? le premier round
+       `pending` ? -- au nom du facilitateur, qui n'a pourtant rien demande
+       d'autre que "retirer CE round". Pire : un participant connecte regarde
+       le round courant en direct (state.sync/agenda) ; le faire basculer
+       vers un AUTRE round sans geste explicite du facilitateur serait un
+       changement d'activite impose silencieusement sous ses yeux. Refuser
+       est sans surprise : le facilitateur choisit explicitement son nouveau
+       round courant via `select_round` avant de pouvoir retirer l'ancien.
     """
     _require_facilitator(room, participant, "round.remove")
     rnd = room.rounds.filter(id=round_id).first()
@@ -500,6 +521,8 @@ def remove_round(room, participant, round_id):
         raise RoomError("state.invalid_transition", "Unknown round", "round.remove")
     if rnd.results.exists():
         raise RoomError("state.invalid_transition", "Round already decided", "round.remove")
+    if rnd.state != RoundState.IDLE:
+        raise RoomError("state.invalid_transition", "Round in flight", "round.remove")
     if room.current_round_id == rnd.id:
         raise RoomError("state.invalid_transition", "Current round", "round.remove")
     rnd.delete()
