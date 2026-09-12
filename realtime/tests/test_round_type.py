@@ -8,6 +8,7 @@ import pytest
 from decks.models import Deck
 from decks.seed import create_standard_deck
 from realtime import services
+from realtime.tests.helpers import cast_first_item
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Participant, Role, Room, Round
 from rooms.snapshot import build_deck_snapshot
@@ -111,6 +112,36 @@ def test_reset_then_reopen_keeps_the_rounds_own_deck(room_with_two_decks):
 
     rnd = Round.objects.get(id=a_id)
     assert rnd.deck_snapshot["deckId"] == standard.pk
+
+
+def test_replaying_an_acted_round_keeps_its_own_deck_and_config(room_with_two_decks):
+    """Rejouer un round ACTE (via `select_round`) doit garder SON deck et SA
+    config, pas ceux devenus actifs sur la room entretemps : rejouer, c'est la
+    MEME activite avec des reponses neuves, pas une nouvelle activite."""
+    room, fac, standard, other = room_with_two_decks
+    voter = Participant.objects.create(room=room, token=generate_token(), display_name="Alex", role=Role.VOTER)
+
+    services.prepare_round(room, fac, subject_text="A", deck_id=standard.pk)
+    a_id = services.current_round(room).id
+    rnd = Round.objects.get(id=a_id)
+    rnd.config = {"anonymity": "off"}
+    rnd.save(update_fields=["config"])
+
+    services.open_vote(room, fac)
+    cast_first_item(room, voter, "4")
+    services.reveal(room, fac)
+    services.act_result(room, fac, "4")
+
+    # Le deck ACTIF de la room change APRES que A a ete acte.
+    services.select_deck(room, fac, other.pk)
+
+    out = services.select_round(room, fac, a_id)
+    replay_id = out["roundId"]
+    assert replay_id != a_id
+
+    replay = Round.objects.get(id=replay_id)
+    assert replay.deck_snapshot["deckId"] == standard.pk
+    assert replay.config == {"anonymity": "off"}
 
 
 def test_round_config_defaults_to_empty_dict_and_round_trips(room_with_two_decks):

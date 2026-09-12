@@ -10,6 +10,7 @@ from django.contrib.auth import get_user_model
 from decks.models import Deck
 from decks.seed import create_standard_deck
 from realtime import services
+from realtime.services import RoomError
 from realtime.tests.helpers import cast_first_item
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Item, Participant, Result, Role, Room, RoundState
@@ -61,9 +62,19 @@ def _play(room, fac, voter, card):
 
 @pytest.mark.django_db
 def test_replaying_an_acted_round_opens_a_new_one_with_a_copy_of_its_items(room_with_two_decks):
-    """C2 : trois symptomes mesures d'un round acte rejoue EN PLACE — le deck
-    perime rediffuse (premier vote rejete en « Unknown card value »), l'anonymat
-    colle, et le `Result` du premier tour ECRASE par le second."""
+    """C2, revu au round de correction 2 (task 1, design 5c). Rejouer une
+    activite ACTEE ouvre un round neuf qui copie ses items, MAIS reste la MEME
+    activite : il garde le deck (donc le type) avec lequel elle a ete jouee, pas
+    celui devenu actif sur la room entretemps (design decide 2026-09-12 :
+    rejouer = meme activite, reponses neuves). Seuls l'anonymat et le `Result`
+    ne survivent pas au rejeu — pas le deck.
+
+    Avant ce round de correction, `replay.deck_snapshot` etait laisse a `None`
+    et `open_vote` le regelait sur le deck ACTIF de la room : un round de Dot
+    Voting rejoue apres que le facilitateur soit passe au Poker serait alors
+    devenu... du Poker. Ce test verifiait ce (faux) comportement ; il verifie
+    desormais l'inverse.
+    """
     room, fac, voter, standard, other = room_with_two_decks
     services.set_current_item(room, fac, "Budget ?")
     first = services.current_round(room)
@@ -74,8 +85,9 @@ def test_replaying_an_acted_round_opens_a_new_one_with_a_copy_of_its_items(room_
     first.save(update_fields=["is_anonymous"])
     _play(room, fac, voter, "4")
 
-    # Le facilitateur change de deck entre les deux tours, ce qu'un round ACTED
-    # autorise, puis reprend le sujet dans l'agenda.
+    # Le facilitateur change le deck ACTIF de la room entre les deux tours —
+    # mais le round rejoue doit garder LE SIEN (celui fige quand il a ete joue
+    # la premiere fois), pas courir apres le nouveau deck actif.
     services.select_deck(room, fac, other.pk)
     out = services.select_round(room, fac, first_id)
 
@@ -83,12 +95,14 @@ def test_replaying_an_acted_round_opens_a_new_one_with_a_copy_of_its_items(room_
     assert out["text"] == "Budget ?"
     replay = services.current_round(room)
     assert replay.state == RoundState.IDLE
-    # Le snapshot perime est parti : `open_vote` regelera le deck ACTIF. Et c'est
-    # bien le deck ACTIF qui repart vers les clients — le rejouer en place leur
-    # rediffusait la main du tour precedent, dont le premier vote revenait ensuite
-    # en « Unknown card value ».
-    assert replay.deck_snapshot is None
-    assert services.active_deck_snapshot(room)["deckId"] == other.pk
+    # Le round rejoue a copie le deck du round SOURCE (standard), pas celui,
+    # devenu actif entretemps, de la room (other) : rejouer, c'est la MEME
+    # activite. `room.deck_snapshot` (le champ brut) est bien passe a other,
+    # mais `active_deck_snapshot` (ce qui part vers les clients) privilegie le
+    # snapshot propre du round, comme partout ailleurs dans ce module.
+    assert replay.deck_snapshot["deckId"] == standard.pk
+    assert room.deck_snapshot["deckId"] == other.pk
+    assert services.active_deck_snapshot(room)["deckId"] == standard.pk
     assert replay.is_anonymous is False
     # L'item est une COPIE tracee, pas l'item du tour precedent : le reformuler ne
     # reecrit pas ce qui a ete decide (design §4).
@@ -97,15 +111,21 @@ def test_replaying_an_acted_round_opens_a_new_one_with_a_copy_of_its_items(room_
     assert new_item.id != old_item.id
     assert new_item.origin_item_id == old_item.id
 
-    # Le premier vote du re-vote joue sur le deck actif, et non sur celui du tour
-    # passe : c'est le « Unknown card value » de la relecture.
-    _play(room, fac, voter, "13")
+    services.open_vote(room, fac)
+    # Une valeur qui n'existe QUE dans le deck devenu actif de la room (other)
+    # est refusee sur le rejeu : le round a garde SON deck (standard), pas
+    # celui de la room.
+    with pytest.raises(RoomError):
+        cast_first_item(room, voter, "13")
+    cast_first_item(room, voter, "5")
+    services.reveal(room, fac)
+    services.act_result(room, fac, "5")
 
     assert Item.objects.get(round_id=first_id).text == "Budget ?"
     # Deux resultats distincts, pas un ecrase.
     assert sorted(
         Result.objects.filter(round__room=room).values_list("chosen_value", flat=True)
-    ) == ["13", "4"]
+    ) == ["4", "5"]
     assert Result.objects.get(round_id=first_id).chosen_value == "4"
 
 

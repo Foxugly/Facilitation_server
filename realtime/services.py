@@ -265,8 +265,25 @@ def _replay_round(room, participant, source):
     l'item d'origine — la premiere copie, comme le fait la migration de donnees —
     et l'auteur suit l'item, un post-it ne perdant pas son auteur en changeant de
     round (design §7).
+
+    Rejouer, c'est la MEME activite avec des reponses neuves : le deck (donc le
+    TYPE) et la config suivent, comme les items. Sans ca, un round dont le deck
+    actif de la room a change de type entretemps (poker -> dot voting, ou
+    l'inverse) reviendrait rejoue dans un AUTRE type que celui qui a produit ses
+    items et son Result d'origine. Si la source n'a jamais fige de deck (prepare
+    sans choix explicite, jamais ouverte), `source.deck_snapshot` est deja None :
+    on ne fige alors rien de plus que ce que la source avait elle-meme, et le
+    round neuf herite du deck actif a l'ouverture, comme aujourd'hui.
     """
-    rnd = Round.objects.create(room=room, state=RoundState.IDLE, facilitator=participant)
+    rnd = Round.objects.create(
+        room=room,
+        state=RoundState.IDLE,
+        facilitator=participant,
+        deck_snapshot=source.deck_snapshot,
+        # dict(...) : une copie, pas la meme reference — la source et le rejeu
+        # ne doivent jamais partager un objet mutable en memoire.
+        config=dict(source.config),
+    )
     for item in source.items.all():
         Item.objects.create(
             round=rnd,
