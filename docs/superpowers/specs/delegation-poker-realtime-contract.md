@@ -14,7 +14,7 @@
 
 | # | Principe | Décision |
 |---|----------|----------|
-| 1 | **Serveur = source de vérité** | Le client émet des *intentions* ; le serveur décide et **rediffuse le fait** à tous. Pas d'affichage optimiste : le client attend l'écho serveur. |
+| 1 | **Serveur = source de vérité** | Le client émet des *intentions* ; le serveur décide et **rediffuse le fait** à tous. L'affichage optimiste est permis, à condition d'être annulé au refus du serveur — l'autorité reste entière. *Nuance, pas suppression : ce principe protège une chose réelle (le serveur décide), c'était son absolu (« pas d'affichage optimiste ») qui était faux — le front affiche de manière optimiste depuis toujours, poker compris, tension préexistante que 6a n'a fait que rendre visible. Cas concret : en dot voting, l'affichage optimiste alimente l'ARITHMÉTIQUE du budget de jetons — un jeton refusé et non annulé laisse le participant avec moins de gommettes que son dû.* |
 | 2 | **Autorité facilitateur** | Les événements de contrôle (`vote.open/reveal/reset`, `result.act`, `item.*`, `round.*`, `deck.select`, `timer.set`, `reveal.setMode`, `facilitator.transfer`) ne sont acceptés **que** du facilitateur. `response.cast` fait exception : ouvert à tous (§8.2.a), ce n'est pas une intention de contrôle. Le serveur **rejette** sinon (le masquage front n'est qu'un confort). |
 | 3 | **Rôle porté par le token, pas par la connexion** | À la reconnexion, token → participant → rôle + vote restaurés. Une coupure ne perd pas le rôle. |
 | 4 | **Secret réel des votes** | Aucune valeur de vote n'est diffusée avant `reveal`. Avant : seulement « a voté / pas voté ». |

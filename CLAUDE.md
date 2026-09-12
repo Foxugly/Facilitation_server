@@ -71,7 +71,7 @@ py -m venv .venv
 ```
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 381 passed
+.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 473 passed
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py # un fichier
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py::test_nom -x
 .\.venv\Scripts\python.exe -m pytest -k "reveal and not deck"
@@ -391,17 +391,24 @@ facilitateur puisse reformuler un sujet sans réécrire l'historique de l'activi
      `docs/superpowers/specs/2026-09-11-scenario-et-items-design.md` §8 pour
      ce que les cinq livraisons ont produit ensemble, et pour deux écarts
      appris pendant 5e que ce document ne prévoyait pas.
-6. **Dot Voting** — prochaine étape, première activité neuve. Choisie avant Weighted
-   Ranking parce qu'elle exerce le modèle N-items sans le risque du drag & drop
-   tactile, et parce qu'elle sera la première à exercer le chaînage de 5e entre
-   **deux types** d'activité différents (le poker n'a chaîné qu'avec lui-même).
+6. **Dot Voting** — première activité neuve. Choisie avant Weighted Ranking parce
+   qu'elle exerce le modèle N-items sans le risque du drag & drop tactile, et
+   parce qu'elle sera la première à exercer le chaînage de 5e entre **deux
+   types** d'activité différents (le poker n'a chaîné qu'avec lui-même).
+   **6a est faite** (merge `0c631f6`, correctif `f0071a3`) : deck `dot_voting`
+   actif, `dot_voting_v1` au registre, validation du budget de jetons à
+   l'échelle du round, totaux en direct + reste à placer, résultat figé en
+   payload. Voir `docs/superpowers/specs/2026-09-12-dot-voting-design.md` §9
+   pour le bilan de ce que la livraison a coûté hors du registre.
+   **6b (PonderedDotVoting / Weighted Ranking : poids 1, 3, 5, 7..., au plus
+   1 jeton par item) est la prochaine étape.**
 
 MVP visé ensuite : Planning Poker, Delegation Poker, Roman Vote, Dot Voting,
 Weighted Ranking, QCM/Poll, ROTI.
 
 ## Règles de travail
 
-- **`pytest` vert à chaque commit.** Référence actuelle : 381 passed.
+- **`pytest` vert à chaque commit.** Référence actuelle : 473 passed.
 - Le poker existant doit continuer à fonctionner **à chaque étape**. Aucune étape ne livre
   une régression « qu'on corrigera après ».
 - Étapes petites et testables. Pas de réécriture de masse.
@@ -557,6 +564,17 @@ Weighted Ranking, QCM/Poll, ROTI.
       await comm.send_json_to({"v": 1, "type": "ping", "payload": {}})
       await _drain_until(comm, "pong")  # collecter les types vus en chemin
   ```
+
+- **Une barrière de test async doit sonder la CONDITION, pas compter des ticks
+  de boucle.** Payé en CI la nuit du 2026-09-12 (commit `f0071a3`) : la branche
+  `vote.open` a gagné un aller-retour `database_sync_to_async` supplémentaire
+  (`_broadcast_live_totals`) AVANT `_schedule_timeout` — drainer le fait
+  diffusé ne prouvait donc plus que la tâche de timer était posée. `_settle()`
+  n'attend aucun temps réel, donc vert sur SQLite et rouge sur PostgreSQL —
+  même famille de piège que ci-dessus (une barrière calibrée sur un nombre de
+  tours ment dès que le code gagne un tour de plus). Correctif :
+  `_wait_for_timer_task()`, qui sonde la condition au lieu d'attendre un
+  nombre fixe d'allers-retours.
 
 - **Coordonnées d'infrastructure, relevées sur la box le 2026-09-10.** Port **8009**
   (`8000`–`8008` tous occupés, dont `8006` daphne Poker, `8007` gunicorn billing, `8008` daphne

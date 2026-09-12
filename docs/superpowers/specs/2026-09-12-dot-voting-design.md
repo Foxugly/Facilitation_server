@@ -2,7 +2,7 @@
 
 **Date :** 2026-09-12
 **Étape du plan :** 6 (« Dot Voting »), première activité neuve après le programme 5a → 5e.
-**Statut :** conception validée avec l'utilisateur, non implémentée.
+**Statut :** conception validée avec l'utilisateur. **6a est faite et en production** (merge `0c631f6`, correctif `f0071a3`) — voir §9 pour le bilan de ce qu'elle a coûté hors du registre. 6b (weighted_dot_voting) reste à faire.
 
 Cette étape est **l'épreuve de vérité du registre d'activités** : si la promesse « ajouter une activité ne doit toucher que le registre » est tenue, ces deux activités s'ajoutent sans toucher au domaine. Là où elles obligeront à ouvrir `services.py`, le registre sera à élargir — et chaque ouverture est à documenter comme telle, pas à subir.
 
@@ -76,3 +76,39 @@ Conséquence à ne pas manquer : la règle par défaut « la valeur jouée appar
 - **Pas d'état `CLOSED`.** Ces deux activités révèlent ; elles n'ont pas besoin d'un état de fin sans révélation. La question se rouvrira avec la première activité qui ne révèle rien — un brainstorming.
 - **Pas de glisser-déposer.** Décision de conception du projet, prise pour le tactile.
 - **Pas de changement du poker.** Son dépouillement, son `Result` et son contrat restent identiques.
+
+## 9. Bilan de 6a — ce qu'il a fallu ouvrir hors du registre
+
+6a est faite. Cette section mesure la promesse posée en tête de ce document :
+« ajouter une activité ne doit toucher que le registre ».
+
+**Côté serveur — la promesse tient.** Aucune condition « si l'activité est X »
+ne subsiste dans `realtime/services.py` : il n'y reste que des prédicats de
+CAPACITÉ interrogés sur le registre. Trois ouvertures ont été faites, et chacune
+est une **extension du registre**, pas un contournement :
+
+1. `validate_responses` — la validation à l'échelle du round, la seule ouverture
+   que la conception (§3) avait annoncée. `cast_response` l'appelle avant
+   d'écrire, en lui passant les réponses déjà posées par ce participant.
+2. `validate_value` remplace la règle par défaut « la valeur appartient au deck »,
+   inapplicable à une activité sans cartes (§7).
+3. `aggregate` / `rank_value` / `freeze_results` écrivent le classement dans le
+   nouveau `Result.payload`.
+
+**Limite d'abstraction connue, à consigner telle quelle :** `freeze_results`
+groupe TROIS conséquences en un seul drapeau (figer à la révélation, produire un
+résultat, enregistrer une décision du facilitateur). Une activité de type ROTI —
+qui voudrait figer à la révélation ET enregistrer une décision — n'est donc pas
+exprimable aujourd'hui. C'est la première fuite identifiée de l'abstraction ; la
+signaler vaut mieux que de la découvrir en 6c.
+
+**Côté client — la promesse tient à ~70 %.** Ce qui a dû sortir du registre :
+les verbes du service de socket (légitime : c'étaient des messages du contrat
+que le poker n'avait jamais eu l'occasion d'exercer), les fichiers de traduction
+(mécanique), et surtout `protocol.ts`, devenu une **union par optionalité** que
+chaque activité élargira. **Avertissement pour 6b** : la variante pondérée sera
+un FAUX POSITIF comme mesure — jumelle de 6a par construction, elle réutilisera
+les mêmes champs. La bonne mesure sera le nombre de lignes ajoutées à
+`protocol.ts`, pas le nombre de fichiers touchés. Les deux gestes qui rendraient
+la promesse vraie côté front : typer l'entrée de registre par ses payloads
+plutôt que par un type global, et sortir l'état d'activité du service de room.
