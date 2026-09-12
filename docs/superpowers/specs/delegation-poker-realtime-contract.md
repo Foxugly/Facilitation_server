@@ -161,6 +161,7 @@ Champ par champ (`realtime/services.py::build_state_sync`) :
 
 - `myResponses` = **les réponses du seul client destinataire**, indexées par id d'item (les autres restent secrètes tant que `roundState` n'est ni `revealed` ni `acted`). L'ancienne clé `myVote` (le vote du premier item seul) est retirée en fin de 5b (§8.2.b) — voir §8.2.a.
 - Si `roundState === "revealed"` **ou `"acted"`**, `state.sync` inclut aussi `itemResults` (§8.2.a) — un retardataire qui arrive après la révélation **voit les résultats** (le client traite `revealed` et `acted` comme un seul état d'affichage), et votera au tour suivant. Comme `vote.revealed`, il s'agit d'un décompte qui respecte l'anonymat : jamais de lien participant → carte sur un round anonyme.
+- `state.sync` porte aussi `chainingCandidates` (§8.5.a), **uniquement si le destinataire est le facilitateur** et que le round courant est lié en mode `manual`, pas encore résolu — même forme que le `candidates` de `round.candidates`. Un facilitateur qui (re)connecte sur un tel round revoit ainsi ses candidats sans avoir à re-sélectionner le round ; la clé est absente (pas vide) pour tout autre destinataire ou toute autre situation — réservée au facilitateur, la garde se fait avant le calcul, jamais par un masquage après coup.
 - **Depuis 5a** (§8.1), `state.sync` porte aussi `items` — la liste des items du round courant, même forme que dans les faits `item.*` (`[{id, text, sequence}]`) — et `round` — `{id, state}` du round courant (`id: null` si aucun round actif). `subject` reste émis en doublon (le texte du premier item) : aucune date n'est fixée pour son retrait — c'est une clé de `state.sync`, distincte des anciennes intentions entrantes `subject.set`/`subject.add`/`subject.select` (§8.1.b), retirées en 5b.
 - `room.isTeam` (`room.team_id is not None`) pilote le gating client de certaines options (le timer, notamment, est réservé aux salles d'équipe) ; le serveur reste de toute façon autoritaire côté validation.
 - `myRole` et `myParticipantId` sont le rôle et l'identifiant **du destinataire**, renvoyés par le serveur — jamais déduits d'un état client persisté : une promotion facilitateur doit se voir immédiatement chez le facilitateur lui-même, pas seulement chez les autres.
@@ -447,11 +448,10 @@ l'émettre EST la sienne : ce fait lui est renvoyé directement (`self._emit`),
 sans passer par `self.channel_layer`, exactement comme `state.sync` (§5.1) ne
 part jamais qu'au client qui a demandé le join.
 
-⚠️ Écart connu : `state.sync` ne porte pas encore ces candidats à la
-reconnexion (`realtime/services.py::build_state_sync` n'a pas été touché par
-cette livraison, hors périmètre de la tâche 3) — un facilitateur qui recharge
-sur un round manuel non résolu doit encore re-sélectionner le round pour les
-revoir. À traiter séparément.
+`state.sync` porte les mêmes candidats (`chainingCandidates`, §5.1) aux mêmes
+conditions, sous réserve que le destinataire soit lui-même le facilitateur :
+un facilitateur qui (re)connecte sur un round manuel non résolu les revoit
+donc sans avoir à re-sélectionner le round.
 
 ---
 

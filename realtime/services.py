@@ -1469,6 +1469,28 @@ def build_state_sync(participant):
     # d'affichage : l'omettre laissait le meme trou apres la globalisation.
     if round_state in (RoundState.REVEALED, RoundState.ACTED):
         payload["itemResults"] = revealed_payload(room)["itemResults"]
+    # Chainage (contrat §8.5.a) : un facilitateur qui rejoint ou recharge sur un
+    # round lie en mode manuel, pas encore resolu, doit voir les candidats sans
+    # avoir a re-selectionner le round -- state.sync ne rejoue aucun evenement,
+    # donc tout ce qui peint l'ecran doit s'y trouver (meme defaut, meme remede
+    # que pour `itemResults` ci-dessus). Reutilise `chaining_candidates`, le
+    # MEME calcul que celui que round.select renvoie au facilitateur, pour que
+    # les deux chemins ne divergent jamais sur ce qu'ils considerent candidat.
+    #
+    # Reserve au facilitateur, et construit seulement pour lui : cette fonction
+    # produit un payload PAR destinataire (voir `myRole`/`myResponses`
+    # ci-dessus), donc la garde se fait avant le calcul, pas par omission
+    # d'une cle apres coup -- une trame WebSocket se lit dans le navigateur,
+    # et ce depot n'emet jamais une information reservee pour la masquer
+    # ensuite cote client.
+    if (
+        participant.role == Role.FACILITATOR
+        and rnd is not None
+        and rnd.source_round_id
+        and (rnd.source_rule or {}).get("mode") == "manual"
+        and rnd.source_resolved_at is None
+    ):
+        payload["chainingCandidates"] = chaining_candidates(room, rnd.id)
     return payload
 
 
