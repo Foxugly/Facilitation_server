@@ -38,6 +38,9 @@ echo ">>> Collecting static files..."
 echo ">>> Seeding the standard Delegation Poker deck (idempotent)..."
 "$VENV/bin/python" manage.py seed_delegation_deck || true
 
+echo ">>> Seeding the Dot Voting deck (idempotent)..."
+"$VENV/bin/python" manage.py seed_dot_voting_deck || true
+
 echo ">>> Normalizing permissions (dirs 750 / files 640, no o-rwx, no g-w)..."
 chown -R django:www-data "$APP_DIR"
 chmod -R g-w,o-rwx "$APP_DIR"

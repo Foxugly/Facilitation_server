@@ -15,7 +15,8 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(f"Created dot_voting deck {deck.pk} with {deck.cards.count()} cards."))
         self.stdout.write(
             "This deck has no active cards by design -- see design doc §7. "
-            "Seeded is_active=False: it stays out of every catalogue until a registry "
-            "entry for dot_voting exists in realtime/activities.py. Re-running this "
-            "command never touches an existing row, so a deliberate reactivation survives redeploys."
+            "Seeded is_active=True: the dot_voting_v1 registry entry exists, so it is "
+            "offered to any team catalogue (free_tier=False keeps it out of the account-less "
+            "catalogue -- a product decision, not an oversight). Re-running this command "
+            "never touches an existing row, so a deliberate deactivation survives redeploys."
         )

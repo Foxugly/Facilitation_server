@@ -195,15 +195,22 @@ def create_dot_voting_deck():
     free_tier=False comme les decks icones : reserve aux equipes payantes tant
     que ce n'est pas offert par defaut aux salles sans compte.
 
-    is_active=False a la creation : `decks.selection.available_decks` filtre sur
-    ce drapeau pour TOUTE salle (equipe ou non), donc un deck inactif ne peut pas
-    etre propose ni active depuis le catalogue. Regle du projet : un client ne se
-    voit jamais proposer un geste que le serveur refusera -- or tant qu'aucune
-    entree de registre (realtime/activities.py) ne connait "dot_voting", toute
-    reponse serait refusee par la regle par defaut "la valeur appartient au deck",
-    un deck sans carte n'en ayant aucune. A rebasculer sur is_active=True (en base
-    ou admin) seulement quand cette entree de registre existe -- jamais en
-    rejouant ce seed, qui ne touche pas une ligne deja presente.
+    is_active=True depuis la tache 7 de la livraison 6a. Ce deck a ete seme
+    is_active=False a la tache 1 de la meme livraison, et deliberement : regle
+    du projet, un client ne se voit jamais propose un geste que le serveur
+    refusera -- tant qu'aucune entree de registre (realtime/activities.py) ne
+    connaissait "dot_voting", toute reponse aurait ete refusee par la regle par
+    defaut "la valeur appartient au deck", un deck sans carte n'en ayant aucune.
+    Cette entree de registre existe maintenant (`dot_voting_v1`), la condition
+    qui tenait le deck ferme est donc levee -- les deux etats successifs
+    (inactif puis actif) suivent la meme regle a deux moments differents de la
+    livraison, ce n'est pas un oubli corrige.
+
+    Une base qui a deja tourne ce seed avec l'ancien defaut (is_active=False)
+    ne converge pas d'elle-meme : `seed_dot_voting_deck` s'arrete des qu'une
+    ligne existe, il ne la met jamais a jour. Voir la migration de donnees
+    `decks/migrations/0015_reactivate_dot_voting_deck.py`, qui rallume un deck
+    "dot_voting" deja seme et reste inactif.
     """
     vt, _ = VoteType.objects.get_or_create(
         code=DOT_VOTING_CODE, defaults={"resolution_strategy": DOT_VOTING_RESOLUTION_STRATEGY}
@@ -213,7 +220,7 @@ def create_dot_voting_deck():
     vt.save()
 
     deck = Deck.objects.create(
-        vote_type=vt, is_standard=True, free_tier=False, is_active=False,
+        vote_type=vt, is_standard=True, free_tier=False, is_active=True,
         card_back_image=_standard_card_back(),
     )
     for lang, name in DOT_VOTING_NAMES.items():
