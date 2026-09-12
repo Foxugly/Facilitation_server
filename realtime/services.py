@@ -107,10 +107,14 @@ def _is_facilitator(room, participant):
     # (un PK non-None). Vrai de tout `Participant` recu du consumer (resolu par
     # `resolve_participant`, toujours charge depuis la DB) -- mais un futur
     # appelant qui passerait une instance non sauvegardee casserait la garde en
-    # silence (`None == None`). `assert` plutot que lever : c'est un bug
-    # d'appelant a corriger avant merge, pas une entree utilisateur a refuser
-    # proprement.
-    assert participant.id is not None, "participant non persistant"
+    # silence (`None == None`). `ValueError` et non `assert` : un `assert`
+    # disparait en mode optimise (`python -O` / `PYTHONOPTIMIZE`), ce qui
+    # ferait disparaitre ce filet sans qu'aucun test (qui ne tourne pas en
+    # mode optimise) puisse jamais le detecter. `ValueError`, et non
+    # `RoomError`, parce que c'est un bug d'appelant a corriger avant merge,
+    # pas une entree utilisateur a refuser proprement.
+    if participant.id is None:
+        raise ValueError("_is_facilitator: participant non persistant (id is None)")
     rnd = current_round(room)
     # Authority is the round facilitator; before any round exists, the room's
     # sole facilitator participant holds it (contract §2).
