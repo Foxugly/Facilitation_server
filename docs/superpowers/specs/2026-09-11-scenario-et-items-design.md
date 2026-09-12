@@ -265,7 +265,22 @@ poker jouable de bout en bout, et les e2e front verts quand le contrat bouge.
 | **5b** ✅ fait | `Response` | `Vote` → `Response` + `payload` + `item`, unicité `(item, participant)`, agrégation par item, `response.cast`. Suppression des alias 5a. | Un round poker à 2 items se dépouille item par item. |
 | **5c** ✅ fait | Type par round | `Round.config` (deck figé dès la préparation, sur le round — pas de `vote_type` en FK, voir §3), validation par le registre (`config_schema`), `round.configure`. `items_authored_by` générique **n'a pas été livré** : le poker reste facilitateur-seul via la garde existante (`_require_facilitator`), sans mécanisme par activité — reporté. | Deux rounds de types différents dans une même room, chacun gardant son deck, son dépouillement et son résultat ; `item.add` refusé à un votant sur un round poker. |
 | **5d** ✅ fait | Scénario préparé | `Round.sequence` (ordre explicite, plus de trou laissé par un round retiré), `round.reorder` / `round.remove` câblés sur le contrat WS (pas de nouveau message `scenario.*` — écart assumé, voir ci-dessous), agenda enrichi de `state` et `everDecided` pour que le front sache ce qui est réellement retirable, écran de préparation front (réordonnancement, élagage, sans glisser-déposer). | Un scénario de rounds préparé avant l'ouverture de la room, réordonné puis élagué, joué dans l'ordre — vérifié en production le 2026-09-12. |
-| **5e** | Chaînage | `source_round`, `source_rule` (`auto` et `manual`), résolution en copie, `origin_item`, recopie de `author`, garde-fous du registre, écran de sélection manuelle côté front. | Round 1 poker → round 2 alimenté par ses résultats, en auto **et** en manuel. |
+| **5e** ✅ fait | Chaînage | `source_round`, `source_rule` (`auto` et `manual`), `source_resolved_at` (marqueur d'idempotence dédié), `Item.source_item` (parent direct, distinct d'`origin_item` qui remonte à la racine), résolution en copie, recopie de `author`, garde-fous du registre (`rank_value`), `round.bind` / `round.resolve` au contrat (§8.5), écran de sélection manuelle côté front. | Round 1 poker acté → round 2 lié dessus, en auto **et** en manuel — vérifié en production (salle 3WGR6E, 2026-09-12) : le round 2 porte son propre item **plus** une copie de celui du round 1, origine et parent direct renseignés. |
+
+## Le programme 5a → 5e, clos
+
+Cinq livraisons, un seul modèle qui tient debout à chaque étape : `Room` porte
+un scénario de `Round` séquentiels, chacun porteur de ses `Item`, chacun
+recevant des `Response` validées par le type que déclare son `deck_snapshot`.
+Le poker n'a jamais cessé de fonctionner entre deux livraisons — c'était la
+contrainte, pas un bonus — et il termine le programme sous la forme visée dès
+le §1 : une activité parmi d'autres, pas un cas particulier du code. Le
+différenciateur produit annoncé en introduction (chaîner la sortie d'une
+activité vers l'entrée de la suivante) est le seul morceau qui restait vrai
+uniquement sur le papier ; il est maintenant joué de bout en bout, en auto et
+en manuel, avec le poker comme unique activité du registre — Dot Voting
+(étape 6) sera la première à exercer ce chaînage entre **deux types**
+différents.
 
 **Écarts assumés, tranchés pendant 5d** — à ne pas prendre pour des oublis :
 
@@ -282,6 +297,37 @@ poker jouable de bout en bout, et les e2e front verts quand le contrat bouge.
   états apporteraient n'a aucun consommateur tant qu'aucune activité ne
   s'arrête avant la révélation. À rouvrir avec la première activité de ce
   genre (Brainstorming, Affinity Mapping), pas avant.
+
+**Appris pendant 5e, non anticipé par ce document** — deux surprises que la
+conception n'avait pas vues venir :
+
+- **Le signal « cette liaison est résolue » ne peut pas se déduire de l'état
+  des items.** La première implémentation lisait « le round consommateur a des
+  items avec `origin_item` non nul » comme preuve qu'une résolution avait eu
+  lieu. Ça se lit juste — sauf pour un round **rejoué** (`_replay_round`) :
+  rejouer un round acté copie déjà ses items en remontant à la racine de la
+  chaîne, donc un round rejoué porte *tous* ses items marqués d'une origine
+  **avant même** qu'on ne le lie à quoi que ce soit. Le lier ensuite à une
+  source répondait alors « déjà résolu » à tort, et `resolve_source` copiait
+  zéro item — en silence, sans `RoomError`. Corrigé par un marqueur dédié,
+  `Round.source_resolved_at` : posé à `None` par `bind_round` à chaque
+  déclaration, posé à l'horodatage de la résolution par `resolve_source`, il
+  ne regarde plus que lui-même — jamais l'état des items. Voir
+  `realtime/services.py::resolve_source` et le round de correction 1 de
+  `.superpowers/sdd/2026-09-12-5e-chainage/task-2-report.md`.
+- **La traçabilité d'une copie n'est exposée que sur le chemin manuel.**
+  `round.resolved` (résolution manuelle, §8.5) porte `originItemId` et
+  `sourceItemId` pour chaque item copié. `round.selected` (le round devient
+  courant et résout lui-même une liaison `auto`) construit ses `items` avec la
+  forme courte partagée par tout le contrat (`{id, text, sequence}`) — sans
+  ces deux clés. La traçabilité existe bien en base dans les deux cas
+  (`Item.origin_item`, `Item.source_item`), et un `state.sync` ultérieur sur
+  le round consommateur ne la révèle pas non plus, pour la même raison de
+  forme partagée. Asymétrie assumée, pas corrigée : l'unifier exigerait soit
+  d'enrichir la forme courte pour *tous* les rounds, soit d'ajouter un fait
+  dédié sur le chemin auto qui n'existait pas avant 5e — les deux changent un
+  comportement que rien dans le programme n'exigeait de changer. Documentée au
+  contrat, §8.5.a.
 
 Dot Voting (étape 6) vient après 5e et, si le découpage tient sa promesse, ne
 touche que le registre plus deux composants Angular.
