@@ -114,13 +114,13 @@ class ActivitySpec:
     #: `consumes`/`produces`) -- deux vocabulaires pour la meme notion
     #: finiraient par diverger. Defaut prudent "none" : une strategie inconnue
     #: ne doit pas se declarer consommatrice sans qu'on sache de quoi
-    #: (design 2026-09-11 section7).
+    #: (design 2026-09-11 §7).
     consumes: str = "none"
 
     #: Ce que cette activite PRODUIT pour une activite chainee en aval :
     #: "results" (un Result fige par item -- le poker) ou "none". Produire des
     #: "results" rend l'activite chainable : la tache suivante copiera ces
-    #: Result en Item du round consommateur (design section7 -- la copie
+    #: Result en Item du round consommateur (design §7 -- la copie
     #: atterrit toujours en Item, quelle que soit la source). Meme defaut
     #: prudent que `consumes`.
     produces: str = "none"
@@ -165,7 +165,7 @@ def _default_aggregate(ordinal):
 ACTIVITY_REGISTRY: dict[str, ActivitySpec] = {
     # Le poker consomme des items saisis (sujets) et produit un Result fige par
     # item -- il est donc chainable en amont d'une activite qui consommerait
-    # des "items" (design section7).
+    # des "items" (design §7).
     "delegation_v1": ActivitySpec(ordinal=True, consumes="items", produces="results"),
     "fist_of_five_v1": ActivitySpec(ordinal=True, consumes="items", produces="results"),
 }

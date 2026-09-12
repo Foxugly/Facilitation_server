@@ -173,7 +173,7 @@ class Round(models.Model):
     # fait autorite : le decompte affiche par le client est cosmetique.
     vote_deadline = models.DateTimeField(null=True, blank=True)
     # Le round amont dont celui-ci reprend des items (chainage, design
-    # 2026-09-11 section7, tache 1 de la livraison 5e). SET_NULL et non CASCADE :
+    # 2026-09-11 §7, tache 1 de la livraison 5e). SET_NULL et non CASCADE :
     # la copie des items (posee a la tache suivante) appartient DEJA au round
     # consommateur une fois faite -- c'est tout l'interet d'une copie plutot
     # qu'une reference vivante. Si supprimer la source emportait ce round en
@@ -183,7 +183,7 @@ class Round(models.Model):
     source_round = models.ForeignKey(
         "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="chained_rounds"
     )
-    # Ce qu'on reprend de la source et comment (design section7) :
+    # Ce qu'on reprend de la source et comment (design §7) :
     # {"take": "items"|"results", "mode": "auto"|"manual", "top": int|None}.
     # Pose ici sans etre interprete : cette tache ne resout aucune liaison, ni
     # copie ni validation -- la tache suivante lit ce champ, celle-ci l'ecrit.

@@ -1,4 +1,4 @@
-"""Chainage entre deux rounds (design 2026-09-11 section7, tache 1 de la
+"""Chainage entre deux rounds (design 2026-09-11 §7, tache 1 de la
 livraison 5e).
 
 Cette tache pose la liaison sans la resoudre : `Round.source_round` /
