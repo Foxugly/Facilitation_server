@@ -15,7 +15,7 @@
 | # | Principe | Décision |
 |---|----------|----------|
 | 1 | **Serveur = source de vérité** | Le client émet des *intentions* ; le serveur décide et **rediffuse le fait** à tous. Pas d'affichage optimiste : le client attend l'écho serveur. |
-| 2 | **Autorité facilitateur** | Les événements de contrôle (`vote.open/reveal/reset`, `result.act`, `item.*`, `round.select`) ne sont acceptés **que** du facilitateur. Le serveur **rejette** sinon (le masquage front n'est qu'un confort). |
+| 2 | **Autorité facilitateur** | Les événements de contrôle (`vote.open/reveal/reset`, `result.act`, `item.*`, `round.*`, et les alias hérités `subject.*`) ne sont acceptés **que** du facilitateur. Le serveur **rejette** sinon (le masquage front n'est qu'un confort). |
 | 3 | **Rôle porté par le token, pas par la connexion** | À la reconnexion, token → participant → rôle + vote restaurés. Une coupure ne perd pas le rôle. |
 | 4 | **Secret réel des votes** | Aucune valeur de vote n'est diffusée avant `reveal`. Avant : seulement « a voté / pas voté ». |
 | 5 | **HTTP crée/résout la salle ; WS gère la vie dans la salle** | Le socket ne s'ouvre qu'une fois *dans* la salle. |
@@ -81,9 +81,12 @@ Tous les messages (deux sens) partagent une enveloppe **versionnée** :
 | `facilitator.claim` | tout participant présent | `{ }` | **Uniquement** si le garde-fou est actif (§6.f). Premier arrivé = nouveau facilitateur. |
 
 > Cette table date de la Phase 1 (2026-07-07) et décrivait aussi `subject.set` et
-> `vote.cast` : le premier est remplacé par `item.add`/`item.update`/`round.select`
-> (§8.1.a), le second par `response.cast` (§8.2.a). Les deux ont vécu en alias
-> hérités et sont retirés en fin de 5b (§8.1.b, §8.2.b) — ne pas les réintroduire.
+> `vote.cast`. Le second est remplacé par `response.cast` (§8.2.a) et **retiré**
+> — `Facilitation_frontend` n'en a plus besoin, vérifié en prod (§8.2.b). Le
+> premier, en revanche, **reste un alias hérité actif** vers
+> `item.add`/`item.update`/`round.select` (§8.1.a, §8.1.b) : le front de
+> production l'émet encore, la bascule n'a pas eu lieu. Ne pas le retirer avant
+> qu'elle ne soit vérifiée.
 
 Toute intention **incohérente avec l'état courant** (ex. `response.cast` hors `open`) est
 **rejetée** par `error`, pas appliquée (§6.b).
@@ -129,7 +132,7 @@ Envoyé à un seul client (au `join` initial, à la reconnexion, à l'arrivée d
 
 - `myResponses` = **les réponses du seul client destinataire**, indexées par id d'item (les autres restent secrètes tant que `roundState !== "revealed"`). L'ancienne clé `myVote` (le vote du premier item seul) est retirée en fin de 5b (§8.2.b) — voir §8.2.a.
 - Si `roundState === "revealed"`, `state.sync` inclut aussi `itemResults` (§8.2.a) — un retardataire qui arrive en `revealed` **voit les résultats**, et votera au tour suivant. Comme `vote.revealed`, il s'agit d'un décompte qui respecte l'anonymat : jamais de lien participant → carte sur un round anonyme.
-- **Depuis 5a** (§8.1), `state.sync` porte aussi `items` — la liste des items du round courant, même forme que dans les faits `item.*` (`[{id, text, sequence}]`) — et `round` — `{id, state}` du round courant (`id: null` si aucun round actif). `subject` reste émis en doublon (le texte du premier item) : ni la fenêtre 5a ni 5b n'ont fixé de date pour son retrait, contrairement aux alias entrants `subject.*`/`vote.cast` — voir §8.1.b, §8.2.b.
+- **Depuis 5a** (§8.1), `state.sync` porte aussi `items` — la liste des items du round courant, même forme que dans les faits `item.*` (`[{id, text, sequence}]`) — et `round` — `{id, state}` du round courant (`id: null` si aucun round actif). `subject` reste émis en doublon (le texte du premier item) : aucune date n'est fixée pour son retrait — c'est une clé de `state.sync`, distincte des intentions entrantes `subject.set`/`subject.add`/`subject.select` (§8.1.b), elles-mêmes toujours actives en attendant la bascule front.
 
 ---
 
@@ -172,10 +175,12 @@ Codes attendus (liste extensible) : `protocol.version`, `forbidden.not_facilitat
 
 > Ajouté 2026-09-11, livraison 5a (`docs/superpowers/plans/2026-09-11-5a-items-du-round.md`).
 > Le round porte désormais **N items séquentiels** (`Round.items`, migrations 0010-0012),
-> et non plus un sujet unique. Le WS gagne cinq nouvelles intentions et cinq nouveaux
+> et non plus un sujet unique. Le WS gagne six nouvelles intentions et cinq nouveaux
 > faits ; les anciens messages entrants `subject.set`/`subject.add`/`subject.select`
-> ont vécu en alias hérités le temps que `Facilitation_frontend` bascule, et sont
-> retirés en fin de 5b — voir 8.1.b.
+> restent en service comme **alias hérités**, le temps que `Facilitation_frontend`
+> bascule sur `item.*`/`round.select`/`round.add` — voir 8.1.b. **Ce basculement
+> n'a pas eu lieu à ce jour** (contrairement à celui de 5b, §8.2.b) : le front de
+> production émet toujours `subject.set`/`subject.add`/`subject.select`.
 
 ### 8.1.a Nouveaux événements
 
@@ -183,11 +188,12 @@ Entrants (facilitateur seul, comme les autres intentions de contrôle) :
 
 | `type` | `payload` | Effet |
 |--------|-----------|-------|
-| `item.add` | `{ text }` | Ajoute un item au round courant (en crée un si aucun round actif). |
+| `item.add` | `{ text }` | Ajoute un item au round **courant** (en crée un si aucun round actif). |
 | `item.update` | `{ itemId, text }` | Réécrit le texte d'un item existant. |
 | `item.remove` | `{ itemId }` | Retire un item du round courant. Refusé si l'item porte déjà un `Result` (ne réécrit pas l'historique). |
 | `item.reorder` | `{ itemIds: [] }` | Refixe la séquence des items du round courant. Refusé si l'ensemble d'ids ne correspond pas exactement aux items existants. |
 | `round.select` | `{ roundId }` | Reprend un round du scénario (le remet à `idle` s'il ne l'était pas). Ex-`subject.select`. |
+| `round.add` | `{ text }` | Ouvre un round **de plus** dans la file (le scénario), sans le rendre courant sauf si aucun round n'existe encore. Ex-`subject.add`. **À ne pas confondre avec `item.add`** : celui-ci enrichit le round en cours, `round.add` avance dans la file. |
 
 Sortants (tous) — **exhaustif**, y compris les faits déjà documentés en §5 quand une de
 ces intentions les déclenche aussi :
@@ -199,12 +205,13 @@ ces intentions les déclenche aussi :
 | `item.removed` | `{ roundId, items, itemId }` | `item.remove` |
 | `item.reordered` | `{ roundId, items, itemId: null }` | `item.reorder` |
 | `round.selected` | `{ roundId, items, text, nextState: "idle" }` | `round.select` |
-| `agenda.updated` (§5) | `{ agenda }` | `item.add`, `item.update`, `item.remove`, `round.select` |
-| `subject.updated` (§5) | `{ text }` | `item.add`, `item.update`, `round.select` |
+| `agenda.updated` (§5) | `{ agenda }` | `item.add`, `item.update`, `item.remove`, `round.select`, `round.add` |
+| `subject.updated` (§5) | `{ text }` | `item.add`, `item.update`, `round.select`, `round.add` |
 | `vote.wasReset` (§5) | `{ nextState: "idle" }` | `round.select` |
 
-`item.reorder` est la seule des cinq intentions à ne déclencher **aucun** fait annexe :
-elle émet uniquement `item.reordered`.
+`item.reorder` et `round.add` sont les deux intentions à ne déclencher **aucun** fait
+propre : `item.reorder` émet uniquement `item.reordered` ; `round.add` réutilise
+`agenda.updated`/`subject.updated`, exactement ce que diffusait l'alias `subject.add`.
 
 Forme commune `{roundId, items, itemId}` : `roundId` est l'id du round courant (`null` s'il
 n'y en a aucun), `items` la liste complète et à jour des items de ce round
@@ -213,20 +220,29 @@ n'y en a aucun), `items` la liste complète et à jour des items de ce round
 plus `text` (le texte du premier item du round sélectionné, pour compatibilité avec les
 clients qui n'affichent qu'un sujet) et `nextState`, toujours `"idle"`.
 
-### 8.1.b Alias hérités — retirés en fin de 5b
+### 8.1.b Alias hérités — en attente de la bascule front
 
-> Note datée 2026-09-11, mise à jour en fin de 5b : `subject.set`, `subject.add`,
-> `subject.select` (entrants) ont vécu en **alias hérités** vers `item.add`/
-> `item.update`/`round.select` le temps que `Facilitation_frontend` bascule. Le
-> frontend de production ne les émet plus, et le consumer ne les reconnaît plus :
-> un client qui les enverrait encore reçoit `error` (`state.invalid_transition`,
-> "Unknown type").
+> Note datée 2026-09-11, mise à jour lors de la tentative de retrait en fin de
+> 5b (2026-09-12) : `subject.set`, `subject.add`, `subject.select` (entrants)
+> sont des **alias hérités** vers `item.add`/`item.update`/`round.select`/
+> `round.add`, conservés le temps que `Facilitation_frontend` bascule. **Ce
+> basculement n'a pas eu lieu** : le front de production émet toujours ces
+> trois types (`room-socket.service.ts`), constaté lors d'une tentative de
+> retrait qui aurait cassé la pose d'un sujet, l'ajout à la file et la
+> sélection dans l'agenda en production. Forme de payload et comportement
+> **inchangés** — aucune intention n'a été retirée. `subject.select` délègue
+> intégralement à `round.select` et hérite donc aussi de ses diffusions
+> (`vote.wasReset`, `round.selected`), en plus de `subject.updated`/
+> `agenda.updated`. **Ne pas les retirer avant que la bascule front soit
+> vérifiée en production** (même exigence que pour 5b, §8.2.b) ; ne pas leur
+> ajouter de nouveau comportement, ne construire aucune fonctionnalité neuve
+> dessus — `round.add` est le point d'entrée neuf, pas `subject.add`.
 >
-> `subject.updated` et `agenda.updated` (sortants), en revanche, **ne sont pas
-> retirés** : ce ne sont pas des alias à proprement parler mais les faits que
-> `item.add`/`item.update`/`round.select` diffusent eux-mêmes (voir la table
-> 8.1.a) — la note précédente les annonçait à tort comme voués au même sort que
-> les entrants. Ils restent le contrat courant.
+> `subject.updated` et `agenda.updated` (sortants) ne sont **pas** des alias à
+> proprement parler : ce sont les faits que `item.add`/`item.update`/
+> `round.select`/`round.add` diffusent eux-mêmes (voir la table 8.1.a). Une
+> note antérieure les annonçait à tort comme voués à être retirés avec les
+> entrants — corrigé ici : ils restent le contrat courant, alias ou non.
 
 ---
 

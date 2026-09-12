@@ -1,15 +1,15 @@
-"""Les types item.* du design §5, une fois les alias herites de 5a/5b retires.
+"""Les nouveaux types item.* et la survie des alias herites de 5a (design §5).
 
-Les alias `subject.*`/`vote.cast` existaient pour que cette livraison soit
-PUREMENT back : le front a bascule sur `item.*`/`round.select`/`response.cast`,
-et cette fenetre de compatibilite est refermee (contrat §8.1.b, §8.2.b).
+`vote.cast` (5b) est retire : Facilitation_frontend n'en a plus besoin, verifie
+en prod (contrat §8.2.b). `subject.*` (5a), en revanche, restent des alias
+herites : le front de production les emet encore (`room-socket.service.ts`),
+la bascule sur `item.*`/`round.select` n'a pas eu lieu. Un test qui les couvre
+est donc un test de deploiement, pas une politesse.
 """
 import pytest
 from channels.db import database_sync_to_async
 
-from realtime import services
 from realtime.tests.test_consumer import _drain_until, _join, _make_room
-from rooms.models import Participant, Room
 
 
 @pytest.mark.django_db(transaction=True)
@@ -40,15 +40,14 @@ async def test_a_voter_cannot_add_an_item():
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_item_add_broadcasts_the_subject_update():
-    """`item.add` reste le seul chemin d'entree pour poser le texte du round
-    courant : il doit diffuser `subject.updated`, exactement ce que faisait
-    l'alias `subject.set` desormais retire (contrat §8.1.b)."""
+async def test_legacy_subject_set_still_works():
+    """Le front de production n'a pas encore bascule sur `item.*` : `subject.set`
+    reste un alias herite tant que ce basculement n'est pas verifie en prod."""
     code, fac_token, voter_token = await database_sync_to_async(_make_room)()
     fac, _ = await _join(fac_token, code)
     voter, _ = await _join(voter_token, code)
 
-    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget ?"}})
+    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Budget ?"}})
     msg = await _drain_until(voter, "subject.updated")
 
     assert msg["payload"]["text"] == "Budget ?"
@@ -56,24 +55,15 @@ async def test_item_add_broadcasts_the_subject_update():
     await voter.disconnect()
 
 
-def _add_scenario_item(code, token, text):
-    """Ajoute une entree d'agenda directement au niveau service : depuis le
-    retrait de l'alias `subject.add` (contrat §8.1.b), il n'existe plus de
-    message WS pour composer un scenario a l'avance -- seul `round.select`
-    (sous test ici) reste accessible depuis le WS."""
-    room = Room.objects.get(code=code)
-    participant = Participant.objects.get(token=token)
-    return services.add_scenario_item(room, participant, text)
-
-
 @pytest.mark.django_db(transaction=True)
 async def test_round_select_replays_the_agenda_id():
     code, fac_token, _ = await database_sync_to_async(_make_room)()
     fac, _ = await _join(fac_token, code)
 
-    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Q1"}})
-    await _drain_until(fac, "item.added")
-    second = await database_sync_to_async(_add_scenario_item)(code, fac_token, "Q2")
+    await fac.send_json_to({"v": 1, "type": "subject.add", "payload": {"text": "Q1"}})
+    await fac.send_json_to({"v": 1, "type": "subject.add", "payload": {"text": "Q2"}})
+    agenda_msg = await _drain_until(fac, "agenda.updated", pred=lambda p: len(p["agenda"]) == 2)
+    second = agenda_msg["payload"]["agenda"][1]["id"]
 
     await fac.send_json_to({"v": 1, "type": "round.select", "payload": {"roundId": second}})
     msg = await _drain_until(fac, "round.selected")
@@ -81,6 +71,39 @@ async def test_round_select_replays_the_agenda_id():
     assert msg["payload"]["roundId"] == second
     assert [i["text"] for i in msg["payload"]["items"]] == ["Q2"]
     await fac.disconnect()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_round_add_queues_a_new_agenda_entry():
+    """`round.add` est le point d'entree qui remplacera l'alias herite
+    `subject.add` quand le front basculera : ouvre un ROUND DE PLUS dans la
+    file (le scenario), a NE PAS confondre avec `item.add` qui enrichit le
+    round COURANT — deux semantiques distinctes (voir le commentaire de
+    `_dispatch` dans `consumers.py`)."""
+    code, fac_token, _ = await database_sync_to_async(_make_room)()
+    fac, _ = await _join(fac_token, code)
+
+    await fac.send_json_to({"v": 1, "type": "round.add", "payload": {"text": "Q1"}})
+    await _drain_until(fac, "agenda.updated")
+    await fac.send_json_to({"v": 1, "type": "round.add", "payload": {"text": "Q2"}})
+    msg = await _drain_until(fac, "agenda.updated", pred=lambda p: len(p["agenda"]) == 2)
+
+    agenda = msg["payload"]["agenda"]
+    assert [x["text"] for x in agenda] == ["Q1", "Q2"]
+    assert agenda[0]["status"] == "current" and agenda[1]["status"] == "pending"
+    await fac.disconnect()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_a_voter_cannot_round_add():
+    code, fac_token, voter_token = await database_sync_to_async(_make_room)()
+    voter, _ = await _join(voter_token, code)
+
+    await voter.send_json_to({"v": 1, "type": "round.add", "payload": {"text": "Q1"}})
+    msg = await _drain_until(voter, "error")
+
+    assert msg["payload"]["code"] == "forbidden.not_facilitator"
+    await voter.disconnect()
 
 
 @pytest.mark.django_db(transaction=True)
