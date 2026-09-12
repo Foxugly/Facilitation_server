@@ -108,6 +108,24 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self._broadcast("round.selected", {**out, "nextState": "idle"})
             await self._broadcast("subject.updated", {"text": out["text"]})
             await self._broadcast_agenda(room)
+            # Chainage (contrat §8.5, design §7) : un round lie en mode
+            # manuel, pas encore resolu, qui vient de devenir courant presente
+            # ses candidats au SEUL facilitateur -- jamais une diffusion de
+            # groupe suivie d'un masquage cote client. round.select exige deja
+            # le facilitateur (_require_facilitator dans select_round), donc
+            # self EST sa connexion : self._emit() le lui renvoie directement,
+            # sans passer par self.channel_layer, exactement comme state.sync.
+            # Le mode auto ne passe jamais ici : select_round l'a deja resolu
+            # lui-meme, round.selected porte deja les items resultants.
+            rnd = await database_sync_to_async(services.current_round)(room)
+            if (
+                rnd is not None
+                and rnd.source_round_id
+                and (rnd.source_rule or {}).get("mode") == "manual"
+                and rnd.source_resolved_at is None
+            ):
+                candidates = await database_sync_to_async(services.chaining_candidates)(room, rnd.id)
+                await self._emit("round.candidates", {"roundId": rnd.id, "candidates": candidates})
         elif mtype == "round.prepare":
             summary = await database_sync_to_async(services.prepare_round)(
                 room,
@@ -165,6 +183,25 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             # laisserait leur affichage de deck perime.
             if payload.get("deckId") is not None:
                 await self._broadcast("deck.changed", {"deckSnapshot": out["deckSnapshot"]})
+        elif mtype == "round.bind":
+            # Declare la liaison de chainage (contrat §8.5, design §7). Ne
+            # copie rien -- aucun fait de plus que round.bound n'est necessaire :
+            # la liaison ne change ni les items ni l'etat d'aucun round.
+            out = await database_sync_to_async(services.bind_round)(
+                room, participant, payload.get("roundId"), payload.get("sourceRoundId"), payload.get("rule")
+            )
+            await self._broadcast("round.bound", out)
+        elif mtype == "round.resolve":
+            # Valide une selection manuelle (ou rejoue l'idempotence) et copie
+            # -- contrat §8.5. items porte deja itemId/originItemId/sourceItemId
+            # (realtime/services.py::_chained_items_payload) : pas de retraitement
+            # ici, le meme dict part tel quel sur le fait.
+            items = await database_sync_to_async(services.resolve_source)(
+                room, participant, payload.get("roundId"), item_ids=payload.get("sourceItemIds")
+            )
+            await self._broadcast("round.resolved", {"roundId": payload.get("roundId"), "items": items})
+            await self._broadcast_agenda(room)
+            await self._broadcast_current_item(room)
         elif mtype == "vote.open":
             deadline = await database_sync_to_async(services.open_vote)(room, participant)
             deadline_iso = await database_sync_to_async(services.deadline_iso)(room)
