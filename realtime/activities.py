@@ -108,6 +108,23 @@ class ActivitySpec:
     #: lequel (design §5).
     items_authored_by: str = "facilitator"
 
+    #: Ce que cette activite CONSOMME comme items : "items" (saisis a la main
+    #: ou copies d'une source chainee) ou "none" si elle n'en a besoin d'aucun.
+    #: Vocabulaire aligne sur le registre FRONT (`activity-registry.ts`,
+    #: `consumes`/`produces`) -- deux vocabulaires pour la meme notion
+    #: finiraient par diverger. Defaut prudent "none" : une strategie inconnue
+    #: ne doit pas se declarer consommatrice sans qu'on sache de quoi
+    #: (design 2026-09-11 section7).
+    consumes: str = "none"
+
+    #: Ce que cette activite PRODUIT pour une activite chainee en aval :
+    #: "results" (un Result fige par item -- le poker) ou "none". Produire des
+    #: "results" rend l'activite chainable : la tache suivante copiera ces
+    #: Result en Item du round consommateur (design section7 -- la copie
+    #: atterrit toujours en Item, quelle que soit la source). Meme defaut
+    #: prudent que `consumes`.
+    produces: str = "none"
+
     def __post_init__(self):
         if self.aggregate is None:
             object.__setattr__(self, "aggregate", _default_aggregate(self.ordinal))
@@ -146,8 +163,11 @@ def _default_aggregate(ordinal):
 #: est volontairement NON ordinal : mieux vaut ne pas afficher d'ecart que d'en
 #: afficher un faux sur une echelle dont on ignore l'ordre.
 ACTIVITY_REGISTRY: dict[str, ActivitySpec] = {
-    "delegation_v1": ActivitySpec(ordinal=True),
-    "fist_of_five_v1": ActivitySpec(ordinal=True),
+    # Le poker consomme des items saisis (sujets) et produit un Result fige par
+    # item -- il est donc chainable en amont d'une activite qui consommerait
+    # des "items" (design section7).
+    "delegation_v1": ActivitySpec(ordinal=True, consumes="items", produces="results"),
+    "fist_of_five_v1": ActivitySpec(ordinal=True, consumes="items", produces="results"),
 }
 
 DEFAULT_SPEC = ActivitySpec()
