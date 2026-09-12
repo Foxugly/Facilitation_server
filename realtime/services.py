@@ -309,13 +309,19 @@ def select_round(room, participant, round_id):
     return {"roundId": rnd.id, "items": items_payload(rnd), "text": first.text if first else ""}
 
 
-def add_scenario_item(room, participant, text):
+def add_scenario_item(room, participant, text, *, rejected_type="round.add"):
     """Ex-`add_subject` : ajoute une entree au scenario, donc un ROUND de plus.
-    Retourne l'id du round cree — c'est lui que l'agenda designe."""
-    _require_facilitator(room, participant, "item.add")
+    Retourne l'id du round cree — c'est lui que l'agenda designe.
+
+    `rejected_type` distingue les deux entrants WS qui appellent cette meme
+    fonction : l'intention moderne `round.add` et l'alias herite `subject.add`
+    (contrat §8.1.a/§8.1.b) — chacun doit refuser sous son PROPRE nom, pas
+    sous un intitule fige heritant de l'ancien nom interne `item.add`.
+    """
+    _require_facilitator(room, participant, rejected_type)
     text = (text or "").strip()
     if not text:
-        raise RoomError("state.invalid_transition", "Empty item", "item.add")
+        raise RoomError("state.invalid_transition", "Empty item", rejected_type)
     rnd = _new_round(room, participant, text)
     if room.current_round_id is None:
         room.current_round = rnd
@@ -439,11 +445,9 @@ def responses_of(rnd, item):
 def cast_response(room, participant, item_id, payload):
     """Ecrit la reponse d'un participant a UN item (design section 3).
 
-    Reprend les gardes de l'ancien `cast_vote` (round ouvert, echeance non
-    depassee, valeur dans le deck) et y ajoute : l'item doit appartenir au
+    Gardes : round ouvert, echeance non depassee, l'item doit appartenir au
     round courant, et le payload doit passer le schema que declare le
-    registre pour la strategie active. Chemin unique d'ecriture : `cast_vote`
-    n'est plus qu'une facade par-dessus celui-ci.
+    registre pour la strategie active. Chemin unique d'ecriture.
     """
     rnd = current_round(room)
     if rnd is None or rnd.state != RoundState.OPEN:
@@ -462,26 +466,13 @@ def cast_response(room, participant, item_id, payload):
     # heriter de la regle "la carte appartient au deck", qui ne la concerne pas.
     if not spec_for(strategy).validate_value(payload, _card_values(room)):
         raise RoomError("state.invalid_transition", "Unknown card value", "response.cast")
-    card_value = payload.get("card", "")
     Response.objects.update_or_create(
         item=item,
         participant=participant,
-        defaults={"round": rnd, "payload": payload, "card_value": card_value},
+        defaults={"round": rnd, "payload": payload},
     )
     room.touch()
     return payload
-
-
-def cast_vote(room, participant, card_value):
-    """Facade poker : resout le premier item du round courant et delegue a
-    `cast_response`, pour que les regles de vote ne vivent qu'a un seul
-    endroit. Le front actuel (et le contrat WS `vote.cast`) ne connait
-    qu'une carte par round — c'est cette facade qui traduit."""
-    rnd = current_round(room)
-    item = _first_item(rnd)
-    if item is None:
-        raise RoomError("state.invalid_transition", "Voting is not open", "vote.cast")
-    cast_response(room, participant, item.id, {"card": card_value})
 
 
 def reveal(room, participant):
@@ -626,12 +617,8 @@ def participation(room):
 def revealed_payload(room):
     """Resultat d'un round revele — ONLY ever called in REVEALED state.
 
-    Depuis la tache 3, porte un bloc PAR ITEM (``itemResults``), chacun agrege
-    par l'``aggregate`` que declare le registre pour la strategie active — le
-    decompte ne vit plus ici, ``revealed_payload`` ne fait plus que
-    l'assembler. Les cles plates historiques (``tally``, ``spread``,
-    ``votes``) restent emises, recopiees du PREMIER item, le temps que
-    Facilitation_frontend bascule sur ``itemResults``.
+    Porte un bloc PAR ITEM (``itemResults``), chacun agrege par l'``aggregate``
+    que declare le registre pour la strategie active.
 
     ``itemResults`` et non ``items`` : ``state.sync`` emet deja une cle
     ``items`` de forme differente (``[{id, text, sequence}]``, la liste des
@@ -645,7 +632,7 @@ def revealed_payload(room):
       n'est alors pas emise du tout — masquer cote client serait de la facade, une
       trame WS etant lisible dans les outils de developpement du navigateur.
       L'invariant tient PAR ITEM : aucun bloc de ``itemResults`` ne porte
-      ``votes`` sur un round anonyme, pas seulement les cles plates.
+      ``votes`` sur un round anonyme.
 
     Le mode est fige a l'ouverture et annonce aux votants avant qu'ils votent : le
     basculer une fois les votes emis exposerait des gens qui se croyaient anonymes.
@@ -668,27 +655,17 @@ def revealed_payload(room):
             "anonymous": anonymous,
         }
         if not anonymous:
-            by_participant = {r.participant_id: r.card_value for r in item_responses}
+            by_participant = {r.participant_id: r.payload.get("card") for r in item_responses}
             block["votes"] = [
                 {"participantId": str(p.public_id), "cardValue": by_participant[p.id]}
                 for p in participants
                 if p.id in by_participant
             ]
         items_out.append(block)
-    first = items_out[0] if items_out else {
-        "tally": [],
-        "spread": {"min": None, "max": None},
-        "anonymous": anonymous,
-    }
-    payload = {
+    return {
         "itemResults": items_out,
         "anonymous": anonymous,
-        "tally": first["tally"],
-        "spread": first["spread"],
     }
-    if "votes" in first:
-        payload["votes"] = first["votes"]
-    return payload
 
 
 def participants_list(room):
@@ -834,7 +811,6 @@ def build_state_sync(participant):
     """Full current-state snapshot for a single client (contract §5.1). No history replay."""
     room = participant.room
     rnd = current_round(room)
-    my_vote = None
     my_responses = {}
     result = None
     round_state = RoundState.IDLE
@@ -843,15 +819,9 @@ def build_state_sync(participant):
         round_state = rnd.state
         # Un round peut desormais porter plusieurs items, donc plusieurs
         # Response pour ce participant (tache 3) : `myResponses` les porte
-        # toutes, `myVote` reste celle du PREMIER item — le seul que le front
-        # actuel connaisse — pour que le poker n'ait rien a changer.
+        # toutes, indexees par item.
         my_responses_list = list(Response.objects.filter(round=rnd, participant=participant))
         my_responses = {str(r.item_id): r.payload for r in my_responses_list}
-        first_item = _first_item(rnd)
-        first_response = next(
-            (r for r in my_responses_list if first_item and r.item_id == first_item.id), None
-        )
-        my_vote = first_response.card_value if first_response else None
         if rnd.state == RoundState.ACTED:
             acted = rnd.results.first()
             result = acted.chosen_value if acted else None
@@ -876,7 +846,6 @@ def build_state_sync(participant):
         # Mise en page du depouillement, figee sur la salle : le client remplace sa
         # main par l'une ou l'autre forme des la revelation.
         "resultLayout": room.result_layout,
-        "myVote": my_vote,
         "myResponses": my_responses,
         "result": result,
         "facilitatorPresent": facilitator_present(room),
@@ -902,30 +871,17 @@ def build_state_sync(participant):
     # retourner les cartes du tapis. Sans lui, recharger laissait les cartes face
     # cachee alors que le decompte, lui, s'affichait.
     #
-    # ``itemResults`` est recopie dans le meme mouvement que les cles plates
-    # heritees : c'est la forme d'avenir (bloc par item), et l'omettre laissait
-    # un arrivant sur un round deja revele avec un itemResults vide tant qu'une
-    # nouvelle revelation ne survenait pas pendant sa connexion.
-    #
     # L'invariant d'anonymat est preserve sans effort : ``revealed_payload`` n'emet
-    # aucune cle ``votes`` sur un round anonyme — ni dans les cles plates, ni dans
-    # aucun bloc de ``itemResults`` — et c'est bien lui qui decide ici.
+    # aucune cle ``votes`` sur un round anonyme, dans aucun bloc de ``itemResults``
+    # — et c'est bien lui qui decide ici.
     #
     # ACTED est inclus car le client traite « revele » et « acte » comme un seul etat
     # d'affichage : l'omettre laissait le meme trou apres la globalisation.
     if round_state in (RoundState.REVEALED, RoundState.ACTED):
-        payload.update(
-            {
-                k: v
-                for k, v in revealed_payload(room).items()
-                if k in ("tally", "spread", "votes", "itemResults")
-            }
-        )
+        payload["itemResults"] = revealed_payload(room)["itemResults"]
     return payload
 
 
-current_subject_text = current_item_text
-# Idem pour les tests existants qui appelaient encore le nom prive avant que
-# `current_round` ne devienne public (tache 3). A supprimer avec le nettoyage
-# de ces tests.
 _current_round = current_round
+# Alias garde pour les tests existants qui appelaient encore le nom prive avant
+# que `current_round` ne devienne public (tache 3).

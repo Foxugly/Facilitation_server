@@ -60,8 +60,8 @@ def votes_to_responses(apps):
 
     Le payload est la forme commune a toutes les activites : le poker y ecrit
     {"card": "<valeur>"}, une activite a venir y ecrira sa propre structure. La
-    colonne `card_value` reste remplie jusqu'en 0015 - le front de production
-    l'attend encore au moment ou cette migration tourne.
+    colonne `card_value` reste remplie jusqu'en 0016, qui la supprime - le front
+    de production l'attend encore au moment ou cette migration tourne.
     """
     Response = apps.get_model("rooms", "Response")
     Item = apps.get_model("rooms", "Item")

@@ -101,9 +101,10 @@ def test_every_seeded_card_uses_the_shared_front():
 @pytest.mark.django_db
 def test_roman_values_survive_into_the_snapshot():
     """Le « + » de « +1 » ne doit etre ni perdu ni normalise : c'est la valeur canonique
-    stockee dans Vote.card_value et Result.chosen_value. `act_result` la validera par
-    simple appartenance a `_card_values(room)`, donc aucun code supplementaire n'est
-    necessaire — mais une valeur mangee au peuplement rendrait la carte invotable."""
+    stockee dans Response.payload["card"] et Result.chosen_value. `act_result` la
+    validera par simple appartenance a `_card_values(room)`, donc aucun code
+    supplementaire n'est necessaire — mais une valeur mangee au peuplement rendrait
+    la carte invotable."""
     from rooms.snapshot import build_deck_snapshot
 
     snapshot = build_deck_snapshot(create_roman_vote_deck())

@@ -10,6 +10,7 @@ from django.contrib.auth import get_user_model
 from decks.seed import create_standard_deck
 from realtime import services
 from realtime.services import RoomError
+from realtime.tests.helpers import cast_first_item
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Item, Participant, Role, Room, RoundState, Round
 from rooms.snapshot import build_deck_snapshot
@@ -45,14 +46,15 @@ def paid_team(db):
 def test_default_is_nominative_and_votes_are_emitted(db):
     room, fac, voter, _ = _room()
     services.open_vote(room, fac)
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, voter, "4")
     services.reveal(room, fac)
 
     payload = services.revealed_payload(room)
+    block = payload["itemResults"][0]
 
     assert payload["anonymous"] is False
-    assert [v["cardValue"] for v in payload["votes"]] == ["4"]
-    assert payload["votes"][0]["participantId"] == str(voter.public_id)
+    assert [v["cardValue"] for v in block["votes"]] == ["4"]
+    assert block["votes"][0]["participantId"] == str(voter.public_id)
 
 
 @pytest.mark.django_db
@@ -60,14 +62,15 @@ def test_anonymous_round_emits_no_participant_card_link(paid_team):
     room, fac, voter, _ = _room(team=paid_team)
     services.set_reveal_mode(room, fac, True)
     services.open_vote(room, fac)
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, voter, "4")
     services.reveal(room, fac)
 
     payload = services.revealed_payload(room)
+    block = payload["itemResults"][0]
 
     assert payload["anonymous"] is True
-    assert "votes" not in payload
-    assert payload["tally"] == [{"cardValue": "4", "count": 1}]
+    assert "votes" not in block
+    assert block["tally"] == [{"cardValue": "4", "count": 1}]
     # Belt and braces: the participant's id must appear nowhere in the payload.
     assert str(voter.public_id) not in str(payload)
 

@@ -7,6 +7,7 @@ import pytest
 
 from realtime import services
 from realtime.services import RoomError
+from realtime.tests.helpers import cast_first_item
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Item, Participant, Role, Room, RoundState
 from rooms.snapshot import build_deck_snapshot
@@ -105,8 +106,8 @@ def test_reorder_items_rejects_duplicate_ids(room_with_facilitator):
 
 @pytest.mark.django_db
 def test_agenda_lists_rounds_and_select_round_resets_to_idle(room_with_facilitator):
-    """L'agenda designe desormais des ROUNDS. Le front renvoie l'id qu'il a recu,
-    donc l'alias `subject.select` continue de fonctionner sans le savoir."""
+    """L'agenda designe desormais des ROUNDS ; `select_round` (ex-`select_subject`)
+    en reprend un et le remet a idle."""
     room, fac, _ = room_with_facilitator
     services.set_current_item(room, fac, "Budget ?")
     services.add_scenario_item(room, fac, "Embauche ?")
@@ -143,7 +144,7 @@ def test_cannot_remove_an_item_from_a_round_in_flight(room_with_facilitator):
     services.set_current_item(room, fac, "Budget ?")
     item_id = services.items_payload(services.current_round(room))[0]["id"]
     services.open_vote(room, fac)
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, voter, "4")
     services.reveal(room, fac)
 
     with pytest.raises(RoomError) as exc:
@@ -162,7 +163,7 @@ def test_act_result_refuses_a_round_left_without_item(room_with_facilitator):
     room, fac, voter = room_with_facilitator
     services.set_current_item(room, fac, "Budget ?")
     services.open_vote(room, fac)
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, voter, "4")
     services.reveal(room, fac)
     Item.objects.filter(round=services.current_round(room)).delete()
 
@@ -181,7 +182,7 @@ def test_cannot_rewrite_an_item_already_decided(room_with_facilitator):
     services.set_current_item(room, fac, "Budget ?")
     item_id = services.items_payload(services.current_round(room))[0]["id"]
     services.open_vote(room, fac)
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, voter, "4")
     services.reveal(room, fac)
     services.act_result(room, fac, "4")
 

@@ -131,13 +131,17 @@ async def test_full_vote_cycle_and_secret_of_votes():
     voter, _ = await _join(voter_token, code)
     await _drain_until(fac, "participant.joined")
 
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Who owns the budget?"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Who owns the budget?"}})
+    added = await _drain_until(fac, "item.added")
+    item_id = added["payload"]["itemId"]
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "vote.opened")
 
     # voter casts — participation updates carry IDs/counts, NEVER values (secret §6.a)
-    await voter.send_json_to({"v": 1, "type": "vote.cast", "payload": {"cardValue": "5"}})
+    await voter.send_json_to(
+        {"v": 1, "type": "response.cast", "payload": {"itemId": item_id, "payload": {"card": "5"}}}
+    )
     part = await _drain_until(fac, "participation.update", pred=lambda p: p["voted"] == 1)
     # Secret of votes (§6.a): participation carries only counts + participant IDs,
     # never a card value — the payload has exactly these three keys.
@@ -148,10 +152,11 @@ async def test_full_vote_cycle_and_secret_of_votes():
     # (Anonymous reveal is a per-round option of paid teams — see test_reveal_mode.)
     await fac.send_json_to({"v": 1, "type": "vote.reveal", "payload": {}})
     revealed = await _drain_until(voter, "vote.revealed")
+    block = revealed["payload"]["itemResults"][0]
     assert revealed["payload"]["anonymous"] is False
-    assert [v["cardValue"] for v in revealed["payload"]["votes"]] == ["5"]
-    assert revealed["payload"]["tally"] == [{"cardValue": "5", "count": 1}]
-    assert revealed["payload"]["spread"] == {"min": 5, "max": 5}
+    assert [v["cardValue"] for v in block["votes"]] == ["5"]
+    assert block["tally"] == [{"cardValue": "5", "count": 1}]
+    assert block["spread"] == {"min": 5, "max": 5}
 
     await fac.send_json_to({"v": 1, "type": "result.act", "payload": {"chosenValue": "5"}})
     acted = await _drain_until(voter, "result.acted")
@@ -166,7 +171,7 @@ async def test_voter_cannot_open_vote_authority():
     code, fac_token, voter_token = await database_sync_to_async(_make_room)()
     fac, _ = await _join(fac_token, code)
     voter, _ = await _join(voter_token, code)
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "X"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "X"}})
 
     # a voter trying a control intention is rejected, not applied
     await voter.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
@@ -184,18 +189,22 @@ async def test_reconnection_restores_vote_and_state():
     voter, _ = await _join(voter_token, code)
     await _drain_until(fac, "participant.joined")
 
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Budget?"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget?"}})
+    added = await _drain_until(fac, "item.added")
+    item_id = added["payload"]["itemId"]
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "vote.opened")
-    await voter.send_json_to({"v": 1, "type": "vote.cast", "payload": {"cardValue": "3"}})
+    await voter.send_json_to(
+        {"v": 1, "type": "response.cast", "payload": {"itemId": item_id, "payload": {"card": "3"}}}
+    )
     await _drain_until(fac, "participation.update", pred=lambda p: p["voted"] == 1)
 
     # Network drop + reconnect with the same token restores room + vote (contract §8).
     await voter.disconnect()
     voter2, sync2 = await _join(voter_token, code)
     assert sync2["payload"]["roundState"] == "open"
-    assert sync2["payload"]["myVote"] == "3"
+    assert sync2["payload"]["myResponses"][str(item_id)] == {"card": "3"}
 
     await fac.disconnect()
     await voter2.disconnect()
@@ -277,7 +286,7 @@ async def test_timeout_reveals_on_reconnect_reconciliation():
 
     await fac.send_json_to({"v": 1, "type": "timer.set", "payload": {"enabled": True, "seconds": 30}})
     await _drain_until(voter, "timer.changed")
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Budget?"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget?"}})
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     opened = await _drain_until(voter, "vote.opened")
@@ -320,7 +329,7 @@ async def test_scheduled_timeout_reveals_without_reconnect(monkeypatch):
 
     await fac.send_json_to({"v": 1, "type": "timer.set", "payload": {"enabled": True, "seconds": 0}})
     await _drain_until(voter, "timer.changed")
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Budget?"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget?"}})
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "vote.opened")
@@ -471,7 +480,7 @@ async def test_timer_resumes_on_reconnect_after_restart(monkeypatch):
 
     await fac.send_json_to({"v": 1, "type": "timer.set", "payload": {"enabled": True, "seconds": 30}})
     await _drain_until(voter, "timer.changed")
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Budget?"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget?"}})
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "vote.opened")
@@ -545,7 +554,7 @@ async def test_reconnect_does_not_duplicate_tracked_timer_task():
 
     await fac.send_json_to({"v": 1, "type": "timer.set", "payload": {"enabled": True, "seconds": 30}})
     await _drain_until(voter, "timer.changed")
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Budget?"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget?"}})
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "vote.opened")

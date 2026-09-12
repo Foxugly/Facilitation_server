@@ -12,6 +12,7 @@ from django.contrib.auth import get_user_model
 from decks.seed import create_standard_deck
 from realtime import services
 from realtime.services import RoomError
+from realtime.tests.helpers import cast_first_item
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Participant, Role, Room, RoundState
 from rooms.snapshot import build_deck_snapshot
@@ -82,7 +83,7 @@ def test_prepared_round_then_opens(db):
     room, fac, voter = _fresh_room()
     services.prepare_round(room, fac, subject_text="Deploys")
     services.open_vote(room, fac)
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, voter, "4")
     services.reveal(room, fac)
 
     assert services.revealed_payload(room)["anonymous"] is False
@@ -93,12 +94,12 @@ def test_prepare_anonymous_is_applied_to_the_round(paid_team):
     room, fac, voter = _fresh_room(team=paid_team)
     services.prepare_round(room, fac, subject_text="Deploys", anonymous=True)
     services.open_vote(room, fac)
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, voter, "4")
     services.reveal(room, fac)
 
     payload = services.revealed_payload(room)
     assert payload["anonymous"] is True
-    assert "votes" not in payload
+    assert all("votes" not in block for block in payload["itemResults"])
 
 
 @pytest.mark.django_db
