@@ -135,18 +135,28 @@ def test_auto_chaining_copies_source_items_when_the_consumer_round_becomes_curre
     assert source.items.count() == 2
 
 
-def test_chaining_from_a_still_open_source_round_is_allowed(room_with_facilitator):
+def test_chaining_from_a_still_open_source_round_copies_state_at_that_instant(room_with_facilitator):
     """Design §7 : « source encore ouverte : autorisee (copie de l'etat a
-    l'instant T) ». La source ne le sait meme pas -- son etat ne change pas."""
+    l'instant T) ». Assertion qui peut reellement echouer (round de
+    correction 1 -- l'ancienne version ne testait qu'un etat jamais touche
+    par aucun chemin de code, et dupliquait le test "auto" ci-dessus) : la
+    source continue de vivre APRES la copie (on y reformule son item), et la
+    copie deja faite n'en bouge pas -- la copie n'est pas une reference, y
+    compris quand la source est encore ouverte."""
     room, fac = room_with_facilitator
     source = Round.objects.create(room=room, facilitator=fac, sequence=1, state=RoundState.OPEN)
-    Item.objects.create(round=source, text="En cours", sequence=1)
+    item = Item.objects.create(round=source, text="En cours", sequence=1)
     consumer = Round.objects.create(room=room, facilitator=fac, sequence=2)
 
     bind_round(room, fac, consumer.id, source.id, _auto_rule())
     select_round(room, fac, consumer.id)
+    copy = consumer.items.get(origin_item=item)
+    assert copy.text == "En cours"
 
-    assert consumer.items.count() == 1
+    update_item(room, fac, item.id, "Reformule pendant le vote")
+
+    copy.refresh_from_db()
+    assert copy.text == "En cours"
     source.refresh_from_db()
     assert source.state == RoundState.OPEN
 
@@ -197,7 +207,7 @@ def test_chaining_candidates_lists_what_a_manual_facilitator_may_check(room_with
 
     candidates = chaining_candidates(room, consumer.id)
 
-    assert [c["itemId"] for c in candidates] == [a.id, b.id]
+    assert [c["sourceItemId"] for c in candidates] == [a.id, b.id]
     assert [c["text"] for c in candidates] == ["Un", "Deux"]
 
 
@@ -368,3 +378,172 @@ def test_resolve_source_is_reserved_to_the_facilitator(room_with_facilitator):
     with pytest.raises(RoomError) as excinfo:
         resolve_source(room, voter, consumer.id)
     assert excinfo.value.code == "forbidden.not_facilitator"
+
+
+# ---------------------------------------------------------------------------
+# Round de correction 1
+# ---------------------------------------------------------------------------
+
+
+def test_binding_a_replayed_round_to_a_new_source_still_copies_items(room_with_facilitator):
+    """Defaut critique corrige (correction 1, point 1) : un round REJOUE
+    porte deja des items a `origin_item` non nul -- des copies de son PROPRE
+    predecesseur, sans rapport avec une liaison posee ensuite. Le lier a une
+    source DIFFERENTE doit copier normalement, pas repondre "deja resolu"
+    et renvoyer zero item. C'est exactement le "Send to Dot Voting a chaud"
+    de la conception, applique a un round rejoue."""
+    room, fac = room_with_facilitator
+    old = Round.objects.create(room=room, facilitator=fac, sequence=1, state=RoundState.ACTED)
+    old_item = Item.objects.create(round=old, text="Sujet historique", sequence=1)
+    Result.objects.create(round=old, item=old_item, chosen_value="4")
+
+    # ACTED -> select_round rejoue : le nouveau round courant porte deja un
+    # item avec origin_item non nul (premisse exacte du defaut).
+    replayed = select_round(room, fac, old.id)
+    replayed_round = Round.objects.get(id=replayed["roundId"])
+    assert replayed_round.items.filter(origin_item__isnull=False).exists()
+    assert replayed_round.source_round_id is None  # pas encore de liaison
+
+    new_source = Round.objects.create(room=room, facilitator=fac, sequence=3)
+    Item.objects.create(round=new_source, text="Nouveau post-it", sequence=1)
+
+    bind_round(room, fac, replayed_round.id, new_source.id, _auto_rule())
+    select_round(room, fac, replayed_round.id)  # redevient courant -> doit copier
+
+    texts = [item.text for item in replayed_round.items.all()]
+    assert "Nouveau post-it" in texts
+
+
+def test_bind_refuses_top_when_take_is_items(room_with_facilitator):
+    """Important corrige (correction 1, point 2) : `top` n'a de sens que sur
+    un classement, qui ne s'applique qu'a des RESULTATS decides -- jamais a
+    des items bruts. Avant ce garde-fou, cette combinaison passait la
+    declaration puis faisait lever une `AttributeError` (pas une
+    `RoomError`) a la resolution."""
+    room, fac = room_with_facilitator
+    source = Round.objects.create(room=room, facilitator=fac, sequence=1)
+    Item.objects.create(round=source, text="Un sujet", sequence=1)
+    consumer = Round.objects.create(room=room, facilitator=fac, sequence=2)
+
+    with pytest.raises(RoomError):
+        bind_round(room, fac, consumer.id, source.id, {"take": "items", "mode": "auto", "top": 2})
+
+    consumer.refresh_from_db()
+    assert consumer.source_round_id is None
+
+
+def test_top_rule_keeps_using_the_strategy_frozen_at_declaration(room_with_facilitator, monkeypatch):
+    """Important corrige (correction 1, point 3) : la source n'a pas son
+    propre deck -- sa strategie, au moment du bind, vient du deck ACTIF de
+    la room. Si ce deck change ENSUITE (avant que le round consommateur ne
+    devienne courant), la regle `top` doit continuer a utiliser la
+    strategie figee a la declaration, pas celle, nouvelle, de la room.
+    Verifie par mutation -- voir task-2-report.md pour la trace."""
+    room, fac = room_with_facilitator
+    monkeypatch.setitem(
+        ACTIVITY_REGISTRY,
+        "ranked_v1",
+        ActivitySpec(
+            consumes="items", produces="results", rank_value=lambda result: int(result.chosen_value)
+        ),
+    )
+    room.deck_snapshot = {"resolutionStrategy": "ranked_v1", "cards": []}
+    room.save(update_fields=["deck_snapshot"])
+
+    source = Round.objects.create(room=room, facilitator=fac, sequence=1)  # pas de deck propre
+    items = [
+        Item.objects.create(round=source, text=text, sequence=n)
+        for n, text in enumerate(("Basse", "Haute"), start=1)
+    ]
+    for item, value in zip(items, ("2", "9")):
+        Result.objects.create(round=source, item=item, chosen_value=value)
+    consumer = Round.objects.create(room=room, facilitator=fac, sequence=2)
+
+    bind_round(room, fac, consumer.id, source.id, _auto_rule(take="results", top=1))
+
+    # Le deck ACTIF de la room change APRES la declaration, vers une
+    # strategie SANS classement.
+    room.deck_snapshot = {"resolutionStrategy": "delegation_v1", "cards": []}
+    room.save(update_fields=["deck_snapshot"])
+
+    select_round(room, fac, consumer.id)
+
+    assert [item.text for item in consumer.items.all()] == ["Haute"]
+
+
+def test_resolving_a_top_rule_raises_if_the_frozen_strategy_has_no_ranking(room_with_facilitator):
+    """Garde-fou cote resolution (correction 1, point 3) : un round lie hors
+    de `bind_round` (donc sans `sourceStrategy` figee) avec un `top` que
+    rien ne peut honorer doit faire LEVER `resolve_source`, pas ignorer le
+    `top` en silence et tout copier."""
+    room, fac = room_with_facilitator
+    source = Round.objects.create(room=room, facilitator=fac, sequence=1)
+    item = Item.objects.create(round=source, text="Seul item", sequence=1)
+    Result.objects.create(round=source, item=item, chosen_value="4")
+    consumer = Round.objects.create(
+        room=room, facilitator=fac, sequence=2,
+        source_round=source,
+        source_rule={"take": "results", "mode": "auto", "top": 1},  # pas de sourceStrategy
+    )
+
+    with pytest.raises(RoomError):
+        select_round(room, fac, consumer.id)
+
+    assert consumer.items.count() == 0
+
+
+def test_bind_refuses_a_round_chaining_to_itself(room_with_facilitator):
+    """Garde-fou non teste jusqu'ici (correction 1, point 4)."""
+    room, fac = room_with_facilitator
+    rnd = Round.objects.create(room=room, facilitator=fac, sequence=1)
+
+    with pytest.raises(RoomError):
+        bind_round(room, fac, rnd.id, rnd.id, _auto_rule())
+
+    rnd.refresh_from_db()
+    assert rnd.source_round_id is None
+
+
+@pytest.mark.parametrize(
+    "bad_rule",
+    [
+        {"take": "items", "mode": "auto"},                           # cle "top" manquante
+        {"take": "items", "mode": "auto", "top": None, "extra": 1},  # cle en trop
+        {"take": "subjects", "mode": "auto", "top": None},           # take hors enum
+        {"take": "items", "mode": "sometimes", "top": None},         # mode hors enum
+        {"take": "items", "mode": "auto", "top": 0},                 # top <= 0
+        {"take": "items", "mode": "auto", "top": -1},
+        {"take": "items", "mode": "auto", "top": "3"},               # top pas un int
+        {"take": "items", "mode": "auto", "top": True},              # bool, pas un vrai int
+    ],
+)
+def test_bind_refuses_a_malformed_rule(room_with_facilitator, bad_rule):
+    """Les quatre branches de `_validate_chaining_rule` (correction 1,
+    point 4) : neutraliser son corps laissait passer chacun de ces cas sans
+    qu'aucun test ne le remarque."""
+    room, fac = room_with_facilitator
+    source = Round.objects.create(room=room, facilitator=fac, sequence=1)
+    consumer = Round.objects.create(room=room, facilitator=fac, sequence=2)
+
+    with pytest.raises(RoomError):
+        bind_round(room, fac, consumer.id, source.id, bad_rule)
+
+    consumer.refresh_from_db()
+    assert consumer.source_round_id is None
+
+
+def test_bind_round_stores_its_own_copy_of_the_rule(room_with_facilitator):
+    """Correction 1, point 7 : `source_rule` est stocke par COPIE, jamais
+    par reference au dict de l'appelant -- meme motif que `dict(source.config)`
+    dans `_replay_round`. Muter la rule apres l'appel ne doit rien changer a
+    ce qui a ete persiste."""
+    room, fac = room_with_facilitator
+    source = Round.objects.create(room=room, facilitator=fac, sequence=1)
+    consumer = Round.objects.create(room=room, facilitator=fac, sequence=2)
+    rule = _auto_rule()
+
+    bind_round(room, fac, consumer.id, source.id, rule)
+    rule["mode"] = "manual"  # mutation APRES l'appel
+
+    consumer.refresh_from_db()
+    assert consumer.source_rule["mode"] == "auto"
