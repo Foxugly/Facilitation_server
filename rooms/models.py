@@ -127,8 +127,24 @@ class Item(models.Model):
     # L'item dont celui-ci est la copie, quand une activite reprend la sortie de
     # la precedente (chainage, livraison 5e). Copie et NON reference : reformuler
     # ici ne doit pas reecrire l'historique de l'activite source.
+    #
+    # C'est toujours la RACINE de la chaine, jamais la copie intermediaire
+    # (`services._replay_round` et `services.resolve_source` font tous deux
+    # `item.origin_item or item`) : sur une chaine de trois activites, le
+    # round 3 doit rester remontable au round 1, pas seulement au round 2.
     origin_item = models.ForeignKey(
         "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="copies"
+    )
+    # Le PARENT DIRECT de cette copie dans CETTE resolution de chainage --
+    # distinct de `origin_item` ci-dessus, qui remonte toujours a la racine
+    # (correction 1, round de relecture 1). Sur la meme chaine de trois
+    # activites, le round 3 porte `origin_item` -> item du round 1 (racine,
+    # tracabilite produit) ET `source_item` -> item du round 2 (parent
+    # direct, ce qui permet a l'UI de dire « copie depuis le round
+    # precedent » sans remonter toute la chaine). Les deux coincident quand
+    # l'item source est lui-meme un original (chaine a un seul maillon).
+    source_item = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="derived_items"
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -172,6 +188,32 @@ class Round(models.Model):
     # Echeance du vote, posee a l'ouverture quand le timer est actif. Le serveur
     # fait autorite : le decompte affiche par le client est cosmetique.
     vote_deadline = models.DateTimeField(null=True, blank=True)
+    # Le round amont dont celui-ci reprend des items (chainage, design
+    # 2026-09-11 §7, tache 1 de la livraison 5e). SET_NULL et non CASCADE :
+    # la copie des items (posee a la tache suivante) appartient DEJA au round
+    # consommateur une fois faite -- c'est tout l'interet d'une copie plutot
+    # qu'une reference vivante. Si supprimer la source emportait ce round en
+    # CASCADE, elaguer un scenario detruirait des rounds DEJA JOUES dont les
+    # resultats ne dependent plus de la source. Absence = round parti de zero
+    # (items saisis a la main), pas un etat special.
+    source_round = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="chained_rounds"
+    )
+    # Ce qu'on reprend de la source et comment (design §7) :
+    # {"take": "items"|"results", "mode": "auto"|"manual", "top": int|None}.
+    # Pose ici sans etre interprete : cette tache ne resout aucune liaison, ni
+    # copie ni validation -- la tache suivante lit ce champ, celle-ci l'ecrit.
+    source_rule = models.JSONField(null=True, blank=True)
+    # Marque que CETTE liaison de chainage a ete resolue -- PAS un etat
+    # derive des items du round, qui mentait (correction 1, round de
+    # relecture 1) : un round REJOUE (`_replay_round`) porte deja des items a
+    # `origin_item` non nul, copies de son PROPRE predecesseur, sans le
+    # moindre rapport avec une liaison posee ensuite par `bind_round`. Lire
+    # "le round a des items avec origine" comme "cette liaison est resolue"
+    # repondait donc "oui" a tort, et `resolve_source` ne copiait alors rien.
+    # Remis a None chaque fois que `bind_round` (re)declare une liaison :
+    # une declaration neuve n'est, par construction, pas encore resolue.
+    source_resolved_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

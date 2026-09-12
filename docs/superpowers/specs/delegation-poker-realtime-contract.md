@@ -161,6 +161,7 @@ Champ par champ (`realtime/services.py::build_state_sync`) :
 
 - `myResponses` = **les réponses du seul client destinataire**, indexées par id d'item (les autres restent secrètes tant que `roundState` n'est ni `revealed` ni `acted`). L'ancienne clé `myVote` (le vote du premier item seul) est retirée en fin de 5b (§8.2.b) — voir §8.2.a.
 - Si `roundState === "revealed"` **ou `"acted"`**, `state.sync` inclut aussi `itemResults` (§8.2.a) — un retardataire qui arrive après la révélation **voit les résultats** (le client traite `revealed` et `acted` comme un seul état d'affichage), et votera au tour suivant. Comme `vote.revealed`, il s'agit d'un décompte qui respecte l'anonymat : jamais de lien participant → carte sur un round anonyme.
+- `state.sync` porte aussi `chainingCandidates` (§8.5.a), **uniquement si le destinataire est le facilitateur** et que le round courant est lié en mode `manual`, pas encore résolu — même forme que le `candidates` de `round.candidates`. Un facilitateur qui (re)connecte sur un tel round revoit ainsi ses candidats sans avoir à re-sélectionner le round ; la clé est absente (pas vide) pour tout autre destinataire ou toute autre situation — réservée au facilitateur, la garde se fait avant le calcul, jamais par un masquage après coup.
 - **Depuis 5a** (§8.1), `state.sync` porte aussi `items` — la liste des items du round courant, même forme que dans les faits `item.*` (`[{id, text, sequence}]`) — et `round` — `{id, state}` du round courant (`id: null` si aucun round actif). `subject` reste émis en doublon (le texte du premier item) : aucune date n'est fixée pour son retrait — c'est une clé de `state.sync`, distincte des anciennes intentions entrantes `subject.set`/`subject.add`/`subject.select` (§8.1.b), retirées en 5b.
 - `room.isTeam` (`room.team_id is not None`) pilote le gating client de certaines options (le timer, notamment, est réservé aux salles d'équipe) ; le serveur reste de toute façon autoritaire côté validation.
 - `myRole` et `myParticipantId` sont le rôle et l'identifiant **du destinataire**, renvoyés par le serveur — jamais déduits d'un état client persisté : une promotion facilitateur doit se voir immédiatement chez le facilitateur lui-même, pas seulement chez les autres.
@@ -395,6 +396,94 @@ Sortant (tous) :
 `room-socket.service.ts::applyEvent` (cas `agenda.updated`) : le front en tire
 deja `currentRoundId` de l'entree marquee `'current'`, sans lecteur dedie a
 ajouter.
+
+---
+
+## 8.5 `round.bind` / `round.resolve` — chaînage (5e)
+
+> Ajouté 2026-09-12, livraison 5e (`.superpowers/sdd/2026-09-12-5e-chainage/`).
+> Le domaine (`realtime/services.py::bind_round`/`chaining_candidates`/
+> `resolve_source`, tâches 1-2) sait déjà déclarer une liaison de chaînage
+> entre deux rounds et la résoudre en copie (design 2026-09-11 §7) ; ce
+> paragraphe ouvre ce comportement sur le contrat WS (tâche 3). Vocabulaire
+> des clés, désambiguïsé et à ne pas re-mélanger : `sourceItemId` désigne un
+> item du round SOURCE, `itemId` un item du round qu'on regarde, `originItemId`
+> la racine de la chaîne (voir task-2-report.md).
+
+Entrant (facilitateur seul, comme les autres intentions de contrôle) :
+
+| `type` | `payload` | Effet |
+|--------|-----------|-------|
+| `round.bind` | `{ roundId, sourceRoundId, rule }` | Déclare que `roundId` (la cible) reprendra de `sourceRoundId` (la source) ce que dit `rule` (`{take: "items"\|"results", mode: "auto"\|"manual", top: int\|null}`). Ne copie rien — voir `round.resolve` pour le mode manuel, et §8.5.a pour le mode auto. Refusé (`error` `state.invalid_transition`, `rejectedType: "round.bind"`) si l'un des deux rounds est inconnu, si `roundId == sourceRoundId`, si la règle est malformée, si la cible ne consomme pas d'items, si `take: "results"` mais la source ne produit pas de résultats, ou si `top` est posé sans classement disponible ou sans `take: "results"` — voir `realtime/services.py::bind_round` pour le détail des gardes. |
+| `round.resolve` | `{ roundId, sourceItemIds? }` | Valide une sélection manuelle : copie dans `roundId` exactement les items de `sourceItemIds` (des `sourceItemId` pris dans `round.candidates`, §8.5.a). Ignoré en mode `auto` (déjà résolu au démarrage, §8.5.a) ; exigé en mode `manual` (refusé sinon). Idempotent : une liaison déjà résolue renvoie sa copie existante sans la rejouer. Refusé (même `error`, `rejectedType: "round.resolve"`) si le round n'a pas de source liée, ou si `sourceItemIds` contient un candidat inconnu — voir `realtime/services.py::resolve_source`. |
+
+Sortant (tous, sauf `round.candidates`) :
+
+| `type` | `payload` | Émis après |
+|--------|-----------|------------|
+| `round.bound` | `{ roundId, sourceRoundId, rule }` | `round.bind`, toujours — aucun autre fait n'est nécessaire, la liaison ne change ni les items ni l'état d'aucun round. |
+| `round.resolved` | `{ roundId, items: [{itemId, text, sequence, originItemId, sourceItemId, authorId}] }` | `round.resolve`, toujours — même forme que `_chained_items_payload` (`realtime/services.py`). |
+| `agenda.updated` (§5) | `{ agenda }` | `round.resolve` (les items du round consommateur viennent de changer). |
+| `subject.updated` (§5) | `{ text }` | `round.resolve` (le premier item peut avoir changé). |
+
+### 8.5.a Mode auto et candidats du mode manuel
+
+En mode `auto`, `round.select` (§8.1.a) résout la liaison tout seul au moment
+où le round lié devient courant (`realtime/services.py::select_round`, appel
+automatique à `resolve_source`) — `round.selected` porte déjà les items
+résultants, aucun fait de plus n'est donc nécessaire ici.
+
+⚠️ **Asymétrie assumée entre les deux chemins.** `round.selected` construit
+ses `items` avec `items_payload()` (§8.1) — `{id, text, sequence}` — pas avec
+`_chained_items_payload()` : une copie faite en mode `auto` n'expose donc ni
+`originItemId` (racine de la chaîne) ni `sourceItemId` (parent direct), alors
+que `round.resolved` (mode `manual`, ci-dessus) porte les deux. La traçabilité
+d'une copie chaînée n'est donc disponible par WS **que sur le chemin
+manuel** ; elle existe bien en base dans les deux cas (`Item.origin_item`,
+`Item.source_item`), un `state.sync` ultérieur sur le round consommateur ne
+la révèle pas non plus (`items`, §5.1, utilise la même forme courte). Pas
+traité comme un défaut à corriger dans cette livraison — voir le rapport de
+tâche pour l'arbitrage.
+
+En mode `manual`, il n'y a **aucun message client pour demander les
+candidats**. Quand un round lié en mode `manual`, pas encore résolu, devient
+courant via `round.select`, le serveur émet lui-même :
+
+| `type` | Cible | `payload` | Émis après |
+|--------|-------|-----------|------------|
+| `round.candidates` | **1 client, le facilitateur** | `{ roundId, candidates: [{sourceItemId, text, authorId}] }` | `round.select`, quand le round devenu courant est lié en mode `manual` et pas encore résolu. |
+
+**Réservé au facilitateur, filtré à l'émission** — jamais une diffusion de
+groupe suivie d'un masquage côté client. `round.select` exige déjà le
+facilitateur (`_require_facilitator`), donc la connexion qui vient de
+l'émettre EST la sienne : ce fait lui est renvoyé directement (`self._emit`),
+sans passer par `self.channel_layer`, exactement comme `state.sync` (§5.1) ne
+part jamais qu'au client qui a demandé le join.
+
+`state.sync` porte les mêmes candidats (`chainingCandidates`, §5.1) aux mêmes
+conditions, sous réserve que le destinataire soit lui-même le facilitateur :
+un facilitateur qui (re)connecte sur un round manuel non résolu les revoit
+donc sans avoir à re-sélectionner le round.
+
+⚠️ **Ordre d'arrivée contre-intuitif sur la connexion du facilitateur, à ne
+pas prendre pour un bug.** Sur SA propre connexion (celle qui a émis
+`round.select`), `round.candidates` arrive **avant** `vote.wasReset`,
+`round.selected`, `subject.updated` et `agenda.updated` — alors que le code
+les diffuse dans l'ordre inverse (les quatre diffusions de groupe, PUIS
+l'émission directe des candidats). La raison tient à deux chemins de
+livraison différents : `self._emit()` écrit directement sur le socket
+pendant que le handler tourne encore, alors qu'un `self._broadcast()` sur SA
+PROPRE connexion doit repasser par la boucle de distribution du channel
+layer, qui ne reprend la main qu'**après** que le handler courant (donc
+l'émission des candidats) a rendu la sienne. Un client qui supposerait l'ordre
+« le round a changé, puis voici les candidats » verrait donc l'inverse sur le
+fil. Sur la connexion d'un AUTRE participant (jamais destinataire de
+`round.candidates`), les quatre diffusions arrivent dans leur ordre normal —
+l'inversion ne touche que l'émetteur de `round.select` lui-même. Figé par
+`test_candidates_arrive_before_the_round_select_broadcasts_on_the_facilitators_own_connection`
+(`realtime/tests/test_chaining_ws.py`) : sans ce test, une réorganisation du
+traitement pourrait inverser cet ordre sans qu'aucun autre test ne le
+remarque, cassant un client qui s'y serait fié.
 
 ---
 

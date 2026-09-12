@@ -409,6 +409,19 @@ def _replay_round(room, participant, source):
     rejoue. `_next_round_sequence` (maximum existant + 1) est ce qui le
     garantit meme quand la source n'est plus le dernier round de la file --
     voir `test_replaying_a_round_that_is_not_last_appends_at_the_end`.
+
+    Ne recopie PAS `source_round`/`source_rule` : un round rejoue est
+    deliberement DETACHE de la liaison de chainage que le round d'origine
+    pouvait porter (round de correction 1). Ce n'est pas qu'un detail
+    d'implementation qu'on pourrait « corriger » plus tard : si le rejeu
+    heritait de la liaison, ses items porteraient TOUS `origin_item` non nul
+    des la creation (ils sont eux-memes des copies), la garde d'idempotence
+    de `resolve_source` lirait alors ce round comme « deja resolu », et la
+    liaison resterait inerte a vie -- indistinguable d'un bug. Et si on
+    retirait un jour CETTE garde pour le corriger, le round rejoue
+    re-resoudrait contre une source qui a pu changer depuis, empilant un
+    second jeu de copies -- contradiction frontale avec « rouvrir la source
+    n'actualise pas les copies deja faites » (design §7).
     """
     rnd = Round.objects.create(
         room=room,
@@ -458,8 +471,290 @@ def select_round(room, participant, round_id):
     room.current_round = rnd
     room.save(update_fields=["current_round"])
     room.touch()
+    # Chainage (design §7), mode auto SEULEMENT : « au moment ou le round devient
+    # courant, le serveur copie ». `resolve_source` est idempotent (brief tache 2,
+    # point 4) -- redevenir courant (branche ci-dessus, round rouvert) ne rejoue
+    # donc jamais la copie une seconde fois. Le mode manuel, lui, n'est JAMAIS
+    # declenche ici : il attend la validation explicite du facilitateur, seule
+    # entree vers `resolve_source` pour ce mode (point 2 -- un seul chemin de
+    # code produit la copie, celui-ci est partage par les deux modes).
+    if rnd.source_round_id and (rnd.source_rule or {}).get("mode") == "auto":
+        resolve_source(room, participant, rnd.id)
     first = rnd.items.first()
     return {"roundId": rnd.id, "items": items_payload(rnd), "text": first.text if first else ""}
+
+
+def _validate_chaining_rule(rule, rejected_type):
+    """La forme exacte posee par le design (§7) : EXACTEMENT ces trois cles,
+    avec des valeurs dans l'ensemble attendu. Appelee par `bind_round`, donc
+    a la DECLARATION de la liaison -- jamais a la resolution. Une regle mal
+    formee, ou un `top` que la source ne peut pas honorer, doit etre visible
+    au facilitateur pendant qu'il peut encore corriger, pas silencieusement
+    ignoree au demarrage du round consommateur quand personne ne comprendrait
+    plus pourquoi sa liste d'items est vide (brief tache 2, point 3)."""
+    if not isinstance(rule, dict) or set(rule.keys()) != {"take", "mode", "top"}:
+        raise RoomError("state.invalid_transition", "Malformed chaining rule", rejected_type)
+    if rule["take"] not in ("items", "results"):
+        raise RoomError("state.invalid_transition", "Unknown take", rejected_type)
+    if rule["mode"] not in ("auto", "manual"):
+        raise RoomError("state.invalid_transition", "Unknown mode", rejected_type)
+    top = rule["top"]
+    if top is not None and (not isinstance(top, int) or isinstance(top, bool) or top <= 0):
+        raise RoomError("state.invalid_transition", "Invalid top", rejected_type)
+
+
+def bind_round(room, participant, round_id, source_round_id, rule):
+    """Declare la liaison de chainage (design §7) : `round_id` (la cible)
+    reprendra de `source_round_id` (la source) ce que dit `rule`. Ne copie
+    RIEN -- `resolve_source` fait la copie, au moment que `rule["mode"]`
+    decide. Separer les deux, c'est ce qui permet a `bind_round` de refuser
+    une regle IMPOSSIBLE pendant que le facilitateur peut encore la corriger
+    (brief point 3), plutot que `resolve_source` la decouvre trop tard.
+
+    Gardes de registre, toutes a la declaration :
+    - la cible doit CONSOMMER des items (`consumes == "items"`) -- une
+      activite `consumes == "none"` n'a rien ou poser la copie ;
+    - `take: "results"` exige que la source en PRODUISE (`produces ==
+      "results"`) -- rien a prendre sinon. `take: "items"` n'exige rien de
+      la source : meme une activite `produces == "none"`, ou un round encore
+      ouvert qui n'a jamais ete revele, porte des items bruts copiables
+      (design §7, « source encore ouverte : autorisee »).
+    - un `top` non nul exige `take == "results"` -- classer n'a de sens que
+      sur des resultats decides, jamais sur des items bruts. Round de
+      correction 1 : sans cette garde, `top` + `take: "items"` passait la
+      validation puis faisait lever une `AttributeError` (pas une
+      `RoomError`) a la resolution -- ce que le consumer ne rattrape pas,
+      fermant la socket du facilitateur en tache 3.
+    - un `top` non nul exige en plus que la source declare `rank_value` --
+      sans classement, "les N premiers" n'a pas de sens a calculer.
+
+    La strategie de la source est FIGEE dans `source_rule` au moment de
+    cette declaration (cle interne `sourceStrategy`, jamais exposee au
+    client -- `rule` en argument n'en porte que les 3 cles du design).
+    Round de correction 1 : sans ca, le refus "pas de classement" ci-dessus
+    ne tenait qu'a l'instant du bind -- si la source n'a pas son propre
+    deck, sa strategie se resout via celle, ACTIVE, de la room, qu'un
+    changement de deck peut faire varier APRES cette validation mais AVANT
+    que `resolve_source` ne s'execute. Figer la chaine de caracteres rend le
+    refus collant : `resolve_source` relit cette meme valeur, jamais l'etat
+    courant de la room.
+    """
+    _require_facilitator(room, participant, "round.bind")
+    if round_id == source_round_id:
+        raise RoomError("state.invalid_transition", "A round cannot chain to itself", "round.bind")
+    consumer = room.rounds.filter(id=round_id).first()
+    if consumer is None:
+        raise RoomError("state.invalid_transition", "Unknown round", "round.bind")
+    source = room.rounds.filter(id=source_round_id).first()
+    if source is None:
+        raise RoomError("state.invalid_transition", "Unknown source round", "round.bind")
+    _validate_chaining_rule(rule, "round.bind")
+
+    consumer_spec = spec_for(_round_resolution_strategy(consumer, room))
+    if consumer_spec.consumes != "items":
+        raise RoomError(
+            "state.invalid_transition", "This activity does not consume items", "round.bind"
+        )
+    source_strategy = _round_resolution_strategy(source, room)
+    source_spec = spec_for(source_strategy)
+    if rule["take"] == "results" and source_spec.produces != "results":
+        raise RoomError(
+            "state.invalid_transition", "Source does not produce results", "round.bind"
+        )
+    if rule["top"] is not None:
+        if rule["take"] != "results":
+            raise RoomError(
+                "state.invalid_transition", "top requires take: results", "round.bind"
+            )
+        if source_spec.rank_value is None:
+            raise RoomError(
+                "state.invalid_transition", "Source has no ranking to take a top N from", "round.bind"
+            )
+
+    consumer.source_round = source
+    # {**rule, ...} : une copie neuve, jamais le dict de l'appelant -- meme
+    # motif que `dict(source.config)` dans `_replay_round` juste au-dessus.
+    # `sourceStrategy` est la strategie figee, lue par `resolve_source` /
+    # `chaining_candidates` a la place d'un recalcul a chaud (voir
+    # docstring ci-dessus).
+    consumer.source_rule = {**rule, "sourceStrategy": source_strategy}
+    # Une liaison neuve n'est, par construction, pas encore resolue -- meme
+    # si `round_id` en portait deja une autre avant cet appel (round de
+    # correction 1).
+    consumer.source_resolved_at = None
+    consumer.save(update_fields=["source_round", "source_rule", "source_resolved_at"])
+    room.touch()
+    return {"roundId": consumer.id, "sourceRoundId": source.id, "rule": rule}
+
+
+def _chaining_candidate_items(room, rnd):
+    """Les items de la source que `rnd` a le droit de reprendre, DEJA
+    filtres par `take` et DEJA classes/tronques par `top` -- les memes
+    items, dans le meme ordre, que copiera `resolve_source` en mode auto ou
+    que presentera `chaining_candidates` en mode manuel. Un seul calcul pour
+    les deux : sans lui, les deux modes pourraient finir par diverger sur CE
+    qu'ils considerent candidat (brief point 2).
+
+    Classe via `rule["sourceStrategy"]`, la strategie FIGEE par `bind_round`
+    -- jamais un recalcul sur l'etat courant de la source/room (round de
+    correction 1, voir `bind_round`). Si ce classement n'est plus
+    disponible a cet instant (cas degrade : round construit hors de
+    `bind_round`, ou registre modifie apres la declaration), LEVE plutot que
+    de se taire et de tout copier sans classement -- c'est exactement le
+    silence que le design interdit, deplace de la declaration a la
+    resolution.
+    """
+    source = rnd.source_round
+    rule = rnd.source_rule or {}
+    items = list(source.items.all().order_by("sequence", "id"))
+    if rule.get("take") == "results":
+        # Seuls les items DECIDES sont candidats : un item sans Result n'a ni
+        # valeur a reprendre, ni cle de classement a calculer.
+        items = [item for item in items if item.results.filter(round=source).exists()]
+    top = rule.get("top")
+    if top is not None:
+        spec = spec_for(rule.get("sourceStrategy"))
+        if spec.rank_value is None:
+            raise RoomError(
+                "state.invalid_transition",
+                "Source has no ranking to take a top N from",
+                "round.resolve",
+            )
+
+        def _rank_key(item):
+            result = item.results.filter(round=source).first()
+            return spec.rank_value(result)
+
+        items = sorted(items, key=_rank_key, reverse=True)[:top]
+    return items
+
+
+def chaining_candidates(room, round_id):
+    """Ce qu'un mode `manual` presente au facilitateur pour qu'il coche
+    (design §7) : les candidats de la source, deja filtres/classes/tronques
+    par la regle posee a `bind_round` -- jamais la liste brute, sans quoi le
+    facilitateur cocherait une liste que `resolve_source` ne copierait pas
+    telle quelle.
+
+    `sourceItemId`, pas `itemId` (round de correction 1) : ces candidats
+    designent des items de la SOURCE, pas du round que `round_id` regarde --
+    `itemId` ne doit jamais plus designer qu'un item du round qu'on regarde,
+    sans quoi la meme cle finit par pointer deux referents differents selon
+    la fonction qui l'emet (exactement le piege qui rendait `resolve_source`
+    et `chaining_candidates` impossibles a relier par le front).
+    """
+    rnd = room.rounds.filter(id=round_id).first()
+    if rnd is None:
+        raise RoomError("state.invalid_transition", "Unknown round", "round.candidates")
+    if rnd.source_round_id is None:
+        raise RoomError("state.invalid_transition", "No source bound", "round.candidates")
+    return [
+        {"sourceItemId": item.id, "text": item.text, "authorId": item.author_id}
+        for item in _chaining_candidate_items(room, rnd)
+    ]
+
+
+def _chained_items_payload(items):
+    """`itemId` designe la copie ELLE-MEME (un item du round qu'on regarde) ;
+    `sourceItemId` son parent DIRECT dans CETTE resolution (`Item.source_item`,
+    toujours dans le round source immediat) ; `originItemId` la racine de la
+    chaine entiere (`Item.origin_item`, round de correction 1 -- voir les
+    deux champs sur le modele `Item`). Les trois coexistent car aucune paire
+    ne remplace l'autre sur une chaine de plus d'un maillon."""
+    return [
+        {
+            "itemId": item.id,
+            "text": item.text,
+            "sequence": item.sequence,
+            "originItemId": item.origin_item_id,
+            "sourceItemId": item.source_item_id,
+            "authorId": item.author_id,
+        }
+        for item in items
+    ]
+
+
+@transaction.atomic
+def resolve_source(room, participant, round_id, item_ids=None):
+    """Execute la copie declaree par `bind_round` (design §7). Seul chemin
+    qui ecrit des items copies -- que l'appel vienne du demarrage automatique
+    d'un round `auto` (depuis `select_round`) ou de la validation explicite
+    d'un facilitateur en mode `manual` (brief point 2 : un seul chemin de
+    code, sans quoi les deux modes divergeraient).
+
+    `item_ids` ne sert qu'au mode `manual` : c'est la selection cochee par le
+    facilitateur, validee contre `chaining_candidates`. Ignore en mode
+    `auto`, qui reprend TOUS les candidats (deja tronques a `top` le cas
+    echeant).
+
+    Idempotent (brief point 4) : un round dont `source_resolved_at` est deja
+    pose renvoie sa copie existante sans en rejouer la creation. Ce marqueur
+    dedie (round de correction 1) dit « CETTE liaison a ete resolue » --
+    PAS « ce round porte des items avec une origine », que lisait la
+    version precedente a tort : un round REJOUE (`_replay_round`) porte deja
+    des items a `origin_item` non nul pour une raison totalement etrangere
+    (il copie son PROPRE predecesseur), donc le lier ENSUITE a une nouvelle
+    source faisait repondre "deja resolu" a une liaison qui n'avait encore
+    jamais ete executee -- zero item copie, sans la moindre erreur.
+    `source_resolved_at` est remis a None par `bind_round` a chaque
+    (re)declaration, donc ce faux positif ne peut plus se produire.
+    """
+    _require_facilitator(room, participant, "round.resolve")
+    rnd = room.rounds.filter(id=round_id).first()
+    if rnd is None:
+        raise RoomError("state.invalid_transition", "Unknown round", "round.resolve")
+    if rnd.source_round_id is None:
+        raise RoomError("state.invalid_transition", "No source bound", "round.resolve")
+
+    if rnd.source_resolved_at is not None:
+        already = list(rnd.items.filter(source_item__isnull=False).order_by("sequence", "id"))
+        return _chained_items_payload(already)
+
+    rule = rnd.source_rule or {}
+    candidates = {item.id: item for item in _chaining_candidate_items(room, rnd)}
+
+    if rule.get("mode") == "manual":
+        if item_ids is None:
+            raise RoomError(
+                "state.invalid_transition", "Facilitator must select items first", "round.resolve"
+            )
+        unknown = [item_id for item_id in item_ids if item_id not in candidates]
+        if unknown:
+            raise RoomError("state.invalid_transition", "Unknown candidate", "round.resolve")
+        selected = [candidates[item_id] for item_id in item_ids]
+    else:
+        selected = list(candidates.values())
+
+    base_sequence = rnd.items.count()
+    copies = [
+        Item.objects.create(
+            round=rnd,
+            text=item.text,
+            sequence=base_sequence + index,
+            author=item.author,
+            # Racine de la chaine, pas la copie intermediaire -- meme motif
+            # que `_replay_round` juste au-dessus : sans lui, une chaine de
+            # trois activites produirait des origines en cascade, plus
+            # remontables a la source reelle (brief tache 2, etape 3).
+            origin_item=item.origin_item or item,
+            # Parent DIRECT de cette copie dans CETTE resolution -- a la
+            # difference de `origin_item` ci-dessus, ne remonte jamais plus
+            # loin que `item` lui-meme (round de correction 1).
+            source_item=item,
+            # Risque a ecrire, pas a traiter ici (round de correction 1) :
+            # cette liste de champs est EXPLICITE et s'arrete a `text`/
+            # `author`. Le jour ou `Item` porte un payload JSON pour une
+            # activite sans cartes (design, activite future), cette liste
+            # figee le laissera tomber EN SILENCE a la copie -- sur pour
+            # l'invariant "une copie n'est pas une reference", faux pour le
+            # produit. Aucun test ne le garde aujourd'hui.
+        )
+        for index, item in enumerate(selected, start=1)
+    ]
+    rnd.source_resolved_at = timezone.now()
+    rnd.save(update_fields=["source_resolved_at"])
+    room.touch()
+    return _chained_items_payload(copies)
 
 
 def add_scenario_item(room, participant, text):
@@ -1174,6 +1469,28 @@ def build_state_sync(participant):
     # d'affichage : l'omettre laissait le meme trou apres la globalisation.
     if round_state in (RoundState.REVEALED, RoundState.ACTED):
         payload["itemResults"] = revealed_payload(room)["itemResults"]
+    # Chainage (contrat §8.5.a) : un facilitateur qui rejoint ou recharge sur un
+    # round lie en mode manuel, pas encore resolu, doit voir les candidats sans
+    # avoir a re-selectionner le round -- state.sync ne rejoue aucun evenement,
+    # donc tout ce qui peint l'ecran doit s'y trouver (meme defaut, meme remede
+    # que pour `itemResults` ci-dessus). Reutilise `chaining_candidates`, le
+    # MEME calcul que celui que round.select renvoie au facilitateur, pour que
+    # les deux chemins ne divergent jamais sur ce qu'ils considerent candidat.
+    #
+    # Reserve au facilitateur, et construit seulement pour lui : cette fonction
+    # produit un payload PAR destinataire (voir `myRole`/`myResponses`
+    # ci-dessus), donc la garde se fait avant le calcul, pas par omission
+    # d'une cle apres coup -- une trame WebSocket se lit dans le navigateur,
+    # et ce depot n'emet jamais une information reservee pour la masquer
+    # ensuite cote client.
+    if (
+        participant.role == Role.FACILITATOR
+        and rnd is not None
+        and rnd.source_round_id
+        and (rnd.source_rule or {}).get("mode") == "manual"
+        and rnd.source_resolved_at is None
+    ):
+        payload["chainingCandidates"] = chaining_candidates(room, rnd.id)
     return payload
 
 
