@@ -5,7 +5,6 @@ wraps these with ``database_sync_to_async``. Server is the source of truth: ever
 mutation validates the state machine and raises ``RoomError`` on an illegal move
 (contract §0.1, §6.b) rather than applying it.
 """
-import threading
 from collections import Counter, defaultdict
 
 from django.conf import settings
@@ -142,45 +141,50 @@ def is_facilitator(room, participant):
     return _is_facilitator(room, participant)
 
 
-# Protection contre le double-onglet (piege releve tache 6a-3, brief tache
-# 6a-5) : lire le budget d'un participant PUIS l'ecrire n'etait pas
-# serialise -- deux onglets du MEME participant, chacun declenchant son
-# propre `cast_response()` (execute par `database_sync_to_async` dans le pool
-# de threads de Channels), pouvaient tous deux lire le meme etat AVANT que
-# l'un des deux n'ecrive, et depasser ensemble le budget de 2n jetons.
+# Protection contre le double-onglet (piege releve tache 6a-3, corrige tache
+# 6a-5, round de correction 1) : lire le budget d'un participant PUIS
+# l'ecrire n'etait pas serialise -- deux onglets du MEME participant,
+# chacun declenchant son propre `cast_response()`, pouvaient tous deux lire
+# le meme etat AVANT que l'un des deux n'ecrive, et depasser ensemble le
+# budget de 2n jetons.
 #
-# Un verrou APPLICATIF, et non `select_for_update()` : SQLite -- le moteur du
-# developpement local et de cette suite de tests par defaut -- IGNORE
-# SILENCIEUSEMENT `select_for_update()` (`DatabaseFeatures.has_select_for_update
-# = False`, verifie dans `django.db.backends.sqlite3.base` ; aucune erreur,
-# mais aucun verrou non plus). Un `select_for_update()` aurait donc laisse ce
-# correctif sans aucun effet sur ce moteur, et un test de concurrence n'aurait
-# rien pu prouver dessus. Un `threading.Lock` par participant, lui, serialise
-# REELLEMENT deux threads du MEME PROCESSUS quel que soit le moteur -- et ce
-# depot ne fait tourner qu'UN SEUL processus daphne en production
-# (`deploy/systemd/facilitation-asgi.service` : aucun flag de workers), donc
-# cette protection intra-processus suffit aujourd'hui. Meme motif que
-# `_timer_tasks` dans `realtime/consumers.py` : un dict au niveau du MODULE,
-# pas de l'instance, pour survivre a toute connexion/deconnexion individuelle.
-_response_locks: dict[int, threading.Lock] = {}
-_response_locks_guard = threading.Lock()
-
-
-def _lock_for(participant_id):
-    """Le verrou de CE participant, cree au premier besoin.
-
-    La creation elle-meme est protegee par un second verrou, tenu tres
-    brievement : un `defaultdict(threading.Lock)` nu n'aurait pas suffi ici --
-    deux threads accedant SIMULTANEMENT a une cle absente peuvent chacun
-    construire un `Lock` different et n'en laisser qu'un dans le dict, l'autre
-    thread utilisant alors un verrou que personne d'autre ne tient (aucune
-    exclusion mutuelle, le defaut serait passe inapercu)."""
-    with _response_locks_guard:
-        lock = _response_locks.get(participant_id)
-        if lock is None:
-            lock = threading.Lock()
-            _response_locks[participant_id] = lock
-        return lock
+# PREMIERE VERSION DE CE CORRECTIF (round precedent) : un verrou APPLICATIF
+# (`threading.Lock` par participant), justifie par le fait que ce depot ne
+# fait tourner qu'un seul processus daphne en production aujourd'hui. Ecarte
+# en relecture : cette garantie tient a une TOPOLOGIE DE DEPLOIEMENT, pas a
+# une regle produit -- le jour ou quelqu'un ajoute un worker (ou un second
+# processus daphne), la protection disparait EN SILENCE : rien n'echoue,
+# rien n'alerte, le budget redevient simplement depassable. Une regle
+# produit ne doit pas dependre d'un detail d'infrastructure que personne ne
+# relira au moment ou il change.
+#
+# CORRECTIF ACTUEL : un verrou DE LIGNE en base (`select_for_update()`, dans
+# la transaction qui entoure deja l'ecriture, voir `cast_response`). A dire
+# franchement, les deux moities de la verite :
+# - PROTEGE REELLEMENT en production : PostgreSQL applique `SELECT ... FOR
+#   UPDATE`, une seconde transaction qui tente de verrouiller la MEME ligne
+#   bloque jusqu'au commit (ou rollback) de la premiere -- quel que soit le
+#   nombre de processus ou de workers, puisque le verrou vit dans la base,
+#   pas dans un processus Python.
+# - NE PROTEGE PAS en developpement local ni dans cette suite de tests par
+#   defaut : SQLite ignore SILENCIEUSEMENT `select_for_update()`
+#   (`DatabaseFeatures.has_select_for_update = False`, verifie dans
+#   `django.db.backends.sqlite3.base` ; aucune erreur, mais aucun verrou non
+#   plus). C'est ACCEPTABLE : le developpement local n'a pas de concurrence
+#   reelle a serialiser, et c'est exactement le comportement d'aujourd'hui
+#   (avant ce correctif comme apres, sur ce moteur). Consequence directe :
+#   le test de concurrence de ce module ne peut RIEN demontrer sur SQLite et
+#   se limite donc a PostgreSQL (`@pytest.mark.skipif` sur
+#   `connection.features.has_select_for_update`) -- voir
+#   `test_dot_voting.py::test_cast_response_serializes_two_concurrent_tabs_of_the_same_participant`.
+def _lock_participant_row(participant):
+    """Verrou de ligne sur CE participant, tenu jusqu'au commit de la
+    transaction appelante (`transaction.atomic()` dans `cast_response`).
+    Isole en fonction a part -- et non un `Participant.objects
+    .select_for_update().get(...)` en ligne dans `cast_response` -- pour que
+    le test de concurrence puisse instrumenter precisement le moment ou le
+    verrou est demande, sans dependre des internals de l'ORM."""
+    Participant.objects.select_for_update().get(pk=participant.id)
 
 
 def _require_item_author(room, participant, item, rejected_type):
@@ -1223,15 +1227,20 @@ def cast_response(room, participant, item_id, payload):
     # un refus ne laisse donc rien derriere lui, la seule ecriture de cette
     # fonction etant l'`update_or_create` plus bas.
     #
-    # `_lock_for(participant.id)` (brief tache 6a-5) : ce bloc, de la LECTURE
-    # du budget a son ECRITURE, doit s'executer comme un tout pour CE
-    # participant -- sans quoi deux onglets ouverts par la meme personne
-    # peuvent chacun lire l'etat AVANT que l'un des deux n'ecrive, et
-    # depasser ensemble le budget de 2n. Inoffensif pour le poker (et toute
-    # activite sans notion de budget) : `validate_responses` y accepte
-    # toujours, le verrou ne fait alors que serialiser deux ecritures qui
-    # n'entraient de toute facon pas en conflit.
-    with _lock_for(participant.id):
+    # `transaction.atomic()` + `_lock_participant_row` (brief tache 6a-5,
+    # round de correction 1) : ce bloc, de la LECTURE du budget a son
+    # ECRITURE, doit s'executer comme un tout pour CE participant -- sans
+    # quoi deux onglets ouverts par la meme personne peuvent chacun lire
+    # l'etat AVANT que l'un des deux n'ecrive, et depasser ensemble le
+    # budget de 2n. Inoffensif pour le poker (et toute activite sans notion
+    # de budget) : `validate_responses` y accepte toujours, le verrou ne
+    # fait alors que serialiser deux ecritures qui n'entraient de toute
+    # facon pas en conflit. Protection REELLE sur PostgreSQL (production) ;
+    # sans effet sur SQLite (dev local, cette suite par defaut) -- voir le
+    # commentaire de `_lock_participant_row` pour le detail et pourquoi
+    # c'est un compromis assume, pas un oubli.
+    with transaction.atomic():
+        _lock_participant_row(participant)
         existing = list(
             Response.objects.filter(round=rnd, participant=participant).values_list("item_id", "payload")
         )
@@ -1866,6 +1875,34 @@ def build_state_sync(participant):
         and rnd.source_resolved_at is None
     ):
         payload["chainingCandidates"] = chaining_candidates(room, rnd.id)
+    # Totaux en direct et reste a placer (round de correction 1, brief tache
+    # 6a-5) : `state.sync` ne rejoue AUCUN evenement (regle du depot, deja
+    # appliquee ci-dessus a `itemResults` et `chainingCandidates`) -- un
+    # facilitateur ou un votant qui recharge sa page en cours de round doit
+    # donc retrouver dans CET instantane tout ce que les diffusions
+    # `response.totals`/`response.pending` (`realtime/consumers.py`) lui
+    # auraient deja appris, aux MEMES conditions qu'elles, pas a des
+    # conditions relachees pour l'occasion.
+    #
+    # `liveTotals` : a TOUT destinataire, mais seulement si
+    # `live_totals_payload` rend quelque chose -- round `open` ET config du
+    # round `liveTotals: true` (meme garde que la diffusion, meme fonction,
+    # donc aucune divergence possible entre les deux chemins).
+    live_totals = live_totals_payload(room)
+    if live_totals is not None:
+        payload["liveTotals"] = live_totals
+    # `pendingBudgets` : reserve au facilitateur, et NON CALCULE pour tout
+    # autre destinataire -- meme garde AVANT le calcul que `chainingCandidates`
+    # juste au-dessus, jamais une cle emise puis a masquer cote client. Le
+    # test de la garde (`is_facilitator`, round-scoped -- `rnd.facilitator_id`
+    # s'il existe, sinon `participant.role`) est le MEME que celui qui filtre
+    # `response.pending` a l'emission (`consumers.py::facilitation_event`) :
+    # une seule definition de "qui est facilitateur", jamais deux qui
+    # pourraient un jour diverger.
+    if is_facilitator(room, participant):
+        remaining = remaining_budgets(room)
+        if remaining is not None:
+            payload["pendingBudgets"] = remaining
     return payload
 
 

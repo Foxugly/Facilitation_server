@@ -22,6 +22,7 @@ sans WebSocket -- la preuve par barriere reseau vit dans
 from types import SimpleNamespace
 
 import pytest
+from django.db import connection
 
 from decks.seed import create_dot_voting_deck, create_standard_deck
 from realtime import services
@@ -500,22 +501,42 @@ def test_remaining_budgets_covers_every_participant_including_those_who_placed_n
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.skipif(
+    not connection.features.has_select_for_update,
+    reason=(
+        "select_for_update() est un no-op silencieux sur ce moteur "
+        "(SQLite, has_select_for_update=False) -- rien a demontrer ici, "
+        "voir le commentaire de services._lock_participant_row. Ce test "
+        "ne prouve la serialisation que sur un moteur qui verrouille "
+        "reellement les lignes (PostgreSQL, la prod et la CI)."
+    ),
+)
 def test_cast_response_serializes_two_concurrent_tabs_of_the_same_participant():
-    """Piege releve tache 6a-3, corrige tache 6a-5 (brief) : lire le budget
-    d'un participant PUIS l'ecrire n'etait pas serialise -- deux onglets du
-    MEME participant, chacun declenchant son propre `cast_response()`,
-    pouvaient tous deux lire le meme etat AVANT que l'un des deux n'ecrive,
-    et depasser ensemble le budget de 2n.
+    """Piege releve tache 6a-3, corrige tache 6a-5, verrou deplace en base
+    au round de correction 1 (le premier correctif, un verrou applicatif
+    par processus, tenait a une topologie de deploiement plutot qu'a une
+    regle produit -- voir le commentaire de `_lock_participant_row`) : lire
+    le budget d'un participant PUIS l'ecrire n'etait pas serialise -- deux
+    onglets du MEME participant, chacun declenchant son propre
+    `cast_response()`, pouvaient tous deux lire le meme etat AVANT que l'un
+    des deux n'ecrive, et depasser ensemble le budget de 2n.
 
-    Reproduit une VRAIE concurrence : deux threads systeme reels (pas un
-    mock d'horloge), synchronises par des `threading.Event` autour du point
-    exact ou `services._lock_for` est acquis. Le premier thread a l'atteindre
-    le TIENT (il est mis en pause A L'INTERIEUR du verrou) le temps que le
-    second, demarre APRES coup, tente lui aussi de l'acquerir -- ce qui
-    prouve qu'il en est bien BLOQUE, pas seulement qu'il s'execute apres.
-    Sans le verrou (mutation : `_lock_for` neutralise), le second thread ne
-    serait jamais bloque : les deux liraient `existing` avant que l'un des
-    deux n'ecrive, et la seconde reponse serait acceptee a tort.
+    Reproduit une VRAIE concurrence, avec un VRAI verrou de base (pas un
+    mock d'horloge, pas un verrou Python) : deux threads systeme reels,
+    synchronises par des `threading.Event` autour du point ou
+    `services._lock_participant_row` est appelee. Le premier thread
+    l'appelle (ce qui emet le VRAI `SELECT ... FOR UPDATE`, a l'interieur
+    de la transaction ouverte par `cast_response`), puis se met en pause
+    -- transaction toujours ouverte, ligne toujours verrouillee en base --
+    le temps que le second thread tente, lui aussi, d'appeler
+    `_lock_participant_row` : son `SELECT ... FOR UPDATE` a lui bloque
+    REELLEMENT dans PostgreSQL tant que la transaction du premier n'a pas
+    commite (ou echoue), ce qui prouve qu'il en est bien BLOQUE au niveau
+    du moteur, pas seulement qu'il s'execute apres par chance de
+    l'ordonnanceur. Sans le verrou (mutation : `_lock_participant_row`
+    neutralisee), le second thread ne serait jamais bloque : les deux
+    liraient `existing` avant que l'un des deux n'ecrive, et la seconde
+    reponse serait acceptee a tort.
 
     Mise en scene (n=3 -> budget 6, au plus 3 jetons par item -- deux items
     seuls, chacun a son maximum, ne peuvent jamais depasser 2*3=6 : la borne
@@ -524,7 +545,6 @@ def test_cast_response_serializes_two_concurrent_tabs_of_the_same_participant():
     3 points sur l'item 0 (moitie du budget, hors course) ; LA RACE porte sur
     les 3 points restants, chaque thread visant un item DIFFERENT (1 et 2)
     a 3 points chacun -- combines, 3 + 3 + 3 = 9 > 6."""
-    import contextlib
     import threading
 
     room, fac, voter, rnd, items = _dot_voting_room(3)  # n=3 -> budget 6
@@ -533,21 +553,21 @@ def test_cast_response_serializes_two_concurrent_tabs_of_the_same_participant():
 
     entered = threading.Event()
     release = threading.Event()
-    real_lock_for = services._lock_for
+    real_lock_participant_row = services._lock_participant_row
 
-    @contextlib.contextmanager
-    def instrumented_lock_for(participant_id):
-        with real_lock_for(participant_id):
-            if not entered.is_set():
-                # Le PREMIER thread a entrer tient le vrai verrou et se met
-                # en pause ici, DEDANS -- tant qu'il ne l'a pas relache, le
-                # second thread (ci-dessous) reste bloque sur
-                # `real_lock_for(...).acquire()`, pas sur cet `Event`.
-                entered.set()
-                release.wait(timeout=2)
-            yield
+    def instrumented(participant):
+        real_lock_participant_row(participant)  # le VRAI SELECT ... FOR UPDATE
+        if not entered.is_set():
+            # Le PREMIER thread a l'appeler a deja acquis le VRAI verrou de
+            # ligne (l'appel ci-dessus vient de le prouver) et se met en
+            # pause ICI, la transaction toujours ouverte -- tant qu'il ne
+            # l'a pas relachee, le second thread (ci-dessous) reste bloque
+            # DANS LE MOTEUR sur son propre appel a `real_lock_participant_row`,
+            # pas sur cet `Event`.
+            entered.set()
+            release.wait(timeout=2)
 
-    services._lock_for = instrumented_lock_for
+    services._lock_participant_row = instrumented
     try:
         results = {}
 
@@ -574,10 +594,10 @@ def test_cast_response_serializes_two_concurrent_tabs_of_the_same_participant():
         t2 = threading.Thread(target=cast_second)
         t1.start()
         t2.start()
-        # Laisse au second thread le temps d'atteindre `real_lock_for(...).acquire()`
-        # et de s'y bloquer reellement avant de liberer le premier -- une
-        # poignee de lectures locales le separent de ce point, tres largement
-        # sous ce delai.
+        # Laisse au second thread le temps d'atteindre son propre
+        # `real_lock_participant_row(...)` et de s'y bloquer REELLEMENT (dans
+        # le moteur) avant de liberer le premier -- une poignee de lectures
+        # locales le separent de ce point, tres largement sous ce delai.
         import time
 
         time.sleep(0.2)
@@ -585,7 +605,7 @@ def test_cast_response_serializes_two_concurrent_tabs_of_the_same_participant():
         t1.join(timeout=5)
         t2.join(timeout=5)
     finally:
-        services._lock_for = real_lock_for
+        services._lock_participant_row = real_lock_participant_row
 
     assert results.get("first") == "ok"
     assert isinstance(results.get("second"), RoomError)
@@ -598,3 +618,90 @@ def test_cast_response_serializes_two_concurrent_tabs_of_the_same_participant():
     assert Response.objects.get(item=items[0], participant=voter).payload == {"points": 3}
     assert Response.objects.get(item=items[1], participant=voter).payload == {"points": 3}
     assert not Response.objects.filter(item=items[2], participant=voter).exists()
+
+
+# --- state.sync : totaux en direct et reste a placer, a la reconnexion ---
+#
+# Round de correction 1 : `state.sync` ne rejoue AUCUN evenement (regle deja
+# appliquee a `itemResults` -- test_state_sync_reveal.py -- et a
+# `chainingCandidates` -- test_state_sync_chaining.py). Un facilitateur ou
+# un votant qui recharge sa page en cours de round doit donc retrouver dans
+# l'instantane tout ce que `response.totals`/`response.pending`
+# (`realtime/consumers.py`) lui auraient deja appris -- aux MEMES
+# conditions que ces diffusions, jamais des conditions relachees pour
+# l'occasion.
+
+
+@pytest.mark.django_db
+def test_state_sync_carries_live_totals_when_the_config_allows_it():
+    """A TOUT destinataire (ici le votant lui-meme) -- meme fonction,
+    `live_totals_payload`, que celle qui alimente la diffusion : aucune
+    divergence possible entre les deux chemins."""
+    room, fac, voter, rnd, items = _dot_voting_room(2)
+    rnd.config = {"liveTotals": True}
+    rnd.save(update_fields=["config"])
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 2})
+
+    payload = services.build_state_sync(voter)
+
+    assert payload["liveTotals"] == services.live_totals_payload(room)
+    blocks = {b["itemId"]: b for b in payload["liveTotals"]["itemResults"]}
+    assert blocks[items[0].id]["totalPoints"] == 2
+
+
+@pytest.mark.django_db
+def test_state_sync_has_no_live_totals_in_secret_mode_by_default():
+    room, fac, voter, rnd, items = _dot_voting_room(2)
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 2})
+
+    payload = services.build_state_sync(voter)
+
+    assert "liveTotals" not in payload
+
+
+@pytest.mark.django_db
+def test_state_sync_carries_pending_budgets_for_the_facilitator():
+    room, fac, voter, rnd, items = _dot_voting_room(3)  # budget 6
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 2})
+
+    payload = services.build_state_sync(fac)
+
+    assert payload["pendingBudgets"][str(voter.public_id)] == 4  # 6 - 2
+    assert payload["pendingBudgets"][str(fac.public_id)] == 6  # rien pose
+
+
+@pytest.mark.django_db
+def test_state_sync_never_carries_pending_budgets_for_a_voter():
+    """Le cas qui compte : reserve au facilitateur, absente (pas vide) de
+    l'etat d'un votant -- jamais une cle emise puis a masquer cote client."""
+    room, fac, voter, rnd, items = _dot_voting_room(3)
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 2})
+
+    payload = services.build_state_sync(voter)
+
+    assert "pendingBudgets" not in payload
+
+
+@pytest.mark.django_db
+def test_state_sync_has_no_pending_budgets_for_the_poker_facilitator():
+    """Le poker n'a aucune notion de budget (`spec.remaining_budget is
+    None`) -- `remaining_budgets` renvoie `None`, la cle reste absente meme
+    pour le facilitateur."""
+    deck = create_standard_deck()
+    code = generate_unique_code(lambda c: Room.objects.filter(code=c).exists())
+    room = Room(code=code, vote_type=deck.vote_type, deck_snapshot=build_deck_snapshot(deck))
+    room.touch(save=False)
+    room.save()
+    fac = Participant.objects.create(room=room, token=generate_token(), display_name="Sam", role=Role.FACILITATOR)
+    rnd = Round.objects.create(room=room, facilitator=fac)
+    Item.objects.create(round=rnd, text="Subject", sequence=1)
+    room.current_round = rnd
+    room.save(update_fields=["current_round"])
+
+    payload = services.build_state_sync(fac)
+
+    assert "pendingBudgets" not in payload
