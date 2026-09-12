@@ -132,6 +132,22 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 {"enabled": summary["timerEnabled"], "seconds": summary["timerSeconds"]},
             )
             await self._broadcast_participation(room)
+        elif mtype == "round.reorder":
+            # Refixe Round.sequence sur l'ordre donne (contrat SS8.4). Ne
+            # diffuse que l'agenda rediffuse : il porte deja l'id du round
+            # courant (`status: "current"`), que cette intention ne change
+            # jamais -- aucun fait de plus n'est donc necessaire.
+            await database_sync_to_async(services.reorder_rounds)(
+                room, participant, payload.get("roundIds") or []
+            )
+            await self._broadcast_agenda(room)
+        elif mtype == "round.remove":
+            # Elague un round du scenario (contrat SS8.4). Refuse par
+            # `remove_round` si le round courant est vise (voir son docstring) :
+            # l'agenda rediffuse continue donc de designer le meme round
+            # courant, d'ou l'absence de fait dedie ici aussi.
+            await database_sync_to_async(services.remove_round)(room, participant, payload.get("roundId"))
+            await self._broadcast_agenda(room)
         elif mtype == "round.configure":
             out = await database_sync_to_async(services.configure_round)(
                 room,

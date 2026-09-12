@@ -365,6 +365,39 @@ il ne cree ni ne selectionne aucun round — `roundId` doit deja exister et etre
 
 ---
 
+## 8.4 `round.reorder` / `round.remove` — le scenario (5d)
+
+> Ajoute 2026-09-12, livraison 5d (`.superpowers/sdd/2026-09-12-5d-scenario-prepare/`).
+> `Round.sequence` (tache 1) donne a la file de rounds un ordre explicite ; ces
+> deux intentions sont les gestes qui en font un scenario compose en amont --
+> reordonner et elaguer. `realtime/services.py::reorder_rounds`/`remove_round`
+> portent la logique de domaine (tache 2) ; ce paragraphe ne couvre que leur
+> cablage sur le contrat WS (tache 3).
+
+Entrant (facilitateur seul, comme les autres intentions de controle) :
+
+| `type` | `payload` | Effet |
+|--------|-----------|-------|
+| `round.reorder` | `{ roundIds: [] }` | Refixe `Round.sequence` sur l'ordre donne. Refuse si l'ensemble d'ids ne correspond pas exactement aux rounds existants de la salle (`error` `state.invalid_transition`, `rejectedType: "round.reorder"`). Deplacer un round deja `ACTED` est autorise : la sequence ne pilote que l'affichage de l'agenda, jamais l'historique (`history/`, trie sur `decided_at`). |
+| `round.remove` | `{ roundId }` | Retire un round du scenario. Refuse (meme `error`, `rejectedType: "round.remove"`) si le round n'existe pas, s'il porte deja un `Result`, s'il n'est pas `idle`, ou s'il est le round courant de la salle — voir `realtime/services.py::remove_round` pour le detail des trois gardes. Le facilitateur doit d'abord designer un autre round courant via `round.select` avant de pouvoir retirer l'ancien. |
+
+Sortant (tous) :
+
+| `type` | `payload` | Emis apres |
+|--------|-----------|------------|
+| `agenda.updated` (§5) | `{ agenda }` | `round.reorder`, `round.remove` |
+
+`round.reorder` et `round.remove` sont deux intentions de plus a ne declencher
+**aucun** fait propre : l'agenda rediffuse porte deja l'id du round courant
+(`status: "current"`), que ni l'une ni l'autre ne peut jamais changer --
+`round.remove` le refuse explicitement (troisieme garde ci-dessus) et
+`round.reorder` ne touche qu'a `Round.sequence`. Verifie par lecture de
+`room-socket.service.ts::applyEvent` (cas `agenda.updated`) : le front en tire
+deja `currentRoundId` de l'entree marquee `'current'`, sans lecteur dedie a
+ajouter.
+
+---
+
 ## 9. Hors périmètre (Phase 1)
 
 - ~~❌ `facilitator.transfer` **volontaire** (Phase 2)~~ — **implémenté** : l'intention WS
