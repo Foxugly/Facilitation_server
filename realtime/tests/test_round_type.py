@@ -1,0 +1,108 @@
+"""Chaque round fige son propre deck des la preparation, pas seulement a
+l'ouverture (task 1, design 5c). Sans cela, preparer un second round avec un
+autre deck reecrirait le type du premier sous les pieds du facilitateur : un
+scenario ne pourrait jamais enchainer deux activites differentes.
+"""
+import pytest
+
+from decks.models import Deck
+from decks.seed import create_standard_deck
+from realtime import services
+from rooms.codes import generate_token, generate_unique_code
+from rooms.models import Participant, Role, Room, Round
+from rooms.snapshot import build_deck_snapshot
+
+pytestmark = pytest.mark.django_db
+
+
+def _second_deck(vote_type):
+    """Un second deck jouable, une seule carte suffit a distinguer les
+    snapshots — et sa valeur n'existe pas dans le deck standard ("1".."7")."""
+    deck = Deck.objects.create(vote_type=vote_type, is_standard=False, card_back_image="decks/backs/b.webp")
+    deck.set_current_language("en")
+    deck.name = "Fibonacci"
+    deck.save()
+    deck.cards.create(value="13", slug="thirteen", order=1, background_image="decks/cards/13.webp")
+    return deck
+
+
+@pytest.fixture
+def room_with_two_decks():
+    standard = create_standard_deck()
+    other = _second_deck(standard.vote_type)
+    snapshots = [build_deck_snapshot(standard), build_deck_snapshot(other)]
+    code = generate_unique_code(lambda c: Room.objects.filter(code=c).exists())
+    room = Room(
+        code=code, vote_type=standard.vote_type, deck_snapshot=snapshots[0],
+        deck_snapshots=snapshots, title="Retro",
+    )
+    room.touch(save=False)
+    room.save()
+    fac = Participant.objects.create(room=room, token=generate_token(), display_name="Sam", role=Role.FACILITATOR)
+    return room, fac, standard, other
+
+
+def test_second_round_with_another_deck_does_not_change_the_first(room_with_two_decks):
+    """Deux rounds prepares dans la meme room avec deux decks differents gardent
+    chacun le sien : preparer le second ne touche pas au deck_snapshot du
+    premier, deja fige."""
+    room, fac, standard, other = room_with_two_decks
+    services.prepare_round(room, fac, subject_text="A", deck_id=standard.pk)
+    first_id = services.current_round(room).id
+
+    second_id = services.add_scenario_item(room, fac, "B")
+    services.prepare_round(room, fac, subject_id=second_id, deck_id=other.pk)
+
+    first = Round.objects.get(id=first_id)
+    second = Round.objects.get(id=second_id)
+    assert first.deck_snapshot["deckId"] == standard.pk
+    assert second.deck_snapshot["deckId"] == other.pk
+
+
+def test_opening_a_round_does_not_overwrite_its_frozen_deck(room_with_two_decks):
+    """Ouvrir un round n'ecrase pas le snapshot fige a sa preparation, meme si le
+    deck ACTIF de la room a change entre-temps."""
+    room, fac, standard, other = room_with_two_decks
+    services.prepare_round(room, fac, subject_text="A", deck_id=standard.pk)
+    rnd_id = services.current_round(room).id
+
+    # Le facilitateur change le deck actif de la room avant d'ouvrir : le round,
+    # lui, a deja fige le sien a la preparation.
+    services.select_deck(room, fac, other.pk)
+
+    services.open_vote(room, fac)
+
+    rnd = Round.objects.get(id=rnd_id)
+    assert rnd.deck_snapshot["deckId"] == standard.pk
+
+
+def test_round_prepared_without_explicit_deck_inherits_the_room_deck(room_with_two_decks):
+    """Sans choix explicite de deck a la preparation, le round n'a pas encore de
+    snapshot propre ; l'ouverture le fige alors sur celui de la room — le
+    comportement d'aujourd'hui, celui d'une room a un seul deck (poker)."""
+    room, fac, standard, _ = room_with_two_decks
+    services.prepare_round(room, fac, subject_text="A")
+    rnd_id = services.current_round(room).id
+    rnd = Round.objects.get(id=rnd_id)
+    assert rnd.deck_snapshot is None
+
+    services.open_vote(room, fac)
+
+    rnd.refresh_from_db()
+    assert rnd.deck_snapshot["deckId"] == standard.pk
+
+
+def test_round_config_defaults_to_empty_dict_and_round_trips(room_with_two_decks):
+    """`Round.config` vaut {} par defaut et survit a un aller-retour en base."""
+    room, fac, _, _ = room_with_two_decks
+    services.prepare_round(room, fac, subject_text="A")
+    rnd_id = services.current_round(room).id
+
+    rnd = Round.objects.get(id=rnd_id)
+    assert rnd.config == {}
+
+    rnd.config = {"anonymity": "off"}
+    rnd.save(update_fields=["config"])
+
+    reloaded = Round.objects.get(id=rnd_id)
+    assert reloaded.config == {"anonymity": "off"}

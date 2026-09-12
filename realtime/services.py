@@ -386,6 +386,13 @@ def prepare_round(
     #    that the idle round exists.
     if deck_id is not None:
         select_deck(room, participant, deck_id)
+        # Fige le deck SUR LE ROUND des la preparation, et non a l'ouverture :
+        # sans cela, preparer un second round avec un autre deck reecrirait
+        # celui de la room et changerait le type du premier sous les pieds du
+        # facilitateur. C'est ce qui rend un scenario multi-activites possible.
+        room.refresh_from_db(fields=["deck_snapshot"])
+        rnd.deck_snapshot = room.deck_snapshot
+        rnd.save(update_fields=["deck_snapshot"])
     if anonymous is not None:
         set_reveal_mode(room, participant, anonymous)
     # Timer: team-only feature. Silently ignored (not refused) for an anonymous
@@ -417,7 +424,11 @@ def open_vote(room, participant):
         raise RoomError("state.invalid_transition", "Not idle", "vote.open")
     # Freeze the deck this round is played with: the room's active deck may change
     # afterwards, and the round's values must keep their meaning (history labels).
-    rnd.deck_snapshot = room.deck_snapshot
+    # Un round prepare avec un deck explicite l'a deja fige (prepare_round) : ne
+    # pas l'ecraser ici, sinon preparer un round B reecrirait le type du round A
+    # des l'ouverture de A.
+    if rnd.deck_snapshot is None:
+        rnd.deck_snapshot = room.deck_snapshot
     rnd.state = RoundState.OPEN
     rnd.opened_at = timezone.now()
     rnd.vote_deadline = (

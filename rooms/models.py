@@ -149,6 +149,12 @@ class Round(models.Model):
     # active deck can change between rounds, so results must not be relabelled by a
     # later switch (history maps chosen_value -> label through this).
     deck_snapshot = models.JSONField(null=True, blank=True)
+    # Configuration de l'activite jouee par ce round, validee par le schema que
+    # declare le registre (design section 3, section 6). Le TYPE, lui, n'est pas
+    # ici : il vit dans `deck_snapshot`, qui porte `voteType` et
+    # `resolutionStrategy`. Une clef etrangere le dupliquerait, et deux sources
+    # de verite finissent par diverger.
+    config = models.JSONField(default=dict, blank=True)
     # Reveal mode, chosen by the facilitator and frozen when the round opens.
     # Nominative by default (who voted what); anonymous hides the participant->card
     # link entirely and is a paid-team option. Voters see the mode BEFORE voting —
