@@ -90,6 +90,16 @@ class ActivitySpec:
     #: `ordinal` de cette meme specification, pour que le comptage par defaut
     #: (celui du poker aujourd'hui) reste inchange sans que chaque entree du
     #: registre ait a le repeter.
+    #:
+    #: AVERTISSEMENT A L'AUTEUR D'UNE NOUVELLE ACTIVITE (round de correction 1,
+    #: tache 6a-4) : **ce que rend cette fonction est DIFFUSE tel quel a toute
+    #: la salle, round anonyme compris** -- `revealed_payload` le fusionne
+    #: verbatim dans le bloc de l'item. N'y mettre JAMAIS une valeur
+    #: individuelle ni rien qui permette de remonter a un participant : un
+    #: agregat, et rien d'autre. L'anonymat n'est pas filtre ici, il tient
+    #: parce que seul un agregat y transite. Le detail nominatif a son propre
+    #: point d'accroche, `response_view`, que `revealed_payload` n'appelle que
+    #: sur un round NON anonyme.
     aggregate: Callable[[list, list[str]], dict] = field(default=None)
 
     #: Une reponse deja conforme au `payload_schema` porte-t-elle une valeur
@@ -119,14 +129,14 @@ class ActivitySpec:
     #: plus bas) : le seul appel existant (`cast_response`,
     #: `realtime/services.py`) ne fournit encore que 2 arguments positionnels
     #: — le brancher sur `item_count` est l'ouverture de domaine que la
-    #: tache SUIVANTE (validation a l'echelle du round, design section 3)
+    #: tache SUIVANTE (validation a l'echelle du round, design §3)
     #: fera. Tant qu'elle n'est pas faite, une strategie qui a besoin de
     #: `item_count` sans le recevoir doit se comporter de facon SURE plutot
     #: que de laisser passer une valeur arbitraire : ici, une borne haute a 0
     #: plutot qu'une borne ignoree.
     validate_value: Callable[[dict, list[str], int], bool] = field(default=None)
 
-    #: La troisieme portee de validation (design section 3, point 3 ; brief
+    #: La troisieme portee de validation (design §3, point 3 ; brief
     #: tache 6a-3) : `validate_value` juge UNE reponse, celle-ci juge
     #: l'ENSEMBLE des reponses qu'UN participant a deja posees sur LE ROUND,
     #: plus la tentative en cours -- la seule echelle ou "la somme des jetons
@@ -216,9 +226,27 @@ class ActivitySpec:
     #: -- la regle du poker, inchangee, deplacee telle quelle depuis
     #: `services.act_result`. C'est elle qui rendait `act_result` INERTE pour
     #: toute activite sans cartes : `card_values` y est toujours vide (design
-    #: section 7), donc la garde refusait TOUT, y compris la seule valeur
+    #: §7), donc la garde refusait TOUT, y compris la seule valeur
     #: sensee. Pas « pas encore branchee » : inerte.
     validate_chosen_value: Callable[[object, list[str]], bool] = field(default=None)
+
+    #: Comment un `Result` de cette activite se rend dans l'HISTORIQUE d'equipe
+    #: (`history/api_views.py`, et le compte rendu envoye aux managers).
+    #: Signature : (result, label_for) -> dict, fusionne dans l'entree du jour.
+    #: `label_for(value)` resout une valeur de carte en son libelle traduit
+    #: depuis le snapshot de deck du round -- une fonction, et non le snapshot
+    #: lui-meme, pour que le registre n'ait pas a connaitre la forme d'un
+    #: snapshot.
+    #:
+    #: Defaut (`_default_history_entry`) : `{"chosenValue", "levelName"}`,
+    #: rigoureusement l'entree que `history` construisait en dur.
+    #:
+    #: Vit dans le registre parce que l'historique etait le DERNIER lecteur
+    #: faconne pour le poker : il rend la valeur retenue comme le LIBELLE D'UNE
+    #: CARTE. Un total de Dot Voting rendu par ce chemin s'afficherait comme un
+    #: niveau de delegation -- dans un compte rendu envoye a des managers, ce
+    #: n'est pas un defaut d'affichage, c'est un enregistrement FAUX.
+    history_entry: Callable[[object, Callable[[str], object]], dict] = field(default=None)
 
     #: Qui a le droit de CREER un item sur un round de cette activite :
     #: "facilitator" (le facilitateur seul, comportement du poker) ou
@@ -274,6 +302,8 @@ class ActivitySpec:
             object.__setattr__(self, "response_view", _default_response_view)
         if self.validate_chosen_value is None:
             object.__setattr__(self, "validate_chosen_value", _default_validate_chosen_value)
+        if self.history_entry is None:
+            object.__setattr__(self, "history_entry", _default_history_entry)
 
 
 def _default_validate_value(payload, card_values, item_count=0):
@@ -311,6 +341,14 @@ def _default_validate_chosen_value(chosen_value, card_values):
     return chosen_value in card_values
 
 
+def _default_history_entry(result, label_for):
+    """L'entree d'historique du poker : la valeur retenue, et le NOM traduit
+    de la carte correspondante. Exactement ce que `history._entries_for`
+    construisait en dur -- meme cles, meme contenu, meme repli sur la valeur
+    brute pour une carte inconnue (c'est `label_for` qui porte ce repli)."""
+    return {"chosenValue": result.chosen_value, "levelName": label_for(result.chosen_value)}
+
+
 def _default_aggregate(ordinal):
     """Le comptage actuel du poker (`Counter` + ecart ordinal), inchange par la
     tache 3 : c'est lui que toute strategie sans agregateur explicite recoit."""
@@ -343,12 +381,12 @@ def _dot_voting_validate_value(payload, card_values, item_count=0):
 
     La borne vient du ROUND, pas du deck : chaque participant recoit 2n
     jetons de poids 1 (n = nombre d'items du round) et peut en poser au plus
-    n sur un meme item -- d'ou 0 <= points <= n (design section 2-3, brief
+    n sur un meme item -- d'ou 0 <= points <= n (design §2-3, brief
     tache 6a-2). La contrainte GLOBALE (la somme d'un participant sur tout
     le round <= 2n) n'est PAS verifiee ici : elle porte sur l'ensemble des
     reponses d'un participant, pas sur une reponse a la fois, et c'est
     precisement l'ouverture de domaine que la tache suivante ajoute (design
-    section 3, point 3).
+    §3, point 3).
     """
     points = payload.get("points")
     if isinstance(points, bool) or not isinstance(points, int):
@@ -358,9 +396,9 @@ def _dot_voting_validate_value(payload, card_values, item_count=0):
 
 def _dot_voting_validate_responses(existing, item_id, payload, item_count=0):
     """La contrainte GLOBALE que `_dot_voting_validate_value` annoncait ne
-    PAS verifier (design section 3, point 3 ; tache 6a-3) : la somme des
+    PAS verifier (design §3, point 3 ; tache 6a-3) : la somme des
     jetons qu'UN participant pose sur TOUT le round ne doit pas depasser son
-    budget de 2n jetons (n = item_count, design section 1).
+    budget de 2n jetons (n = item_count, design §1).
 
     PIEGE (brief 6a-3) : `existing` porte ce que ce participant a DEJA
     ecrit sur ce round, item_id compris si une reponse y existe deja --
@@ -380,9 +418,9 @@ def _dot_voting_validate_responses(existing, item_id, payload, item_count=0):
 
 def _dot_voting_aggregate(responses, card_values):
     """Somme des points de CET item, tous participants confondus (design
-    section 1 et 6) -- la meme fonction que reutilisera weighted_dot_voting
+    §1 et §6) -- la meme fonction que reutilisera weighted_dot_voting
     (tache 6b), les deux activites partageant le depouillement (design
-    section 1 : « elles partagent l'agregation, le classement et le
+    §1 : « elles partagent l'agregation, le classement et le
     rendu »).
 
     Forme volontairement differente du defaut poker (`{"tally": [...],
@@ -404,7 +442,7 @@ def _dot_voting_aggregate(responses, card_values):
 def _dot_voting_response_view(payload):
     """Depouillement nominatif : combien de jetons CE participant a pose sur
     cet item. Pas de `cardValue` -- cette activite n'a pas de cartes (design
-    section 7), et le defaut poker aurait emis `cardValue: null`.
+    §7), et le defaut poker aurait emis `cardValue: null`.
 
     N'est appele QUE sur un round non anonyme : c'est `revealed_payload` qui
     tient l'invariant, en ne construisant rien de nominatif autrement. Voir
@@ -413,7 +451,7 @@ def _dot_voting_response_view(payload):
 
 
 def _dot_voting_freeze_results(aggregates):
-    """Le classement fige a la revelation (design section 6) : somme des points
+    """Le classement fige a la revelation (design §6) : somme des points
     par item, du plus haut au plus bas.
 
     `aggregates` arrive dans l'ordre (sequence, id) des items du round, et
@@ -463,8 +501,36 @@ def _dot_voting_validate_chosen_value(chosen_value, card_values):
     return chosen_value in (None, "")
 
 
+def _dot_voting_history_entry(result, label_for):
+    """L'entree d'historique de Dot Voting. `label_for` est deliberement NON
+    appele : cette activite n'a pas de cartes, donc aucun libelle de carte a
+    resoudre -- le resoudre quand meme retomberait sur la valeur brute et
+    afficherait un TOTAL la ou le lecteur attend un niveau, ce qui, dans un
+    compte rendu envoye aux managers, est un enregistrement faux.
+
+    `levelName` reste emis parce que c'est la cle que consomment le front ET
+    le courriel (`history/email.py::_plain_level`, qui ferait litteralement
+    « None » d'une valeur absente). Il porte donc une phrase qui dit ce que
+    la valeur EST -- « 12 points » -- identique en francais et en anglais,
+    donc sans traduction a inventer ici. Le detail chiffre part a cote
+    (`totalPoints`, `rank`) pour qu'un lecteur de l'API n'ait pas a reparser
+    la phrase."""
+    payload = result.payload or {}
+    total = payload.get("totalPoints")
+    if total is None:
+        total = result.chosen_value
+    rank = payload.get("rank")
+    label = f"{total} points"
+    return {
+        "chosenValue": result.chosen_value,
+        "levelName": {"en": label, "fr": label},
+        "totalPoints": total,
+        "rank": rank,
+    }
+
+
 def _dot_voting_rank_value(result):
-    """Classement (design section 6) : le total de l'item, PLUS GRAND = PLUS
+    """Classement (design §6) : le total de l'item, PLUS GRAND = PLUS
     prioritaire -- donc le total lui-meme, aucune transformation.
 
     Lit `Result.chosen_value` (CharField) comme une chaine d'entier.
@@ -503,15 +569,15 @@ ACTIVITY_REGISTRY: dict[str, ActivitySpec] = {
     # un meme item -- {"points": <entier>}, valide item par item par
     # `_dot_voting_validate_value` (0 <= points <= n) ET, depuis la tache
     # 6a-3, a l'echelle du round entier par `_dot_voting_validate_responses`
-    # (somme <= 2n, remplacement compris -- design section 3, point 3).
+    # (somme <= 2n, remplacement compris -- design §3, point 3).
     # `consumes="items"` :
     # l'activite distribue des jetons sur des items existants, saisis ou
     # copies d'une source chainee. `produces="results"` + `rank_value` :
     # chainable, et c'est elle qui allume le "top N" du chainage (design
-    # section 6), reste inutilisable depuis 5e faute d'une activite sachant
+    # §6), reste inutilisable depuis 5e faute d'une activite sachant
     # classer. `config_schema` : {"liveTotals": bool} -- le facilitateur
     # choisit si les TOTAUX (jamais le lien participant -> jetons) sont
-    # visibles pendant le vote (design section 5). Absente de `Round.config`
+    # visibles pendant le vote (design §5). Absente de `Round.config`
     # (valeur par defaut du modele : {}) tant que le facilitateur n'a rien
     # choisi -- a lire cote domaine avec `.get("liveTotals", False)`, secret
     # par defaut, jamais un oubli de configuration.
@@ -519,7 +585,7 @@ ACTIVITY_REGISTRY: dict[str, ActivitySpec] = {
     # Tache 6a-4 : `response_view`, `freeze_results` et `validate_chosen_value`
     # completent l'entree pour que le DEPOUILLEMENT et l'ACTE cessent d'etre
     # poker-specifiques cote domaine. Le classement se fige A LA REVELATION
-    # (design section 6) dans `Result.chosen_value` + `Result.payload`
+    # (design §6) dans `Result.chosen_value` + `Result.payload`
     # (migration `0022_result_payload`), et `result.act` ne fait plus alors
     # que conclure le round.
     "dot_voting_v1": ActivitySpec(
@@ -531,6 +597,7 @@ ACTIVITY_REGISTRY: dict[str, ActivitySpec] = {
         response_view=_dot_voting_response_view,
         freeze_results=_dot_voting_freeze_results,
         validate_chosen_value=_dot_voting_validate_chosen_value,
+        history_entry=_dot_voting_history_entry,
         rank_value=_dot_voting_rank_value,
         consumes="items",
         produces="results",

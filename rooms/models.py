@@ -173,7 +173,7 @@ class Round(models.Model):
     # later switch (history maps chosen_value -> label through this).
     deck_snapshot = models.JSONField(null=True, blank=True)
     # Configuration de l'activite jouee par ce round, validee par le schema que
-    # declare le registre (design section 3, section 6). Le TYPE, lui, n'est pas
+    # declare le registre (design §3, §6). Le TYPE, lui, n'est pas
     # ici : il vit dans `deck_snapshot`, qui porte `voteType` et
     # `resolutionStrategy`. Une clef etrangere le dupliquerait, et deux sources
     # de verite finissent par diverger.
@@ -221,7 +221,7 @@ class Round(models.Model):
 
 
 class Response(models.Model):
-    """La reponse est la contribution d'un participant a un ITEM (design section 3).
+    """La reponse est la contribution d'un participant a un ITEM (design §3).
 
     UNE seule table pour toutes les activites, jamais une table par activite : le
     poker y ecrit {"card": "<valeur>"}, une activite future y ecrira un payload
@@ -235,7 +235,7 @@ class Response(models.Model):
         "rooms.Item", on_delete=models.CASCADE, related_name="responses"
     )
     # La contribution elle-meme, validee par le schema que declare le type
-    # d'activite (design section 3, section 6). UNE table pour toutes les
+    # d'activite (design §3, §6). UNE table pour toutes les
     # activites : le poker y ecrit {"card": "<valeur>"}, un dot voting y ecrira
     # {"dots": 3}.
     payload = models.JSONField(default=dict, blank=True)
@@ -255,7 +255,7 @@ class Result(models.Model):
     round = models.ForeignKey(Round, on_delete=models.CASCADE, related_name="results")
     item = models.ForeignKey(Item, on_delete=models.PROTECT, related_name="results")
     chosen_value = models.CharField(max_length=32)
-    # Ce que l'activite fige EN PLUS de `chosen_value` (design 2026-09-12 section 6 :
+    # Ce que l'activite fige EN PLUS de `chosen_value` (design 2026-09-12 §6 :
     # « Result ne porte qu'une valeur de carte. Il lui faut un payload, ADDITIF »).
     # Additif au sens strict : `chosen_value` ne change ni de type, ni de sens, ni de
     # lecteur -- le poker continue d'y ecrire la carte retenue et l'historique

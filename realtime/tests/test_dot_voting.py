@@ -10,7 +10,7 @@ La section « Validation a l'echelle du round » (tache 6a-3) passe cette fois
 par `services.cast_response`, avec une vraie DB (`create_dot_voting_deck` +
 `Room`/`Round`/`Item` reels, exactement comme `test_responses_services.py`
 le fait pour le poker) : c'est le seul moyen de verifier a la fois « rien
-n'est ecrit sur un refus » et le piege du remplacement (design section 3,
+n'est ecrit sur un refus » et le piege du remplacement (design §3,
 point 3 ; brief tache 6a-3).
 """
 from types import SimpleNamespace
@@ -65,12 +65,12 @@ def test_a_value_within_bounds_is_accepted():
 
 def test_the_upper_bound_itself_is_accepted():
     # La borne est INCLUSIVE : poser tous ses jetons sur un seul item est
-    # autorise (design section 1 : "au plus n jetons" par item).
+    # autorise (design §1 : "au plus n jetons" par item).
     assert _spec().validate_value({"points": 4}, [], item_count=4) is True
 
 
 def test_zero_points_is_accepted():
-    # Les jetons ne sont pas obligatoires (design section 4) : ne rien poser
+    # Les jetons ne sont pas obligatoires (design §4) : ne rien poser
     # sur un item est une valeur valide, pas une absence de reponse.
     assert _spec().validate_value({"points": 0}, [], item_count=4) is True
 
@@ -202,7 +202,7 @@ def test_poker_aggregate_and_ranking_are_unchanged():
 # --- Validation a l'echelle du round : validate_responses (tache 6a-3) ---
 #
 # La contrainte GLOBALE annoncee -- et deliberement pas verifiee -- par la
-# tache 6a-2 (design section 3, point 3) : la somme des jetons d'UN
+# tache 6a-2 (design §3, point 3) : la somme des jetons d'UN
 # participant sur TOUT le round ne doit pas depasser son budget de 2n.
 #
 # Les tests d'abord au niveau du registre (rapides, sans DB, memes tuples
@@ -271,7 +271,7 @@ def _dot_voting_room(n_items):
     """Une room dot_voting_v1 avec un facilitateur, un votant, et un round
     courant portant `n_items` items -- meme forme que `_room()` dans
     `test_responses_services.py`, mais avec le deck sans carte de cette
-    activite (design section 7). `create_dot_voting_deck` seme `is_active
+    activite (design §7). `create_dot_voting_deck` seme `is_active
     =False` (tache 1) : sans consequence ici, ce drapeau ne filtre que le
     catalogue (`decks.selection`), jamais la construction directe d'une
     room ni `build_deck_snapshot`."""

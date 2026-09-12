@@ -73,7 +73,7 @@ def backfill_round_sequence(apps):
 
 def votes_to_responses(apps):
     """Rattache chaque reponse a l'item de son round et transpose sa valeur de
-    carte en payload (design section 3).
+    carte en payload (design §3).
 
     Le payload est la forme commune a toutes les activites : le poker y ecrit
     {"card": "<valeur>"}, une activite a venir y ecrira sa propre structure. La

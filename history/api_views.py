@@ -15,7 +15,8 @@ from rest_framework.views import APIView
 
 from billing.service import paid_required
 from config.api_errors import error_response
-from rooms.models import Result
+from realtime.activities import spec_for
+from rooms.models import Result, RoundState
 from teams.models import Team
 from teams.permissions import is_manager, is_member
 
@@ -35,20 +36,55 @@ def _level_name(deck_snapshot, value):
     return value
 
 
+def _acted_results(team):
+    """Les resultats que l'historique a le droit de montrer : ceux de rounds
+    **ACTES**, comme le dit la docstring de ce module (« acted results only »)
+    et la carte des apps du CLAUDE.md.
+
+    Ce filtre etait ABSENT, et ne se voyait pas : jusqu'a la tache 6a-4, un
+    `Result` n'existait qu'apres l'acte, donc filtrer sur l'existence d'un
+    resultat revenait AU MEME -- par accident. Deux choses cassent cet
+    accident :
+
+    - une activite qui declare `freeze_results` ecrit son resultat des la
+      REVELATION : sans ce filtre, un round revele mais jamais acte
+      apparaitrait dans le compte rendu ;
+    - un defaut deja present AVANT cette tache : `vote.reset` remet un round a
+      IDLE en laissant son `Result` en place (c'est voulu), donc un round
+      poker acte PUIS reinitialise -- un round a rejouer, pas une decision --
+      restait liste dans l'historique et compte dans les jours. Ce filtre le
+      corrige.
+
+    L'agenda (`services.build_agenda`) filtrait deja explicitement sur
+    `RoundState.ACTED` pour cette exacte raison ; l'historique diverge.
+    """
+    return Result.objects.filter(round__room__team=team, round__state=RoundState.ACTED)
+
+
 def _entries_for(team, day):
     results = (
-        Result.objects.filter(round__room__team=team, decided_at__date=day)
+        _acted_results(team)
+        .filter(decided_at__date=day)
         .select_related("item", "round__room")
         .order_by("decided_at")
     )
     out = []
     for r in results:
         room = r.round.room
+        snapshot = r.round.deck_snapshot or room.deck_snapshot
+        # La FORME de l'entree appartient a l'activite, pas a l'historique :
+        # rendre un total de Dot Voting comme le libelle d'une carte
+        # produirait un enregistrement faux. `label_for` est passe en
+        # fonction pour que le registre n'ait pas a connaitre la forme d'un
+        # snapshot de deck.
+        spec = spec_for((snapshot or {}).get("resolutionStrategy", ""))
+        entry = spec.history_entry(r, lambda value: _level_name(snapshot, value))
+        # Les cles de l'historique ecrasent celles de l'activite, jamais
+        # l'inverse -- meme regle defensive que le bloc de depouillement.
         out.append(
             {
+                **entry,
                 "subject": r.item.text,
-                "chosenValue": r.chosen_value,
-                "levelName": _level_name(r.round.deck_snapshot or room.deck_snapshot, r.chosen_value),
                 "roomCode": room.code,
                 "decidedAt": r.decided_at.isoformat(),
             }
@@ -66,7 +102,7 @@ class HistoryListView(APIView):
         if not is_member(team, request.user):
             return error_response(code="not_a_member", detail="Not a member of this team.", http_status=403)
         rows = (
-            Result.objects.filter(round__room__team=team)
+            _acted_results(team)
             .annotate(day=TruncDate("decided_at"))
             .values("day")
             .annotate(count=Count("id"))

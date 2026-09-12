@@ -24,6 +24,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
 from decks.seed import create_dot_voting_deck, create_standard_deck
+from history.email import _plain_level
 from realtime import services
 from realtime.activities import spec_for
 from realtime.services import RoomError
@@ -61,7 +62,7 @@ def test_default_validate_chosen_value_is_the_old_deck_membership_rule():
 
 def test_the_default_rule_refuses_everything_on_a_cardless_deck():
     """LA raison pour laquelle `act_result` etait inerte, epinglee : sur un
-    deck sans carte (design section 7, `card_values` toujours vide), la regle
+    deck sans carte (design §7, `card_values` toujours vide), la regle
     par defaut refuse TOUTE valeur, y compris l'absence de valeur. Une
     activite sans cartes ne pouvait donc rien acter avant cette tache."""
     poker = spec_for("delegation_v1")
@@ -133,11 +134,11 @@ def _poker_room(team=None):
     return room, fac, voter, rnd, item
 
 
-def _dot_voting_room(n_items):
-    """Meme forme, avec le deck SANS CARTE de dot_voting (design section 7)."""
+def _dot_voting_room(n_items, team=None):
+    """Meme forme, avec le deck SANS CARTE de dot_voting (design §7)."""
     deck = create_dot_voting_deck()
     code = generate_unique_code(lambda c: Room.objects.filter(code=c).exists())
-    room = Room(code=code, vote_type=deck.vote_type, deck_snapshot=build_deck_snapshot(deck))
+    room = Room(code=code, team=team, vote_type=deck.vote_type, deck_snapshot=build_deck_snapshot(deck))
     room.touch(save=False)
     room.save()
     fac = Participant.objects.create(room=room, token=generate_token(), display_name="Sam", role=Role.FACILITATOR)
@@ -393,3 +394,209 @@ def test_replaying_a_reset_round_refreezes_instead_of_failing():
 
     assert Result.objects.filter(round=rnd, item=items[0]).count() == 1
     assert Result.objects.get(round=rnd, item=items[0]).chosen_value == "1"
+
+
+# --- Round de correction 1 ---------------------------------------------
+
+
+def test_default_history_entry_is_the_poker_shape():
+    """Le defaut de rendu d'historique : la valeur retenue et le NOM traduit
+    de sa carte -- exactement ce que `history._entries_for` construisait en
+    dur avant que le registre ne le porte."""
+    result = SimpleNamespace(chosen_value="5", payload={})
+    entry = spec_for("delegation_v1").history_entry(result, lambda v: {"fr": f"carte {v}"})
+    assert entry == {"chosenValue": "5", "levelName": {"fr": "carte 5"}}
+
+
+def test_dot_voting_history_entry_never_resolves_a_card_label():
+    """Un total rendu comme le libelle d'une carte serait un enregistrement
+    FAUX dans un compte rendu envoye aux managers. `label_for` ne doit donc
+    jamais etre appele pour cette activite."""
+    calls = []
+
+    def label_for(value):
+        calls.append(value)
+        return {"fr": "NE DOIT PAS APPARAITRE"}
+
+    result = SimpleNamespace(chosen_value="7", payload={"totalPoints": 7, "rank": 2})
+    entry = spec_for("dot_voting_v1").history_entry(result, label_for)
+
+    assert calls == []
+    assert entry["levelName"] == {"en": "7 points", "fr": "7 points"}
+    assert entry["totalPoints"] == 7
+    assert entry["rank"] == 2
+    # `levelName` reste emis, et rendu en TEXTE : `history.email._plain_level`
+    # ferait litteralement "None" d'une valeur absente.
+    assert _plain_level(entry["levelName"]) == "7 points"
+
+
+def _team_and_user(email="corr@example.com"):
+    user = User.objects.create_user(email=email, password="pw12345678", display_name="Mia")
+    team = Team.objects.create(name="Squad", owner=user)
+    TeamMembership.objects.create(team=team, user=user, role=TeamRole.OWNER)
+    return team, user
+
+
+def _history(user, team, day=None):
+    client = APIClient()
+    client.force_authenticate(user)
+    day = day or datetime.date.today().isoformat()
+    days = client.get(f"/api/v1/history/{team.id}/").json()["days"]
+    detail = client.get(f"/api/v1/history/{team.id}/{day}/").json()
+    return days, detail["entries"]
+
+
+@pytest.mark.django_db
+def test_history_ignores_a_poker_round_that_was_acted_then_reset():
+    """CORRECTION D'UN BUG PREEXISTANT (round de correction 1). `vote.reset`
+    remet un round a IDLE en laissant son `Result` en place : un round acte
+    puis reinitialise -- un round A REJOUER, pas une decision -- restait
+    liste dans l'historique et compte dans les jours, parce que l'historique
+    ne filtrait pas sur l'etat malgre sa propre docstring (« acted results
+    only ») et malgre l'agenda qui, lui, filtre."""
+    team, user = _team_and_user()
+    room, fac, voter, rnd, item = _poker_room(team=team)
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, item.id, {"card": "5"})
+    services.reveal(room, fac)
+    services.act_result(room, fac, "5")
+
+    days, entries = _history(user, team)
+    assert len(entries) == 1 and days[0]["count"] == 1
+
+    services.reset_round(room, fac)
+
+    # Le `Result` est toujours en base -- c'est le but de `vote.reset` -- mais
+    # l'historique ne le montre plus.
+    assert Result.objects.filter(round=rnd).exists()
+    days, entries = _history(user, team)
+    assert entries == []
+    assert days == []
+
+
+@pytest.mark.django_db
+def test_history_ignores_a_revealed_but_unacted_dot_voting_round():
+    """Une activite qui fige ecrit son `Result` des la REVELATION : sans le
+    filtre d'etat, un round jamais acte apparaitrait dans le compte rendu."""
+    team, user = _team_and_user()
+    room, fac, voter, rnd, items = _dot_voting_room(2, team=team)
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 2})
+    services.reveal(room, fac)
+
+    assert Result.objects.filter(round=rnd).exists()
+    days, entries = _history(user, team)
+    assert entries == []
+    assert days == []
+
+
+@pytest.mark.django_db
+def test_history_renders_an_acted_dot_voting_result_as_points():
+    team, user = _team_and_user()
+    room, fac, voter, rnd, items = _dot_voting_room(2, team=team)
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 2})
+    services.cast_response(room, voter, items[1].id, {"points": 1})
+    services.reveal(room, fac)
+    services.act_result(room, fac, None)
+
+    days, entries = _history(user, team)
+    assert days[0]["count"] == 2
+    top = [e for e in entries if e["rank"] == 1][0]
+    assert top["subject"] == "Item 1"
+    assert top["totalPoints"] == 2
+    # JAMAIS un niveau de delegation : le deck n'a aucune carte, et rendre ce
+    # total comme un libelle de carte serait un enregistrement faux.
+    assert top["levelName"] == {"en": "2 points", "fr": "2 points"}
+
+
+# --- « a ete acte » n'est plus « porte un resultat » --------------------
+
+
+@pytest.mark.django_db
+def test_a_revealed_then_reset_dot_voting_round_can_be_removed():
+    """Sans la distinction, ce round etait DEFINITIVEMENT irretirable : il
+    porte un `Result` ecrit par le depouillement, jamais par une decision."""
+    room, fac, voter, rnd, items = _dot_voting_room(2)
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 2})
+    services.reveal(room, fac)
+    services.reset_round(room, fac)
+    assert Result.objects.filter(round=rnd).exists()
+
+    # Il faut un AUTRE round courant : on ne retire jamais le round courant.
+    other = Round.objects.create(room=room, facilitator=fac, sequence=2)
+    Item.objects.create(round=other, text="Suivant", sequence=1)
+    room.current_round = other
+    room.save(update_fields=["current_round"])
+
+    assert services.remove_round(room, fac, rnd.id) == rnd.id
+    assert not Round.objects.filter(pk=rnd.pk).exists()
+
+
+@pytest.mark.django_db
+def test_an_acted_then_reset_poker_round_is_still_protected():
+    """Le pendant, cote poker : rien ne change. Son `Result` atteste bien une
+    decision, donc le round reste irretirable meme apres reinitialisation."""
+    room, fac, voter, rnd, item = _poker_room()
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, item.id, {"card": "5"})
+    services.reveal(room, fac)
+    services.act_result(room, fac, "5")
+    services.reset_round(room, fac)
+
+    other = Round.objects.create(room=room, facilitator=fac, sequence=2)
+    Item.objects.create(round=other, text="Suivant", sequence=1)
+    room.current_round = other
+    room.save(update_fields=["current_round"])
+
+    with pytest.raises(RoomError) as exc:
+        services.remove_round(room, fac, rnd.id)
+    assert exc.value.rejected_type == "round.remove"
+    assert Round.objects.filter(pk=rnd.pk).exists()
+
+
+# --- Deux details qui mordent ------------------------------------------
+
+
+@pytest.mark.django_db
+def test_refreezing_after_a_reset_refreshes_the_decision_date():
+    """`Result.decided_at` est un `auto_now_add` : il ne se rafraichit pas sur
+    une mise a jour. Or c'est la cle de regroupement de l'historique -- un
+    round rejoue se rangerait au jour de sa PREMIERE revelation."""
+    room, fac, voter, rnd, items = _dot_voting_room(2)
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 2})
+    services.reveal(room, fac)
+    result = Result.objects.get(round=rnd, item=items[0])
+    # Recule l'horodatage de deux jours, comme si le round avait ete joue
+    # avant-hier, puis rejoue aujourd'hui.
+    Result.objects.filter(pk=result.pk).update(
+        decided_at=result.decided_at - datetime.timedelta(days=2)
+    )
+
+    services.reset_round(room, fac)
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 1})
+    services.reveal(room, fac)
+
+    refrozen = Result.objects.get(round=rnd, item=items[0])
+    assert refrozen.chosen_value == "1"
+    assert refrozen.decided_at.date() == datetime.date.today()
+
+
+@pytest.mark.django_db
+def test_the_agenda_reads_the_first_items_result_not_an_arbitrary_one():
+    """Un round qui fige porte un `Result` PAR item. `rnd.results.first()`
+    n'imposait aucun ordre : la valeur affichee dependait de l'ordre
+    d'insertion en base. Ici les resultats sont ecrits a REBOURS de l'ordre
+    des items, donc un `.first()` non ordonne rend celui de l'item 2."""
+    room, fac, voter, rnd, items = _dot_voting_room(2)
+    Result.objects.create(round=rnd, item=items[1], chosen_value="99", payload={"rank": 2})
+    Result.objects.create(round=rnd, item=items[0], chosen_value="11", payload={"rank": 1})
+    rnd.state = RoundState.ACTED
+    rnd.save(update_fields=["state"])
+
+    entry = [r for r in services.build_agenda(room) if r["id"] == rnd.id][0]
+    assert entry["result"] == "11"
+    assert services.build_state_sync(voter)["result"] == "11"

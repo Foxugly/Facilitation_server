@@ -200,6 +200,28 @@ def _first_item(rnd):
     return rnd.items.first() if rnd else None
 
 
+def _leading_result(rnd):
+    """Le `Result` RETENU quand un round en porte plusieurs -- celui du premier
+    item, dans l'ordre (sequence, id) du round.
+
+    `rnd.results.first()` n'imposait aucun ordre (`Result` n'a pas de
+    `Meta.ordering`), donc la base rendait ce qu'elle voulait. Sans
+    consequence tant qu'un round decide ne portait qu'UN resultat -- le poker
+    n'ecrit que sur `_first_item` -- mais une activite multi-items qui fige
+    (tache 6a-4) en porte un PAR item : la valeur affichee dans l'agenda et
+    dans `state.sync` devenait arbitraire, et pouvait changer d'une requete a
+    l'autre pour un round inchange.
+
+    Trie en Python sur les collections deja chargees plutot qu'en SQL : les
+    appelants (`build_agenda`) prefetchent `items` et `results`, et un
+    `order_by` sur un manager prefetche relancerait une requete par round."""
+    results = list(rnd.results.all())
+    if not results:
+        return None
+    sequences = {item.id: item.sequence for item in rnd.items.all()}
+    return min(results, key=lambda r: (sequences.get(r.item_id, 0), r.item_id))
+
+
 def set_current_item(room, participant, text):
     """Ex-`set_subject`, semantique inchangee : on reecrit l'item du round courant
     s'il est encore idle, sinon on ouvre un round neuf."""
@@ -382,7 +404,10 @@ def build_agenda(room):
         # Le filtre d'etat n'est pas decoratif : `vote.reset` remet le round a IDLE
         # en LAISSANT son Result en place. Sans lui, un round reinitialise
         # reapparaitrait « done », avec l'ancienne valeur, alors qu'il est a rejouer.
-        decided_result = rnd.results.first()
+        # `_leading_result` et non `.first()` : un round qui fige (tache 6a-4)
+        # porte un Result PAR item, et sans ordre explicite la valeur affichee
+        # serait arbitraire (round de correction 1).
+        decided_result = _leading_result(rnd)
         acted = decided_result if rnd.state == RoundState.ACTED else None
         result = acted.chosen_value if acted else None
         status = "current" if rnd.id == current_id else ("done" if result is not None else "pending")
@@ -837,6 +862,23 @@ def reorder_rounds(room, participant, round_ids):
     return build_agenda(room)
 
 
+def _result_records_a_decision(rnd, room):
+    """Le `Result` de ce round atteste-t-il une DECISION prise, ou n'est-il que
+    le produit du depouillement ?
+
+    La distinction n'existait pas avant la tache 6a-4 : un `Result` naissait
+    du geste du facilitateur (`act_result`), donc son existence valait preuve
+    de decision. Une activite qui declare `freeze_results` ecrit le sien des
+    la REVELATION -- il ne prouve rien, sinon que le round a ete depouille.
+
+    Predicat de capacite, pas une condition « si c'est telle activite » :
+    c'est le registre qui dit ou se fige le resultat, et ce predicat ne fait
+    que le lire."""
+    if spec_for(_round_resolution_strategy(rnd, room)).freeze_results is not None:
+        return False
+    return rnd.results.exists()
+
+
 def remove_round(room, participant, round_id):
     """Retire un round du scenario (tache 2). On n'elague que ce qui n'a pas
     encore vecu -- regle resserree au round de correction 1 -- : un round
@@ -844,12 +886,24 @@ def remove_round(room, participant, round_id):
     explicable en une phrase a un facilitateur : « on ne retire qu'un round
     prepare qui n'est pas a l'ecran ».
 
-    1. Il ne porte aucun `Result` -- l'historique ne se reecrit pas, meme
-       garde et meme motif que `remove_item` pour un item deja acte. Un round
-       ACTE puis remis a `idle` (`vote.reset`) reste protege : son `Result`
-       survit au reset (c'est le but de `vote.reset`), donc cette garde
-       continue de le couvrir meme si la garde d'etat ci-dessous, elle, ne le
-       verrait plus.
+    1. Il ne porte aucun `Result` **qui atteste une decision** -- l'historique
+       ne se reecrit pas, meme garde et meme motif que `remove_item` pour un
+       item deja acte. Un round poker ACTE puis remis a `idle` (`vote.reset`)
+       reste protege : son `Result` survit au reset (c'est le but de
+       `vote.reset`), donc cette garde continue de le couvrir meme si la garde
+       d'etat ci-dessous, elle, ne le verrait plus.
+
+       « Porte un `Result` » et « a ete acte » ont cesse d'etre synonymes a la
+       tache 6a-4 (round de correction 1) : une activite qui declare
+       `freeze_results` ecrit ses `Result` des la REVELATION, avant tout acte.
+       Prise au pied de la lettre, l'ancienne garde rendait un round Dot
+       Voting revele puis reinitialise DEFINITIVEMENT irretirable -- un round
+       jamais decide, bloque dans le scenario par un resultat qui ne
+       decidait rien. D'ou `_result_records_a_decision` : pour ces activites,
+       c'est l'ETAT (garde 2 : un round ACTE n'est pas `idle`) qui protege, et
+       seul un `vote.reset` explicite du facilitateur le rend retirable -- ce
+       qui est coherent avec l'historique, qui ne liste plus un round
+       reinitialise (`history._acted_results`).
     2. Il est `idle`. Pas seulement "il n'est pas le round courant" : la
        premiere version de cette garde ne testait que le pointeur
        `room.current_round_id`, or `select_round` n'impose pas de fermer un
@@ -876,12 +930,22 @@ def remove_round(room, participant, round_id):
     rnd = room.rounds.filter(id=round_id).first()
     if rnd is None:
         raise RoomError("state.invalid_transition", "Unknown round", "round.remove")
-    if rnd.results.exists():
+    if _result_records_a_decision(rnd, room):
         raise RoomError("state.invalid_transition", "Round already decided", "round.remove")
     if rnd.state != RoundState.IDLE:
         raise RoomError("state.invalid_transition", "Round in flight", "round.remove")
     if room.current_round_id == rnd.id:
         raise RoomError("state.invalid_transition", "Current round", "round.remove")
+    # Les `Result` restants ne decident rien (la garde 1 vient de l'etablir) :
+    # ils partent avec le round. Suppression EXPLICITE et non par cascade,
+    # parce que `Result.item` est en PROTECT : `rnd.delete()` seul leverait
+    # une `ProtectedError` sur les items du round, une exception que le
+    # consumer ne rattrape pas (il ne connait que `RoomError`) et qui
+    # couterait sa socket au facilitateur -- meme classe de defaut que le
+    # refus « No item to act on » d'`act_result`. Sans effet sur le poker :
+    # la garde 1 refuse le retrait des qu'un round poker porte un resultat,
+    # donc cette ligne n'y supprime jamais rien.
+    rnd.results.all().delete()
     rnd.delete()
     for index, remaining in enumerate(room.rounds.all().order_by("sequence", "id"), start=1):
         if remaining.sequence != index:
@@ -1061,7 +1125,7 @@ def responses_of(rnd, item):
 
 
 def cast_response(room, participant, item_id, payload):
-    """Ecrit la reponse d'un participant a UN item (design section 3).
+    """Ecrit la reponse d'un participant a UN item (design §3).
 
     Gardes : round ouvert, echeance non depassee, l'item doit appartenir au
     round courant, le payload doit passer le schema que declare le registre
@@ -1095,7 +1159,7 @@ def cast_response(room, participant, item_id, payload):
     # heriter de la regle "la carte appartient au deck", qui ne la concerne pas.
     if not spec.validate_value(payload, _card_values(room), item_count):
         raise RoomError("state.invalid_transition", "Unknown card value", "response.cast")
-    # Validation a l'echelle du round (design section 3, point 3 ; tache
+    # Validation a l'echelle du round (design §3, point 3 ; tache
     # 6a-3) -- la SEULE ouverture de domaine que cette etape demande au
     # registre. `existing` porte les reponses QUE CE PARTICIPANT A DEJA
     # ECRITES sur ce round, AVANT cette tentative : `validate_responses` doit
@@ -1149,6 +1213,13 @@ def _freeze_results(room, rnd):
     items = list(rnd.items.all())
     aggregates = [(item.id, spec.aggregate(responses_of(rnd, item), card_values)) for item in items]
     frozen = spec.freeze_results(aggregates)
+    # Horodatage du figement, ECRIT explicitement. `Result.decided_at` est un
+    # `auto_now_add` : il ne se rafraichit donc PAS sur une mise a jour, alors
+    # que c'est la cle de regroupement de l'historique (`TruncDate`). Sans
+    # cette ligne, un round reinitialise puis rejoue le lendemain se rangerait
+    # au jour de sa PREMIERE revelation. Sur une creation, `auto_now_add`
+    # impose de toute facon `timezone.now()` : meme valeur, aucun conflit.
+    now = timezone.now()
     for item in items:
         entry = frozen.get(item.id)
         if entry is None:
@@ -1163,6 +1234,7 @@ def _freeze_results(room, rnd):
                 # c'est le depouillement qui le produit. Le champ est nullable et
                 # l'historique n'en depend pas.
                 "decided_by": None,
+                "decided_at": now,
             },
         )
 
@@ -1242,7 +1314,7 @@ def act_result(room, participant, chosen_value):
 
     Avant cette tache, la garde de valeur etait `chosen_value not in
     _card_values(room)`, en dur : pour une activite SANS cartes ce test
-    refusait TOUT, `card_values` etant toujours vide (design section 7). La
+    refusait TOUT, `card_values` etant toujours vide (design §7). La
     fonction n'etait pas « pas encore branchee », elle etait INERTE. La regle
     vit desormais dans `ActivitySpec.validate_chosen_value`, dont le defaut
     est exactement l'ancien test.
@@ -1587,7 +1659,9 @@ def build_state_sync(participant):
         my_responses_list = list(Response.objects.filter(round=rnd, participant=participant))
         my_responses = {str(r.item_id): r.payload for r in my_responses_list}
         if rnd.state == RoundState.ACTED:
-            acted = rnd.results.first()
+            # Meme ordre explicite que dans `build_agenda` : les deux chemins
+            # doivent montrer LE MEME resultat (round de correction 1).
+            acted = _leading_result(rnd)
             result = acted.chosen_value if acted else None
 
     payload = {
