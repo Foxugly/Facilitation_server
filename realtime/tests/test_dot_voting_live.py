@@ -60,12 +60,19 @@ async def _two_items(fac):
     return round_id, item1, item2
 
 
-async def _ping_pong_types(comm, limit=8, rounds=2):
+async def _ping_pong_types(comm, after, limit=8, rounds=2):
     """Barriere en aller-retour SUR LA CONNEXION `comm` : envoie `ping` sur
     CETTE connexion et draine jusqu'au `pong`, en collectant les types
     croises en chemin. Ne prouve une absence QUE pour la connexion qui
     l'emet -- une autre connexion doit flusher la sienne (piege brief
     tache 6a-5).
+
+    `after` est OBLIGATOIRE (pas de defaut) : la liste des faits que cette
+    barriere DOIT avoir draines. Sans elle, un test d'absence ne prouve rien
+    -- un site appelant a deja oublie cette sanity a la main (brief 6a-7
+    tache 4). La porter dans le helper la rend visible en relecture, meme
+    quand elle vaut `[]` : un `after=[]` explicite est alors une declaration
+    consciente (« rien n'est attendu ici »), pas un oubli.
 
     `rounds=2`, et non 1 -- DECOUVERT EN ECRIVANT CE TEST, a consigner :
     quand `comm` est la connexion qui a elle-meme declenche l'action (ici,
@@ -97,6 +104,8 @@ async def _ping_pong_types(comm, limit=8, rounds=2):
                 break
         else:
             raise AssertionError(f"pong not received, seen={seen}")
+    for expected in after:
+        assert expected in seen, f"{expected!r} attendu dans le drain mais absent, seen={seen}"
     return seen
 
 
@@ -121,12 +130,10 @@ async def test_no_totals_leak_before_reveal_in_secret_mode_by_default():
     await voter.send_json_to(
         {"v": 1, "type": "response.cast", "payload": {"itemId": item1, "payload": {"points": 2}}}
     )
-    seen = await _ping_pong_types(voter)
-
-    # Sanity : le drain n'est pas trivialement vide -- la reponse a bien
-    # declenche AU MOINS une diffusion (participation.update), sans quoi
-    # l'absence de response.totals ne prouverait rien.
-    assert "participation.update" in seen
+    # `after` porte desormais la sanity : le helper asserte lui-meme que
+    # participation.update a ete draine, sans quoi l'absence de
+    # response.totals ne prouverait rien.
+    seen = await _ping_pong_types(voter, after=["participation.update"])
     assert "response.totals" not in seen
 
     await fac.disconnect()
@@ -155,9 +162,7 @@ async def test_no_totals_leak_before_reveal_when_the_config_explicitly_turns_it_
     await voter.send_json_to(
         {"v": 1, "type": "response.cast", "payload": {"itemId": item1, "payload": {"points": 2}}}
     )
-    seen = await _ping_pong_types(voter)
-
-    assert "participation.update" in seen
+    seen = await _ping_pong_types(voter, after=["participation.update"])
     assert "response.totals" not in seen
 
     await fac.disconnect()
@@ -237,8 +242,7 @@ async def test_remaining_budget_reaches_the_facilitator_but_never_the_voter():
     pending = await _drain_until(fac, "response.pending")
     assert pending["payload"]["remaining"][voter_public_id] == 2  # n=2 -> budget 4, 2 poses -> reste 2
 
-    seen = await _ping_pong_types(voter)
-    assert "participation.update" in seen
+    seen = await _ping_pong_types(voter, after=["participation.update"])
     assert "response.pending" not in seen
 
     await fac.disconnect()
@@ -413,7 +417,13 @@ async def test_opening_a_round_with_live_totals_masked_broadcasts_no_totals():
     await _drain_until(fac, "vote.opened")
     await _drain_until(fac, "participation.update")
 
-    seen = await _ping_pong_types(fac)
+    # after=[] explicite : les faits DETERMINISTES de vote.open (vote.opened,
+    # participation.update) ont deja ete draines juste au-dessus par
+    # _drain_until -- il ne reste legitimement rien que cette barriere doive
+    # elle-meme constater (brief 6a-7 tache 4 : site qui avait oublie la
+    # sanity, tranche ici comme "rien n'est attendu", pas comme un fait
+    # manquant).
+    seen = await _ping_pong_types(fac, after=[])
     assert "response.totals" not in seen
 
     await fac.disconnect()
