@@ -432,8 +432,13 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     # 1) Open the vote: task X is registered for the room under its code.
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "participation.update")
-    await _settle()
-    task_x = consumers._timer_tasks.get(code)
+    # Barriere sur la CONDITION, pas sur des ticks de boucle : le tail de la
+    # branche vote.open enchaine _broadcast_live_totals (un aller-retour
+    # database_sync_to_async, donc le pool de threads) AVANT _schedule_timeout.
+    # Drainer un fait de cette branche sur l'autre connexion ne prouve donc rien
+    # sur la pose de la tache, et _settle() n'attend aucun temps reel : sur
+    # PostgreSQL le dict etait vide a l'inspection (vert sur SQLite, rouge en CI).
+    task_x = await _wait_for_timer_task(code)
     assert task_x is not None and not task_x.done()
 
     # 2) round.select on the very round currently open must cancel X immediately
@@ -453,8 +458,13 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     # task Y is registered.
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "participation.update")
-    await _settle()
-    task_y = consumers._timer_tasks.get(code)
+    # Barriere sur la CONDITION, pas sur des ticks de boucle : le tail de la
+    # branche vote.open enchaine _broadcast_live_totals (un aller-retour
+    # database_sync_to_async, donc le pool de threads) AVANT _schedule_timeout.
+    # Drainer un fait de cette branche sur l'autre connexion ne prouve donc rien
+    # sur la pose de la tache, et _settle() n'attend aucun temps reel : sur
+    # PostgreSQL le dict etait vide a l'inspection (vert sur SQLite, rouge en CI).
+    task_y = await _wait_for_timer_task(code)
     assert task_y is not None and not task_y.done()
 
     # 4) vote.reset must cancel Y explicitly: the dict ends up empty and nothing is
@@ -503,8 +513,13 @@ async def test_timer_resumes_on_reconnect_after_restart(monkeypatch):
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "vote.opened")
-    await _settle()
-    task_a = consumers._timer_tasks.get(code)
+    # Barriere sur la CONDITION, pas sur des ticks de boucle : le tail de la
+    # branche vote.open enchaine _broadcast_live_totals (un aller-retour
+    # database_sync_to_async, donc le pool de threads) AVANT _schedule_timeout.
+    # Drainer un fait de cette branche sur l'autre connexion ne prouve donc rien
+    # sur la pose de la tache, et _settle() n'attend aucun temps reel : sur
+    # PostgreSQL le dict etait vide a l'inspection (vert sur SQLite, rouge en CI).
+    task_a = await _wait_for_timer_task(code)
     assert task_a is not None and not task_a.done()
 
     # Simulate the service restart: kill the scheduled task the way process death
@@ -577,8 +592,13 @@ async def test_reconnect_does_not_duplicate_tracked_timer_task():
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "vote.opened")
-    await _settle()
-    task_a = consumers._timer_tasks.get(code)
+    # Barriere sur la CONDITION, pas sur des ticks de boucle : le tail de la
+    # branche vote.open enchaine _broadcast_live_totals (un aller-retour
+    # database_sync_to_async, donc le pool de threads) AVANT _schedule_timeout.
+    # Drainer un fait de cette branche sur l'autre connexion ne prouve donc rien
+    # sur la pose de la tache, et _settle() n'attend aucun temps reel : sur
+    # PostgreSQL le dict etait vide a l'inspection (vert sur SQLite, rouge en CI).
+    task_a = await _wait_for_timer_task(code)
     assert task_a is not None and not task_a.done()
 
     await voter.disconnect()
