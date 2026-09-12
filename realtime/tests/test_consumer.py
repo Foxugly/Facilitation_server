@@ -351,21 +351,74 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     Kills two independent mutants a review flagged as passing the suite unnoticed:
 
     (1) restoring the unconditional `finally: _timer_tasks.pop(code, None)` in
-        _fire_timeout (the original bug) -- a *cancelled* task's cleanup evicts
-        whatever task now occupies its room-code slot, even if that's a brand new
-        one scheduled after it;
+        _fire_timeout instead of the guard at consumers.py:286-288
+        (`if _timer_tasks.get(code) is asyncio.current_task()`) -- a *cancelled*
+        task's cleanup evicts whatever task now occupies its room-code slot, even
+        if that's a brand new one scheduled after it. No living WS intention
+        leaves this reachable any more: every branch that switches the current
+        round (round.select, round.prepare) cancels *synchronously*, in the same
+        dispatch call that would install a replacement -- by the time a later
+        `await` hands control back to the loop, the dict already reflects the
+        switch, so an old task's `finally` never finds a *different* task sitting
+        in its slot. The race only exists inside `_schedule_timeout` itself
+        (consumers.py:264-271), which cancels whatever is tracked for `code` and
+        installs a new task in that same synchronous block -- so it is driven
+        directly below, twice, on a bare consumer instance (no socket needed,
+        `_timer_tasks` is a module-level dict independent of any instance), with
+        one loop tick in between so the first task is genuinely suspended in its
+        sleep -- and not merely cancelled before its first step, which would
+        never reach its `finally` at all -- when the second call cancels it.
     (2) dropping the `self._cancel_timeout(room.code)` call from the round.select
         branch of _dispatch -- a pending task then survives untouched instead of
         being cancelled the moment the facilitator switches rounds.
 
     TIMER_MIN_SECONDS is patched to 0 (as test_scheduled_timeout_reveals_without_reconnect
     does) only to allow a small, comfortably-nonzero `seconds` below the normal 10s
-    floor. The delay is never waited out for real: every cancellation below is
-    explicit (vote.open / round.select / vote.reset), asyncio.sleep(delay) is
-    aborted instantly by .cancel(), and _settle() gives the loop a few bare ticks
-    (no real time) to actually deliver the CancelledError into each task's `finally`.
+    floor. No delay is ever waited out for real: every cancellation below is
+    explicit, asyncio.sleep(delay) is aborted instantly by .cancel(), and
+    _settle() gives the loop a few bare ticks (no real time) to actually deliver
+    the CancelledError into each task's `finally`.
     """
     monkeypatch.setattr(services, "TIMER_MIN_SECONDS", 0)
+
+    # --- mutant (1): drive _schedule_timeout directly, twice, on the same code ---
+    bare = consumers.RoomConsumer()
+    race_code = "RACE0X"
+    deadline = timezone.now() + timezone.timedelta(seconds=5)
+
+    bare._schedule_timeout(race_code, deadline)
+    task_a = consumers._timer_tasks.get(race_code)
+    assert task_a is not None and not task_a.done()
+
+    # Let the loop actually start A (enter its `await asyncio.sleep(delay)`) before
+    # cancelling it. Skipping this tick is not equivalent: a task cancelled before
+    # its first step never runs its `finally` at all (there is no frame to unwind
+    # yet), so the eviction this test targets could never be observed -- the guard
+    # would look satisfied for the wrong reason. Once A is genuinely suspended
+    # in its sleep, this second call cancels it (synchronously, before its
+    # CancelledError is delivered) and installs B under the same key.
+    await _settle(1)
+    bare._schedule_timeout(race_code, deadline)
+    task_b = consumers._timer_tasks.get(race_code)
+    assert task_b is not None and task_b is not task_a
+
+    await _settle()
+    # Note: _fire_timeout catches asyncio.CancelledError and swallows it (`pass`)
+    # rather than re-raising, so the task ends up merely *done*, not `.cancelled()`
+    # -- that's existing behaviour of the finally-based cleanup, not a mutant.
+    assert task_a.done()
+    assert consumers._timer_tasks.get(race_code) is task_b, (
+        "task B was evicted by task A's cancellation cleanup -- the "
+        "'finally: _timer_tasks.pop(code, None)' regression"
+    )
+    assert not task_b.done()
+
+    bare._cancel_timeout(race_code)
+    await _settle()
+    assert task_b.done()
+    assert race_code not in consumers._timer_tasks
+
+    # --- mutant (2): round.select must cancel the running task -------------------
     code, fac_token, voter_token = await database_sync_to_async(_make_room)(True)
     fac, _ = await _join(fac_token, code)
     voter, _ = await _join(voter_token, code)
@@ -376,75 +429,44 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget?"}})
     await _drain_until(voter, "item.added")
 
-    # 1) Open the vote: task A is registered for the room under its code.
+    # 1) Open the vote: task X is registered for the room under its code.
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "participation.update")
     await _settle()
-    task_a = consumers._timer_tasks.get(code)
-    assert task_a is not None and not task_a.done()
+    task_x = consumers._timer_tasks.get(code)
+    assert task_x is not None and not task_x.done()
 
-    # 2) vote.reset explicitly cancels A and pops it from the dict SYNCHRONOUSLY --
-    # task_a.cancel() is called, but the event loop has not yet delivered its
-    # CancelledError (that only happens on a later await -- see _settle() below).
-    await fac.send_json_to({"v": 1, "type": "vote.reset", "payload": {}})
-    await _drain_until(voter, "participation.update")
-    assert code not in consumers._timer_tasks
-
-    # 3) Open the (new) vote again: _schedule_timeout's own _cancel_timeout call is
-    # now a no-op (A is already gone from the dict), and installs task B under the
-    # same room-code key -- while A's cancellation is still in flight. The critical
-    # assertion below: once the loop has actually delivered A's CancelledError (and
-    # run its finally clause), B must still be the tracked task -- the original
-    # bug's unconditional pop() would have evicted B here, because A's finally ran
-    # *after* B already replaced it.
-    await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
-    await _drain_until(voter, "participation.update")
-    await _settle()
-    task_b = consumers._timer_tasks.get(code)
-    assert task_b is not None and task_b is not task_a
-
-    await _settle()
-    # Note: _fire_timeout catches asyncio.CancelledError and swallows it (`pass`)
-    # rather than re-raising, so the task ends up merely *done*, not `.cancelled()`
-    # -- that's existing behaviour of the finally-based cleanup, not a mutant.
-    assert task_a.done()
-    assert consumers._timer_tasks.get(code) is task_b, (
-        "task B was evicted by task A's cancellation cleanup -- the "
-        "'finally: _timer_tasks.pop(code, None)' regression"
-    )
-    assert not task_b.done()
-
-    # 4) round.select on the very round currently open must cancel B
-    # immediately (the _cancel_timeout() call in the round.select branch). Without
-    # it, B would survive untouched here.
+    # 2) round.select on the very round currently open must cancel X immediately
+    # (the _cancel_timeout() call in the round.select branch). Without it, X
+    # would survive untouched here.
     round_id = await database_sync_to_async(_current_round_id)(code)
     await fac.send_json_to({"v": 1, "type": "round.select", "payload": {"roundId": round_id}})
     await _drain_until(voter, "agenda.updated")
     assert code not in consumers._timer_tasks, (
-        "task B was not cancelled by round.select -- the "
+        "task X was not cancelled by round.select -- the "
         "'self._cancel_timeout(room.code)' call is missing from that branch"
     )
     await _settle()
-    assert task_b.done()
+    assert task_x.done()
 
-    # 5) Open once more (the reselected round is idle again, same non-empty text):
-    # task C is registered.
+    # 3) Open once more (the reselected round is idle again, same non-empty text):
+    # task Y is registered.
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "participation.update")
     await _settle()
-    task_c = consumers._timer_tasks.get(code)
-    assert task_c is not None and not task_c.done()
+    task_y = consumers._timer_tasks.get(code)
+    assert task_y is not None and not task_y.done()
 
-    # 6) vote.reset must cancel C explicitly: the dict ends up empty and nothing is
+    # 4) vote.reset must cancel Y explicitly: the dict ends up empty and nothing is
     # left running for this room code.
     await fac.send_json_to({"v": 1, "type": "vote.reset", "payload": {}})
     await _drain_until(voter, "participation.update")
     assert code not in consumers._timer_tasks
     await _settle()
-    assert task_c.done()
+    assert task_y.done()
 
     # Belt and braces: nothing from any phase of this test is still alive.
-    assert task_a.done() and task_b.done() and task_c.done()
+    assert task_a.done() and task_b.done() and task_x.done() and task_y.done()
 
     await fac.disconnect()
     await voter.disconnect()

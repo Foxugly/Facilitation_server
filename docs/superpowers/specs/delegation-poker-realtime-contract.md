@@ -208,7 +208,8 @@ ces intentions les déclenche aussi :
 
 `item.reorder` et `round.add` sont les deux intentions à ne déclencher **aucun** fait
 propre : `item.reorder` émet uniquement `item.reordered` ; `round.add` réutilise
-`agenda.updated`/`subject.updated`, exactement ce que diffusait l'alias `subject.add`.
+`agenda.updated`/`subject.updated`, suffisants pour refléter l'entrée ajoutée au
+scénario.
 
 Forme commune `{roundId, items, itemId}` : `roundId` est l'id du round courant (`null` s'il
 n'y en a aucun), `items` la liste complète et à jour des items de ce round

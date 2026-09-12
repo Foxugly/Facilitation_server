@@ -94,7 +94,8 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             # confondre avec item.add ci-dessus, qui ajoute un item au round
             # COURANT. Deux semantiques distinctes qui se ressemblent au premier
             # coup d'oeil : round.add avance dans la file, item.add enrichit le
-            # tour en cours. Reprend ce que diffusait l'alias herite subject.add.
+            # tour en cours. Ne diffuse aucun fait propre : agenda.updated et
+            # subject.updated (contrat 8.1.a) suffisent a l'agenda a jour.
             await database_sync_to_async(services.add_scenario_item)(room, participant, payload.get("text", ""))
             await self._broadcast_agenda(room)
             await self._broadcast_current_item(room)
