@@ -15,7 +15,7 @@
 | # | Principe | Décision |
 |---|----------|----------|
 | 1 | **Serveur = source de vérité** | Le client émet des *intentions* ; le serveur décide et **rediffuse le fait** à tous. Pas d'affichage optimiste : le client attend l'écho serveur. |
-| 2 | **Autorité facilitateur** | Les événements de contrôle (`vote.open/reveal/reset`, `result.act`, `item.*`, `round.*`) ne sont acceptés **que** du facilitateur. Le serveur **rejette** sinon (le masquage front n'est qu'un confort). |
+| 2 | **Autorité facilitateur** | Les événements de contrôle (`vote.open/reveal/reset`, `result.act`, `item.*`, `round.*`, `deck.select`, `timer.set`, `reveal.setMode`, `facilitator.transfer`) ne sont acceptés **que** du facilitateur. `response.cast` fait exception : ouvert à tous (§8.2.a), ce n'est pas une intention de contrôle. Le serveur **rejette** sinon (le masquage front n'est qu'un confort). |
 | 3 | **Rôle porté par le token, pas par la connexion** | À la reconnexion, token → participant → rôle + vote restaurés. Une coupure ne perd pas le rôle. |
 | 4 | **Secret réel des votes** | Aucune valeur de vote n'est diffusée avant `reveal`. Avant : seulement « a voté / pas voté ». |
 | 5 | **HTTP crée/résout la salle ; WS gère la vie dans la salle** | Le socket ne s'ouvre qu'une fois *dans* la salle. |
@@ -24,17 +24,25 @@
 
 ## 1. Frontière HTTP ↔ WebSocket
 
-**HTTP (REST, convention flotte)** — avant d'ouvrir le socket :
+**HTTP (REST, convention flotte)** — avant d'ouvrir le socket. Les routes sont montées sous
+`/api/v1/` (`config/urls.py` + `rooms/api_urls.py`) — pas `/api/rooms` (forme Phase 1 jamais
+implémentée telle quelle) :
 
 | Méthode | Route | Corps | Retour |
 |---------|-------|-------|--------|
-| `POST` | `/api/rooms` | `{ title?, username }` | `{ code, participantToken, role: "facilitator", deckSnapshot, roomTitle }` |
-| `POST` | `/api/rooms/{code}/join` | `{ username }` | `{ code, roomTitle, participantToken, role: "voter", deckSnapshot }` — **404** si salle inconnue/expirée |
-| `GET` | `/api/rooms/{code}` | — | Résout l'existence d'une salle (arrivée par URL) : `{ code, roomTitle, exists }` |
+| `POST` | `/api/v1/rooms` | `{ title?, username?, team? }` | **201** `{ code, roomTitle, participantToken, role: "facilitator", deckSnapshot, availableDecks, isTeam }` |
+| `POST` | `/api/v1/rooms/{code}/join` | `{ username? }` (ignoré si salle d'équipe : rôle dérivé du compte connecté) | **200** `{ code, roomTitle, participantToken, role: "voter", deckSnapshot, availableDecks, isTeam }` — **404** `{ detail }` si salle inconnue/expirée |
+| `GET` | `/api/v1/rooms/{code}` | — | Résout l'existence d'une salle (arrivée par URL) : `{ code, roomTitle, exists, isTeam }` |
 
 - Le **`participantToken`** est un **secret aléatoire** généré serveur (long, non devinable). Le client le stocke en `localStorage` **à côté du username** et le rejoue à chaque (re)connexion WS.
 - Le **rôle vit côté serveur** (table `token → rôle` dans l'état de salle). Le client **ne s'auto-déclare jamais** facilitateur ; il n'envoie que son token.
-- Le **`deckSnapshot`** est immuable pour la durée de la salle (voir scope §3.6).
+- Le **`deckSnapshot`** est immuable pour la durée de la salle (voir scope §3.6). `availableDecks`
+  (Phase 2) porte en plus tout le catalogue frozen jouable par cette salle (`Room.deck_snapshots`).
+- **Salle d'équipe** (`team` fourni à la création, Phase 2) : compte requis (**401**
+  `auth_required` sinon), membre requis (**403** `not_a_member` sinon) ; `username` est ignoré,
+  le nom d'affichage vient du profil du compte. **Salle anonyme** : `username` obligatoire
+  (**400** `username_required` si absent/vide). Les deux routes de création/entrée refusent
+  aussi **403** `room_full` au-delà de `Room.max_participants` (`rooms/api_views.py`).
 
 **WebSocket** — tout ce qui se passe *dans* la salle (§4, §5). Endpoint : `wss://…/ws/rooms/{code}/`. Premier message client obligatoire : `session.join` (§4).
 
@@ -63,7 +71,7 @@ Tous les messages (deux sens) partagent une enveloppe **versionnée** :
 > authentifie par **email uniquement** (§3.16 ops, pas de champ `username`). En Phase 2, un membre
 > authentifié se connecte par email et porte un nom d'affichage distinct.
 
-- **Deux rôles en Phase 1** : `facilitator` (= le **créateur**, un seul rôle de contrôle) et `voter`. Le transfert *volontaire* de rôle est Phase 2 ; seul le **garde-fou** (§6.f) réassigne en Phase 1.
+- **Deux rôles** : `facilitator` (= le **créateur**, un seul rôle de contrôle à la fois) et `voter`. Le transfert *volontaire* de rôle (`facilitator.transfer`, §4) est **implémenté** (Phase 2) ; le **garde-fou** (§6.f, `facilitator.claim`) reste la voie de secours en cas d'absence, pas la seule.
 - **Un token = un participant.** Deux onglets sous le même `localStorage` (même token) → **un seul participant** ; la nouvelle connexion **remplace** l'ancienne (le serveur rattache le token existant, ne crée pas de doublon).
 - **Présence** : le serveur suit l'état connecté/déconnecté de chaque participant et diffuse les changements (`participant.joined` / `participant.left`), sans jamais divulguer de valeur de vote.
 
@@ -77,13 +85,20 @@ Tous les messages (deux sens) partagent une enveloppe **versionnée** :
 | `vote.open` | facilitateur | `{ }` | Ouvre le tour (`idle → open`). Refusé si pas de sujet. |
 | `vote.reveal` | facilitateur | `{ }` | `open → revealed`. Autorisé dès **≥ 1 vote** (pas de quorum). |
 | `result.act` | facilitateur | `{ chosenValue }` | `revealed → acted`. Fige le résultat retenu (défaut proposé = mode/médiane, modifiable). |
-| `vote.reset` | facilitateur | `{ }` | Efface les votes du tour → `idle` (si nouveau sujet à saisir) ou `open`. |
+| `vote.reset` | facilitateur | `{ }` | Efface les réponses du round courant, le remet à `idle`. |
 | `facilitator.claim` | tout participant présent | `{ }` | **Uniquement** si le garde-fou est actif (§6.f). Premier arrivé = nouveau facilitateur. |
+| `round.prepare` | facilitateur | `{ subjectId?, subjectText?, anonymous?, deckId?, timerEnabled?, timerSeconds? }` | Compose et annonce le round suivant **en un seul appel atomique** (sujet/round, deck, mode de révélation, timer), le laisse `idle` (n'ouvre pas). Refusé si le round choisi a déjà démarré. |
+| `deck.select` | facilitateur | `{ deckId }` | Change le deck actif de la salle. Refusé tant qu'un round est `open`/`revealed` (les réponses déjà émises référencent le deck courant). |
+| `timer.set` | facilitateur | `{ enabled, seconds }` | Règle le timer de la salle (durée normalisée 10–60 s par pas de 5). **Fonctionnalité d'équipe** : refusé (`forbidden.subscription_required`) sur une salle anonyme. |
+| `reveal.setMode` | facilitateur | `{ anonymous }` | Fige le mode de révélation du round courant, **tant qu'il est `idle`** (les votants doivent le connaître avant de voter). Le mode anonyme est une option d'équipe payante : refusé (`forbidden.subscription_required`) sinon. |
+| `facilitator.transfer` | facilitateur | `{ targetParticipantId }` | Transfert **volontaire** du rôle à un autre participant présent ; l'ancien facilitateur redevient votant. Contrairement à ce que §9 affirmait à l'origine, **ceci est implémenté**, pas hors périmètre. |
 
 > Cette table date de la Phase 1 (2026-07-07) et décrivait aussi `subject.set` et
 > `vote.cast`. Les deux sont remplacés — le premier par `item.add`/`item.update`/
 > `round.select` (§8.1.a), le second par `response.cast` (§8.2.a) — et **retirés** :
-> `Facilitation_frontend` n'en a plus besoin, vérifié en prod (§8.1.b, §8.2.b).
+> `Facilitation_frontend` n'en a plus besoin, vérifié en prod (§8.1.b, §8.2.b). Les cinq
+> dernières lignes (`round.prepare` à `facilitator.transfer`) sont des ajouts Phase 2
+> (équipes, decks multiples, transfert volontaire) absents de la table d'origine.
 
 Toute intention **incohérente avec l'état courant** (ex. `response.cast` hors `open`) est
 **rejetée** par `error`, pas appliquée (§6.b).
@@ -102,8 +117,13 @@ Toute intention **incohérente avec l'état courant** (ex. `response.cast` hors 
 | `vote.opened` | tous | `{ }` (état → `open`) |
 | `vote.revealed` | tous | `{ itemResults: [...] }` (§8.2.a) — décompte **par item**, jamais de lien participant → carte sur un round anonyme. Seules les valeurs ayant ≥ 1 voix figurent, dans l'ordre du deck. Porte aussi `reason: "timeout" \| "facilitator"`. |
 | `result.acted` | tous | `{ chosenValue }` (état → `acted`) |
-| `vote.wasReset` | tous | `{ nextState: "idle" \| "open" }` |
+| `vote.wasReset` | tous | `{ nextState: "idle" }` |
 | `facilitator.changed` | tous | `{ newFacilitatorId }` |
+| `deck.changed` | tous | `{ deckSnapshot }` — après `deck.select` ou `round.prepare` (deck fourni). |
+| `timer.changed` | tous | `{ enabled, seconds }` — après `timer.set` ou `round.prepare` (timer fourni). |
+| `reveal.modeChanged` | tous | `{ anonymous }` — après `reveal.setMode` ou `round.prepare` (mode fourni). |
+| `facilitator.presence` | tous | `{ present: boolean }` — présence du facilitateur (garde-fou §6.f). |
+| `agenda.updated` | tous | `{ agenda }` (§8.1.a) — scénario courant, après toute action qui touche un round/item. |
 | `error` | 1 client | `{ code, message, rejectedType, cid }` (§7) |
 
 ### 5.1 `state.sync` — le message le plus important
@@ -112,24 +132,43 @@ Envoyé à un seul client (au `join` initial, à la reconnexion, à l'arrivée d
 
 ```json
 {
-  "room": { "code": "K7RM4P", "title": "Sprint retro" },
+  "room": { "code": "K7RM4P", "title": "Sprint retro", "isTeam": false },
   "protocolVersion": 1,
   "roundState": "open",
   "subject": "Qui décide du budget outillage ?",
   "deckSnapshot": { "voteType": "delegation_poker", "cards": [ /* … calques + trad */ ] },
+  "availableDecks": [ { "deckId": 3, "voteType": "delegation_poker", "cardBack": { /* … */ } } ],
   "participants": [
     { "participantId": "p-1", "username": "Sam", "role": "facilitator", "hasVoted": true },
     { "participantId": "p-2", "username": "Alex", "role": "voter", "hasVoted": false }
   ],
+  "myRole": "voter",
+  "myParticipantId": "p-2",
+  "resultLayout": "cards",
   "myResponses": { "42": { "card": "consult" } },
   "result": null,
-  "facilitatorPresent": true
+  "facilitatorPresent": true,
+  "agenda": [ { "id": 12, "text": "Qui décide du budget outillage ?", "status": "current", "result": null, "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ] } ],
+  "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ],
+  "round": { "id": 12, "state": "open" },
+  "deadline": null,
+  "timer": { "enabled": false, "seconds": 10 },
+  "reveal": { "anonymous": false, "canAnonymise": false }
 }
 ```
 
-- `myResponses` = **les réponses du seul client destinataire**, indexées par id d'item (les autres restent secrètes tant que `roundState !== "revealed"`). L'ancienne clé `myVote` (le vote du premier item seul) est retirée en fin de 5b (§8.2.b) — voir §8.2.a.
-- Si `roundState === "revealed"`, `state.sync` inclut aussi `itemResults` (§8.2.a) — un retardataire qui arrive en `revealed` **voit les résultats**, et votera au tour suivant. Comme `vote.revealed`, il s'agit d'un décompte qui respecte l'anonymat : jamais de lien participant → carte sur un round anonyme.
+Champ par champ (`realtime/services.py::build_state_sync`) :
+
+- `myResponses` = **les réponses du seul client destinataire**, indexées par id d'item (les autres restent secrètes tant que `roundState` n'est ni `revealed` ni `acted`). L'ancienne clé `myVote` (le vote du premier item seul) est retirée en fin de 5b (§8.2.b) — voir §8.2.a.
+- Si `roundState === "revealed"` **ou `"acted"`**, `state.sync` inclut aussi `itemResults` (§8.2.a) — un retardataire qui arrive après la révélation **voit les résultats** (le client traite `revealed` et `acted` comme un seul état d'affichage), et votera au tour suivant. Comme `vote.revealed`, il s'agit d'un décompte qui respecte l'anonymat : jamais de lien participant → carte sur un round anonyme.
 - **Depuis 5a** (§8.1), `state.sync` porte aussi `items` — la liste des items du round courant, même forme que dans les faits `item.*` (`[{id, text, sequence}]`) — et `round` — `{id, state}` du round courant (`id: null` si aucun round actif). `subject` reste émis en doublon (le texte du premier item) : aucune date n'est fixée pour son retrait — c'est une clé de `state.sync`, distincte des anciennes intentions entrantes `subject.set`/`subject.add`/`subject.select` (§8.1.b), retirées en 5b.
+- `room.isTeam` (`room.team_id is not None`) pilote le gating client de certaines options (le timer, notamment, est réservé aux salles d'équipe) ; le serveur reste de toute façon autoritaire côté validation.
+- `myRole` et `myParticipantId` sont le rôle et l'identifiant **du destinataire**, renvoyés par le serveur — jamais déduits d'un état client persisté : une promotion facilitateur doit se voir immédiatement chez le facilitateur lui-même, pas seulement chez les autres.
+- `resultLayout` fige la mise en page du dépouillement pour la salle (choisie par l'équipe à la création) : le client y adapte l'affichage dès la révélation.
+- `availableDecks` liste le catalogue de decks jouables par cette salle (léger : pas les cartes), pour un sélecteur de deck côté facilitateur.
+- `agenda` porte le scénario — chaque round de la salle, son état et, s'il a été acté, la valeur retenue et ses items.
+- `deadline` est l'échéance ISO du round `open` courant (`null` sinon) ; `timer` porte le réglage courant de la salle (`enabled`, `seconds`).
+- `reveal.anonymous` annonce le mode de révélation du round courant **avant que les votants ne répondent** ; `reveal.canAnonymise` dit si la salle (équipe payante) a le droit de basculer en anonyme.
 
 ---
 
@@ -142,7 +181,7 @@ Envoyé à un seul client (au `join` initial, à la reconnexion, à l'arrivée d
 | c | **Révéler sans quorum** | Autorisé dès ≥ 1 vote. Un absent ne bloque pas la salle. |
 | d | **Quitter avant révélation** | Le vote déjà émis **reste compté** (il fait partie du tour). `participant.left` diffusé, mais le vote persiste. |
 | e | **Rejoindre en `revealed`** | Le retardataire reçoit un `state.sync` **incluant les résultats** ; il vote au tour suivant. |
-| f | **Facilitateur déconnecté** | Après **~60 s** d'absence, le serveur passe `facilitatorPresent=false` et diffuse. Tout participant peut alors `facilitator.claim`. **Premier arrivé = nouveau facilitateur** : le serveur réassigne le rôle, **émet un nouveau token facilitateur** au claimeur, diffuse `facilitator.changed`. **Transfert définitif** : si le créateur d'origine revient, il redevient **votant** (le serveur ne refait plus confiance à l'ancien token pour le contrôle). |
+| f | **Facilitateur déconnecté** | Après **~60 s** d'absence, le serveur passe `facilitatorPresent=false` et diffuse. Tout participant peut alors `facilitator.claim`. **Premier arrivé = nouveau facilitateur** : le serveur réassigne le rôle (`services.promote_facilitator`) et diffuse `facilitator.changed`. **Aucun nouveau token n'est émis** — l'autorité est portée par `rnd.facilitator_id`/`participant.role`, pas par le token, donc rien à réémettre (`services.promote_facilitator`, docstring). **Transfert définitif** : si le créateur d'origine revient, il redevient **votant** (le serveur ne refait plus confiance à l'ancien rôle pour le contrôle). |
 | g | **Double-onglet (même token)** | Un seul participant ; la nouvelle connexion remplace l'ancienne. |
 
 ---
@@ -155,14 +194,18 @@ Réponse `error` (à l'émetteur seul), jamais un plantage silencieux :
 { "code": "forbidden.not_facilitator", "message": "…", "rejectedType": "vote.open", "cid": "c-8f3a" }
 ```
 
-Codes attendus (liste extensible) : `protocol.version`, `forbidden.not_facilitator`,
-`state.invalid_transition`, `room.expired`, `token.unknown`, `guard.inactive` (claim hors garde-fou).
+Codes effectivement levés (`realtime/consumers.py`, `realtime/services.py`) : `protocol.version`,
+`forbidden.not_facilitator`, `forbidden.subscription_required` (fonctionnalité d'équipe payante :
+timer, révélation anonyme), `state.invalid_transition`, `token.unknown`, `guard.inactive` (claim
+hors garde-fou). **`room.expired` n'existe pas** — prévu par ce document Phase 1 mais jamais
+implémenté : une salle expirée ou inconnue résout en `token.unknown` (`resolve_participant`/
+`room_by_code` renvoient `None` dans les deux cas, sans distinction de code pour l'appelant).
 
 ---
 
 ## 8. Transport & robustesse
 
-- **Heartbeat** : `ping`/`pong` applicatif toutes les ~20 s (Channels ne détecte pas seul une connexion morte). Après **N pongs manqués**, le serveur considère la connexion perdue → présence à jour, garde-fou éventuel.
+- **Heartbeat** : le serveur répond `pong` à tout `ping` reçu (`realtime/consumers.py::receive_json`) — c'est un **écho**, pas un heartbeat piloté serveur : aucune tâche périodique n'émet de `ping`, et il n'existe pas de compteur « N pongs manqués » qui ferait considérer la connexion perdue. La présence (`participant.left`, `facilitatorPresent`) se met à jour sur le `disconnect()` ASGI réel (fermeture de socket détectée par Channels), pas sur un silence de heartbeat. `ping`/`pong` sert surtout de barrière de synchronisation dans les tests (aller-retour prouvant qu'un traitement précédent est terminé, cf. `CLAUDE.md` §Pièges).
 - **Reconnexion** : le client retente avec backoff, rejoue `session.join` (token) → reçoit `state.sync`. **Restauration complète** (salle + vote + rôle).
 - **Format** : JSON, enveloppe §2. Un `type` inconnu du serveur → `error` (`protocol.version` ou `state.invalid_transition`), jamais d'application partielle.
 
@@ -298,7 +341,9 @@ Un bloc `itemResults[]` n'émet jamais `votes` sur un round anonyme — l'invari
 
 ## 9. Hors périmètre (Phase 1)
 
-- ❌ `facilitator.transfer` **volontaire** (Phase 2) — seul le garde-fou §6.f réassigne en Phase 1.
+- ~~❌ `facilitator.transfer` **volontaire** (Phase 2)~~ — **implémenté** : l'intention WS
+  `facilitator.transfer {targetParticipantId}` (facilitateur seul) existe et fonctionne
+  (`realtime/services.py::transfer_facilitator`, voir §4) ; ce n'est plus hors périmètre.
 - ❌ Comptes/auth sur le socket (identité = token éphémère).
 - ❌ Événements de board / historique / présence persistée (Phase 2).
 - ❌ Chiffrement applicatif des payloads (au-delà de WSS/TLS).
