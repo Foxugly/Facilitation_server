@@ -5,7 +5,7 @@ wraps these with ``database_sync_to_async``. Server is the source of truth: ever
 mutation validates the state machine and raises ``RoomError`` on an illegal move
 (contract §0.1, §6.b) rather than applying it.
 """
-from collections import Counter
+from collections import Counter, defaultdict
 
 from django.conf import settings
 from django.db import transaction
@@ -129,6 +129,64 @@ def _require_facilitator(room, participant, rejected_type):
         raise RoomError("forbidden.not_facilitator", "Not the facilitator", rejected_type)
 
 
+def is_facilitator(room, participant):
+    """Enrobage PUBLIC de `_is_facilitator` -- celui-ci reste prive parce que
+    les gardes du domaine LEVENT une `RoomError` (`_require_facilitator`) sur
+    un refus, alors que cet appelant-ci n'a besoin que du booleen : le
+    consumer, pour filtrer A L'EMISSION un fait reserve au facilitateur
+    (design dot voting §4 ; brief tache 6a-5 : « ce qu'il reste a placer par
+    participant, au facilitateur seul, filtre a l'emission »). Le filtrage se
+    fait ici, cote serveur, avant l'ecriture sur LA socket du destinataire --
+    jamais un masquage cote client, qui recevrait quand meme la trame."""
+    return _is_facilitator(room, participant)
+
+
+# Protection contre le double-onglet (piege releve tache 6a-3, corrige tache
+# 6a-5, round de correction 1) : lire le budget d'un participant PUIS
+# l'ecrire n'etait pas serialise -- deux onglets du MEME participant,
+# chacun declenchant son propre `cast_response()`, pouvaient tous deux lire
+# le meme etat AVANT que l'un des deux n'ecrive, et depasser ensemble le
+# budget de 2n jetons.
+#
+# PREMIERE VERSION DE CE CORRECTIF (round precedent) : un verrou APPLICATIF
+# (`threading.Lock` par participant), justifie par le fait que ce depot ne
+# fait tourner qu'un seul processus daphne en production aujourd'hui. Ecarte
+# en relecture : cette garantie tient a une TOPOLOGIE DE DEPLOIEMENT, pas a
+# une regle produit -- le jour ou quelqu'un ajoute un worker (ou un second
+# processus daphne), la protection disparait EN SILENCE : rien n'echoue,
+# rien n'alerte, le budget redevient simplement depassable. Une regle
+# produit ne doit pas dependre d'un detail d'infrastructure que personne ne
+# relira au moment ou il change.
+#
+# CORRECTIF ACTUEL : un verrou DE LIGNE en base (`select_for_update()`, dans
+# la transaction qui entoure deja l'ecriture, voir `cast_response`). A dire
+# franchement, les deux moities de la verite :
+# - PROTEGE REELLEMENT en production : PostgreSQL applique `SELECT ... FOR
+#   UPDATE`, une seconde transaction qui tente de verrouiller la MEME ligne
+#   bloque jusqu'au commit (ou rollback) de la premiere -- quel que soit le
+#   nombre de processus ou de workers, puisque le verrou vit dans la base,
+#   pas dans un processus Python.
+# - NE PROTEGE PAS en developpement local ni dans cette suite de tests par
+#   defaut : SQLite ignore SILENCIEUSEMENT `select_for_update()`
+#   (`DatabaseFeatures.has_select_for_update = False`, verifie dans
+#   `django.db.backends.sqlite3.base` ; aucune erreur, mais aucun verrou non
+#   plus). C'est ACCEPTABLE : le developpement local n'a pas de concurrence
+#   reelle a serialiser, et c'est exactement le comportement d'aujourd'hui
+#   (avant ce correctif comme apres, sur ce moteur). Consequence directe :
+#   le test de concurrence de ce module ne peut RIEN demontrer sur SQLite et
+#   se limite donc a PostgreSQL (`@pytest.mark.skipif` sur
+#   `connection.features.has_select_for_update`) -- voir
+#   `test_dot_voting.py::test_cast_response_serializes_two_concurrent_tabs_of_the_same_participant`.
+def _lock_participant_row(participant):
+    """Verrou de ligne sur CE participant, tenu jusqu'au commit de la
+    transaction appelante (`transaction.atomic()` dans `cast_response`).
+    Isole en fonction a part -- et non un `Participant.objects
+    .select_for_update().get(...)` en ligne dans `cast_response` -- pour que
+    le test de concurrence puisse instrumenter precisement le moment ou le
+    verrou est demande, sans dependre des internals de l'ORM."""
+    Participant.objects.select_for_update().get(pk=participant.id)
+
+
 def _require_item_author(room, participant, item, rejected_type):
     """Garde de `update_item`/`remove_item` quand l'activite du round PORTEUR
     de l'item declare `items_authored_by = "participants"` : le facilitateur
@@ -200,6 +258,28 @@ def _first_item(rnd):
     return rnd.items.first() if rnd else None
 
 
+def _leading_result(rnd):
+    """Le `Result` RETENU quand un round en porte plusieurs -- celui du premier
+    item, dans l'ordre (sequence, id) du round.
+
+    `rnd.results.first()` n'imposait aucun ordre (`Result` n'a pas de
+    `Meta.ordering`), donc la base rendait ce qu'elle voulait. Sans
+    consequence tant qu'un round decide ne portait qu'UN resultat -- le poker
+    n'ecrit que sur `_first_item` -- mais une activite multi-items qui fige
+    (tache 6a-4) en porte un PAR item : la valeur affichee dans l'agenda et
+    dans `state.sync` devenait arbitraire, et pouvait changer d'une requete a
+    l'autre pour un round inchange.
+
+    Trie en Python sur les collections deja chargees plutot qu'en SQL : les
+    appelants (`build_agenda`) prefetchent `items` et `results`, et un
+    `order_by` sur un manager prefetche relancerait une requete par round."""
+    results = list(rnd.results.all())
+    if not results:
+        return None
+    sequences = {item.id: item.sequence for item in rnd.items.all()}
+    return min(results, key=lambda r: (sequences.get(r.item_id, 0), r.item_id))
+
+
 def set_current_item(room, participant, text):
     """Ex-`set_subject`, semantique inchangee : on reecrit l'item du round courant
     s'il est encore idle, sinon on ouvre un round neuf."""
@@ -232,14 +312,21 @@ def add_item(room, participant, text):
     propre post-it, `Item.author` le porte ; quand c'est le facilitateur qui
     pose un sujet au nom de la room, `author` reste `None`, comme aujourd'hui.
     """
-    is_facilitator = _is_facilitator(room, participant)
+    # `caller_is_facilitator`, et non `is_facilitator` : ce dernier nom est
+    # depuis la tache 6a-5 celui d'une fonction PUBLIQUE du module
+    # (`is_facilitator(room, participant)`, plus bas). Une variable locale du
+    # meme nom la masquerait pour tout le reste de CETTE fonction -- inoffensif
+    # tant que rien ici n'appelle la fonction publique, mais un appel ajoute
+    # plus tard casserait avec un `TypeError` obscur (« bool n'est pas
+    # appelable ») plutot qu'un import manquant, bien plus dur a diagnostiquer.
+    caller_is_facilitator = _is_facilitator(room, participant)
     strategy = _resolution_strategy(room)
-    if spec_for(strategy).items_authored_by != "participants" and not is_facilitator:
+    if spec_for(strategy).items_authored_by != "participants" and not caller_is_facilitator:
         raise RoomError("forbidden.not_facilitator", "Not the facilitator", "item.add")
     text = (text or "").strip()
     if not text:
         raise RoomError("state.invalid_transition", "Empty item", "item.add")
-    author = None if is_facilitator else participant
+    author = None if caller_is_facilitator else participant
     rnd = current_round(room)
     if rnd is None:
         # Aucun round courant : seul le facilitateur peut en ouvrir un
@@ -248,7 +335,7 @@ def add_item(room, participant, text):
         # aucun round ou ecrire son post-it tant que le facilitateur n'a pas
         # prepare le round — pas de round fantome dont il deviendrait
         # facilitateur.
-        if not is_facilitator:
+        if not caller_is_facilitator:
             raise RoomError("state.invalid_transition", "No active round", "item.add")
         rnd = _new_round(room, participant, text)
         room.current_round = rnd
@@ -382,7 +469,10 @@ def build_agenda(room):
         # Le filtre d'etat n'est pas decoratif : `vote.reset` remet le round a IDLE
         # en LAISSANT son Result en place. Sans lui, un round reinitialise
         # reapparaitrait « done », avec l'ancienne valeur, alors qu'il est a rejouer.
-        decided_result = rnd.results.first()
+        # `_leading_result` et non `.first()` : un round qui fige (tache 6a-4)
+        # porte un Result PAR item, et sans ordre explicite la valeur affichee
+        # serait arbitraire (round de correction 1).
+        decided_result = _leading_result(rnd)
         acted = decided_result if rnd.state == RoundState.ACTED else None
         result = acted.chosen_value if acted else None
         status = "current" if rnd.id == current_id else ("done" if result is not None else "pending")
@@ -837,6 +927,23 @@ def reorder_rounds(room, participant, round_ids):
     return build_agenda(room)
 
 
+def _result_records_a_decision(rnd, room):
+    """Le `Result` de ce round atteste-t-il une DECISION prise, ou n'est-il que
+    le produit du depouillement ?
+
+    La distinction n'existait pas avant la tache 6a-4 : un `Result` naissait
+    du geste du facilitateur (`act_result`), donc son existence valait preuve
+    de decision. Une activite qui declare `freeze_results` ecrit le sien des
+    la REVELATION -- il ne prouve rien, sinon que le round a ete depouille.
+
+    Predicat de capacite, pas une condition « si c'est telle activite » :
+    c'est le registre qui dit ou se fige le resultat, et ce predicat ne fait
+    que le lire."""
+    if spec_for(_round_resolution_strategy(rnd, room)).freeze_results is not None:
+        return False
+    return rnd.results.exists()
+
+
 def remove_round(room, participant, round_id):
     """Retire un round du scenario (tache 2). On n'elague que ce qui n'a pas
     encore vecu -- regle resserree au round de correction 1 -- : un round
@@ -844,12 +951,24 @@ def remove_round(room, participant, round_id):
     explicable en une phrase a un facilitateur : « on ne retire qu'un round
     prepare qui n'est pas a l'ecran ».
 
-    1. Il ne porte aucun `Result` -- l'historique ne se reecrit pas, meme
-       garde et meme motif que `remove_item` pour un item deja acte. Un round
-       ACTE puis remis a `idle` (`vote.reset`) reste protege : son `Result`
-       survit au reset (c'est le but de `vote.reset`), donc cette garde
-       continue de le couvrir meme si la garde d'etat ci-dessous, elle, ne le
-       verrait plus.
+    1. Il ne porte aucun `Result` **qui atteste une decision** -- l'historique
+       ne se reecrit pas, meme garde et meme motif que `remove_item` pour un
+       item deja acte. Un round poker ACTE puis remis a `idle` (`vote.reset`)
+       reste protege : son `Result` survit au reset (c'est le but de
+       `vote.reset`), donc cette garde continue de le couvrir meme si la garde
+       d'etat ci-dessous, elle, ne le verrait plus.
+
+       « Porte un `Result` » et « a ete acte » ont cesse d'etre synonymes a la
+       tache 6a-4 (round de correction 1) : une activite qui declare
+       `freeze_results` ecrit ses `Result` des la REVELATION, avant tout acte.
+       Prise au pied de la lettre, l'ancienne garde rendait un round Dot
+       Voting revele puis reinitialise DEFINITIVEMENT irretirable -- un round
+       jamais decide, bloque dans le scenario par un resultat qui ne
+       decidait rien. D'ou `_result_records_a_decision` : pour ces activites,
+       c'est l'ETAT (garde 2 : un round ACTE n'est pas `idle`) qui protege, et
+       seul un `vote.reset` explicite du facilitateur le rend retirable -- ce
+       qui est coherent avec l'historique, qui ne liste plus un round
+       reinitialise (`history._acted_results`).
     2. Il est `idle`. Pas seulement "il n'est pas le round courant" : la
        premiere version de cette garde ne testait que le pointeur
        `room.current_round_id`, or `select_round` n'impose pas de fermer un
@@ -876,12 +995,22 @@ def remove_round(room, participant, round_id):
     rnd = room.rounds.filter(id=round_id).first()
     if rnd is None:
         raise RoomError("state.invalid_transition", "Unknown round", "round.remove")
-    if rnd.results.exists():
+    if _result_records_a_decision(rnd, room):
         raise RoomError("state.invalid_transition", "Round already decided", "round.remove")
     if rnd.state != RoundState.IDLE:
         raise RoomError("state.invalid_transition", "Round in flight", "round.remove")
     if room.current_round_id == rnd.id:
         raise RoomError("state.invalid_transition", "Current round", "round.remove")
+    # Les `Result` restants ne decident rien (la garde 1 vient de l'etablir) :
+    # ils partent avec le round. Suppression EXPLICITE et non par cascade,
+    # parce que `Result.item` est en PROTECT : `rnd.delete()` seul leverait
+    # une `ProtectedError` sur les items du round, une exception que le
+    # consumer ne rattrape pas (il ne connait que `RoomError`) et qui
+    # couterait sa socket au facilitateur -- meme classe de defaut que le
+    # refus « No item to act on » d'`act_result`. Sans effet sur le poker :
+    # la garde 1 refuse le retrait des qu'un round poker porte un resultat,
+    # donc cette ligne n'y supprime jamais rien.
+    rnd.results.all().delete()
     rnd.delete()
     for index, remaining in enumerate(room.rounds.all().order_by("sequence", "id"), start=1):
         if remaining.sequence != index:
@@ -1061,11 +1190,15 @@ def responses_of(rnd, item):
 
 
 def cast_response(room, participant, item_id, payload):
-    """Ecrit la reponse d'un participant a UN item (design section 3).
+    """Ecrit la reponse d'un participant a UN item (design §3).
 
     Gardes : round ouvert, echeance non depassee, l'item doit appartenir au
-    round courant, et le payload doit passer le schema que declare le
-    registre pour la strategie active. Chemin unique d'ecriture.
+    round courant, le payload doit passer le schema que declare le registre
+    pour la strategie active, la valeur doit etre jouable (`validate_value`),
+    et l'ENSEMBLE des reponses de ce participant sur ce round -- celle-ci
+    comprise -- doit rester coherent (`validate_responses`, tache 6a-3 :
+    inerte par defaut, c'est le budget de 2n jetons pour dot_voting_v1).
+    Chemin unique d'ecriture.
     """
     rnd = current_round(room)
     if rnd is None or rnd.state != RoundState.OPEN:
@@ -1079,18 +1212,186 @@ def cast_response(room, participant, item_id, payload):
         raise RoomError("state.invalid_transition", "Unknown item", "response.cast")
     strategy = _resolution_strategy(room)
     validate_payload(strategy, payload)
+    spec = spec_for(strategy)
+    # Nombre d'items du round : la borne par item de dot_voting_v1 (0 <= points
+    # <= n) en depend, et ce branchement manquait jusqu'ici (tache 6a-2 l'avait
+    # explicitement laisse a la tache suivante -- retombait sur le defaut
+    # prudent item_count=0). Brancher ici, avant la validation a l'echelle du
+    # round qui en a elle aussi besoin (2n).
+    item_count = rnd.items.count()
     # La regle "la valeur est jouable" vit dans le registre (`validate_value`),
     # pas ici : une activite au payload different de {"card": ...} ne doit pas
     # heriter de la regle "la carte appartient au deck", qui ne la concerne pas.
-    if not spec_for(strategy).validate_value(payload, _card_values(room)):
+    if not spec.validate_value(payload, _card_values(room), item_count):
         raise RoomError("state.invalid_transition", "Unknown card value", "response.cast")
-    Response.objects.update_or_create(
-        item=item,
-        participant=participant,
-        defaults={"round": rnd, "payload": payload},
-    )
+    # Validation a l'echelle du round (design §3, point 3 ; tache
+    # 6a-3) -- la SEULE ouverture de domaine que cette etape demande au
+    # registre. `existing` porte les reponses QUE CE PARTICIPANT A DEJA
+    # ECRITES sur ce round, AVANT cette tentative : `validate_responses` doit
+    # juger l'etat APRES remplacement (cast_response REMPLACE via
+    # `update_or_create` ci-dessous, jamais n'ajoute), jamais additionner
+    # l'ancienne valeur de CET item et la nouvelle. Appele avant d'ecrire :
+    # un refus ne laisse donc rien derriere lui, la seule ecriture de cette
+    # fonction etant l'`update_or_create` plus bas.
+    #
+    # `transaction.atomic()` + `_lock_participant_row` (brief tache 6a-5,
+    # round de correction 1) : ce bloc, de la LECTURE du budget a son
+    # ECRITURE, doit s'executer comme un tout pour CE participant -- sans
+    # quoi deux onglets ouverts par la meme personne peuvent chacun lire
+    # l'etat AVANT que l'un des deux n'ecrive, et depasser ensemble le
+    # budget de 2n. Inoffensif pour le poker (et toute activite sans notion
+    # de budget) : `validate_responses` y accepte toujours, le verrou ne
+    # fait alors que serialiser deux ecritures qui n'entraient de toute
+    # facon pas en conflit. Protection REELLE sur PostgreSQL (production) ;
+    # sans effet sur SQLite (dev local, cette suite par defaut) -- voir le
+    # commentaire de `_lock_participant_row` pour le detail et pourquoi
+    # c'est un compromis assume, pas un oubli.
+    with transaction.atomic():
+        _lock_participant_row(participant)
+        existing = list(
+            Response.objects.filter(round=rnd, participant=participant).values_list("item_id", "payload")
+        )
+        if not spec.validate_responses(existing, item_id, payload, item_count):
+            raise RoomError("state.invalid_transition", "Round budget exceeded", "response.cast")
+        Response.objects.update_or_create(
+            item=item,
+            participant=participant,
+            defaults={"round": rnd, "payload": payload},
+        )
     room.touch()
     return payload
+
+
+def live_totals_payload(room):
+    """Totaux par item, DIFFUSABLES A TOUS PENDANT LE VOTE -- mais seulement
+    si la config du round courant l'autorise explicitement (design dot voting
+    §5, brief tache 6a-5). Renvoie `None` si le round n'est pas `open`, ou si
+    sa config ne porte pas `liveTotals: true` -- LE DEFAUT EST LE SECRET :
+    une config absente (`Round.config == {}`, valeur par defaut du modele) ou
+    l'option a `False` valent toutes deux un refus, jamais un oubli de
+    configuration traite comme un "oui" (design §5, derniere phrase).
+
+    Ce que cette fonction rend ne construit JAMAIS de lien participant ->
+    jetons : elle relit `spec.aggregate`, la MEME fonction que
+    `revealed_payload` utilise pour le decompte post-revelation, qui ne
+    recoit et ne renvoie QUE des agregats (avertissement deja pose sur
+    `ActivitySpec.aggregate`, tache 6a-4). L'invariant du secret tient donc
+    ici PAR CONSTRUCTION -- le serveur ne calcule jamais qu'un total, jamais
+    une reponse individuelle -- exactement ce que le design §5 demande :
+    "ce qui devient visible, ce sont les totaux par item, jamais le lien
+    participant -> jetons".
+    """
+    rnd = current_round(room)
+    if rnd is None or rnd.state != RoundState.OPEN:
+        return None
+    if not (rnd.config or {}).get("liveTotals", False):
+        return None
+    spec = spec_for(_round_resolution_strategy(rnd, room))
+    card_values = _card_values(room)
+    # UNE requete groupee pour TOUT le round, et non une par item
+    # (`responses_of` en aurait fait autant que d'items -- round de
+    # correction 2 : ce chemin s'execute a CHAQUE jeton pose, sur une
+    # machine qui heberge dix applications Django et a deja sature une
+    # fois cette annee). Regroupement en Python plutot qu'en base : le
+    # nombre d'items d'un round reste petit (design §1 : n gommettes par
+    # participant, pas de round a des centaines d'items), le cout d'un
+    # `defaultdict` sur ce volume est negligeable a cote d'une requete SQL
+    # de plus par item.
+    responses_by_item = defaultdict(list)
+    for r in Response.objects.filter(round=rnd):
+        responses_by_item[r.item_id].append(r)
+    items_out = [
+        {**spec.aggregate(responses_by_item.get(item.id, []), card_values), "itemId": item.id}
+        for item in rnd.items.all()
+    ]
+    return {"itemResults": items_out}
+
+
+def remaining_budgets(room):
+    """Ce qu'il reste a placer, PAR PARTICIPANT, sur le round courant --
+    reserve au FACILITATEUR SEUL (design dot voting §4, brief tache 6a-5) :
+    les jetons ne sont pas obligatoires, donc "a fini" n'est plus deductible
+    (le compteur public de `participation()` garde son sens actuel, inchange
+    -- design §4) et le facilitateur a besoin de ce detail pour savoir qui
+    reflechit encore.
+
+    Renvoie `None` si l'activite active ne declare pas de notion de budget
+    (le poker : `spec.remaining_budget is None`) -- rien a diffuser alors.
+    Sinon, `{participantPublicId: valeur}` pour CHAQUE participant de la
+    salle, y compris ceux qui n'ont encore rien pose (budget entier restant).
+    """
+    rnd = current_round(room)
+    if rnd is None:
+        return None
+    spec = spec_for(_round_resolution_strategy(rnd, room))
+    if spec.remaining_budget is None:
+        return None
+    item_count = rnd.items.count()
+    by_participant = defaultdict(list)
+    rows = Response.objects.filter(round=rnd).values_list("participant_id", "item_id", "payload")
+    for participant_id, item_id, payload in rows:
+        by_participant[participant_id].append((item_id, payload))
+    return {
+        str(p.public_id): spec.remaining_budget(by_participant.get(p.id, []), item_count)
+        for p in room.participants.all()
+    }
+
+
+def _freeze_results(room, rnd):
+    """Fige le resultat du round SI son activite declare `freeze_results`
+    (tache 6a-4). Sans declaration -- le poker -- ne fait RIEN : son `Result`
+    continue de naitre du geste du facilitateur (`act_result`), pas de la
+    revelation. C'est le registre qui decide, jamais une condition « si
+    c'est telle activite » ecrite ici.
+
+    Regle du depot : un resultat est fige a la revelation et ne se recalcule
+    jamais, parce qu'il devient l'entree d'une autre activite (chainage
+    « top N ») et que l'historique doit rester stable. C'est pour cela qu'il
+    est ECRIT en base ici plutot que recalcule a chaque lecture : une reponse
+    qui bougerait apres coup -- un `cast_response` en vol, une reprise -- ne
+    doit pas reecrire un classement deja montre.
+
+    Les agregats sont passes dans l'ordre (sequence, id) des items
+    (`Item.Meta.ordering`), sur lequel repose le departage deterministe des
+    ex aequo : `sorted` etant stable, une activite qui trie par score
+    conserve cet ordre entre deux items a egalite.
+
+    `update_or_create` et non `create` : `vote.reset` remet un round a IDLE
+    en LAISSANT son `Result` en place (comportement documente dans
+    `reset_round`), donc rejouer puis reveler a nouveau doit refiger, pas
+    lever une violation d'unicite sur (round, item).
+    """
+    spec = spec_for(_round_resolution_strategy(rnd, room))
+    if spec.freeze_results is None:
+        return
+    card_values = _card_values(room)
+    items = list(rnd.items.all())
+    aggregates = [(item.id, spec.aggregate(responses_of(rnd, item), card_values)) for item in items]
+    frozen = spec.freeze_results(aggregates)
+    # Horodatage du figement, ECRIT explicitement. `Result.decided_at` est un
+    # `auto_now_add` : il ne se rafraichit donc PAS sur une mise a jour, alors
+    # que c'est la cle de regroupement de l'historique (`TruncDate`). Sans
+    # cette ligne, un round reinitialise puis rejoue le lendemain se rangerait
+    # au jour de sa PREMIERE revelation. Sur une creation, `auto_now_add`
+    # impose de toute facon `timezone.now()` : meme valeur, aucun conflit.
+    now = timezone.now()
+    for item in items:
+        entry = frozen.get(item.id)
+        if entry is None:
+            continue
+        Result.objects.update_or_create(
+            round=rnd,
+            item=item,
+            defaults={
+                "chosen_value": entry.get("chosenValue", ""),
+                "payload": entry.get("payload") or {},
+                # `decided_by` reste NULL : personne n'a « decide » un classement,
+                # c'est le depouillement qui le produit. Le champ est nullable et
+                # l'historique n'en depend pas.
+                "decided_by": None,
+                "decided_at": now,
+            },
+        )
 
 
 def reveal(room, participant):
@@ -1103,6 +1404,10 @@ def reveal(room, participant):
     rnd.state = RoundState.REVEALED
     rnd.revealed_at = timezone.now()
     rnd.save(update_fields=["state", "revealed_at"])
+    # Avant `room.touch()` et avant tout appel a `revealed_payload` : le premier
+    # lecteur du round revele doit deja voir le resultat FIGE, sinon il verrait
+    # un recalcul et le figement ne vaudrait que pour les lecteurs suivants.
+    _freeze_results(room, rnd)
     room.touch()
 
 
@@ -1139,28 +1444,55 @@ def reveal_on_timeout(room):
     # (build_state_sync, revealed_payload...) sans recharger depuis la base.
     rnd.state = RoundState.REVEALED
     rnd.revealed_at = now
+    # Meme figement que sur la revelation manuelle (tache 6a-4) : une
+    # revelation par echeance produit le MEME resultat stable, sans quoi un
+    # round revele par le timer resterait recalcule a chaque lecture. Place
+    # apres l'UPDATE conditionnel : un seul appelant arrive jusqu'ici, donc
+    # un seul fige.
+    _freeze_results(room, rnd)
     room.touch()
     return True
 
 
 def act_result(room, participant, chosen_value):
+    """Conclut un round revele : `result.act` (contrat §4).
+
+    Deux regimes, tranches par le REGISTRE et non par une condition « si
+    c'est telle activite » (tache 6a-4) :
+
+    - l'activite ne declare PAS `freeze_results` (le poker) : le geste du
+      facilitateur EST le resultat, on ecrit son `Result` ici. Comportement
+      historique, inchange jusqu'au champ ecrit et au message d'erreur ;
+    - l'activite declare `freeze_results` : son resultat a deja ete fige a la
+      revelation, l'acte ne fait que conclure. Rien n'est reecrit -- reecrire
+      ecraserait le classement tout juste fige.
+
+    Avant cette tache, la garde de valeur etait `chosen_value not in
+    _card_values(room)`, en dur : pour une activite SANS cartes ce test
+    refusait TOUT, `card_values` etant toujours vide (design §7). La
+    fonction n'etait pas « pas encore branchee », elle etait INERTE. La regle
+    vit desormais dans `ActivitySpec.validate_chosen_value`, dont le defaut
+    est exactement l'ancien test.
+    """
     _require_facilitator(room, participant, "result.act")
     rnd = current_round(room)
     if rnd is None or rnd.state != RoundState.REVEALED:
         raise RoomError("state.invalid_transition", "Not revealed", "result.act")
-    if chosen_value not in _card_values(room):
+    spec = spec_for(_round_resolution_strategy(rnd, room))
+    if not spec.validate_chosen_value(chosen_value, _card_values(room)):
         raise RoomError("state.invalid_transition", "Unknown card value", "result.act")
-    item = _first_item(rnd)
-    if item is None:
-        # `Result.item` est NOT NULL : sans ce refus, update_or_create leverait une
-        # IntegrityError, que le consumer ne rattrape pas (il ne connait que
-        # RoomError) et qui coutait sa socket au facilitateur.
-        raise RoomError("state.invalid_transition", "No item to act on", "result.act")
-    Result.objects.update_or_create(
-        round=rnd,
-        item=item,
-        defaults={"chosen_value": chosen_value, "decided_by": participant},
-    )
+    if spec.freeze_results is None:
+        item = _first_item(rnd)
+        if item is None:
+            # `Result.item` est NOT NULL : sans ce refus, update_or_create leverait une
+            # IntegrityError, que le consumer ne rattrape pas (il ne connait que
+            # RoomError) et qui coutait sa socket au facilitateur.
+            raise RoomError("state.invalid_transition", "No item to act on", "result.act")
+        Result.objects.update_or_create(
+            round=rnd,
+            item=item,
+            defaults={"chosen_value": chosen_value, "decided_by": participant},
+        )
     rnd.state = RoundState.ACTED
     rnd.save(update_fields=["state"])
     room.touch()
@@ -1244,7 +1576,12 @@ def revealed_payload(room):
     """Resultat d'un round revele — ONLY ever called in REVEALED state.
 
     Porte un bloc PAR ITEM (``itemResults``), chacun agrege par l'``aggregate``
-    que declare le registre pour la strategie active.
+    que declare le registre pour la strategie active -- ou RELU du ``Result``
+    fige a la revelation quand l'activite declare ``freeze_results`` (tache
+    6a-4). Le contenu de l'agregat est fusionne tel quel dans le bloc
+    (``{"itemId": ..., **counted}``) : cette fonction ne connait plus les
+    cles du poker (``tally``/``spread``), qu'elle lisait en dur et qui
+    faisaient lever une ``KeyError`` a toute autre activite.
 
     ``itemResults`` et non ``items`` : ``state.sync`` emet deja une cle
     ``items`` de forme differente (``[{id, text, sequence}]``, la liste des
@@ -1270,20 +1607,48 @@ def revealed_payload(room):
     # Hisse hors de la boucle : meme requete pour chaque item, sinon un round a
     # N items la relance N fois pour le meme resultat.
     participants = list(room.participants.all())
+    # Resultat FIGE a la revelation, s'il y en a un (tache 6a-4). Il PRIME sur
+    # l'agregat recalcule : c'est la regle du depot (« Result est fige au
+    # reveal, jamais recalcule »), sans quoi une reponse qui bougerait apres
+    # la revelation rebattrait un classement deja montre.
+    #
+    # Lu SEULEMENT pour une activite qui declare `freeze_results`. Le poker
+    # n'en declare pas : son `Result` nait a l'acte, avec un `payload` vide --
+    # le relire ici viderait le depouillement d'un round ACTED, que
+    # `build_state_sync` affiche comme un round revele. C'est le registre qui
+    # tranche, pas une condition « si c'est telle activite ».
+    frozen = {}
+    if rnd is not None and spec.freeze_results is not None:
+        frozen = {r.item_id: (r.payload or {}) for r in rnd.results.all()}
     items_out = []
     for item in (rnd.items.all() if rnd else []):
         item_responses = responses_of(rnd, item)
-        counted = spec.aggregate(item_responses, card_values)
+        # `**counted` et non un choix de cles en dur : `counted["tally"]` /
+        # `counted["spread"]` levaient une KeyError immediate sur l'agregat
+        # d'une activite qui ne compte pas des cartes. Le poker est
+        # rigoureusement inchange : son agregat porte exactement ces deux
+        # cles, et pas d'autres.
+        counted = (
+            frozen[item.id]
+            if item.id in frozen
+            else spec.aggregate(item_responses, card_values)
+        )
+        # `**counted` EN PREMIER : les cles du contrat (`itemId`, `anonymous`)
+        # ecrasent celles de l'agregat, jamais l'inverse -- une activite ne
+        # doit pas pouvoir se declarer non anonyme depuis son agregateur.
         block = {
+            **counted,
             "itemId": item.id,
-            "tally": counted["tally"],
-            "spread": counted["spread"],
             "anonymous": anonymous,
         }
         if not anonymous:
-            by_participant = {r.participant_id: r.payload.get("card") for r in item_responses}
+            # L'invariant de secret tient ICI, pas dans `response_view` : sur un
+            # round anonyme rien de nominatif n'est CONSTRUIT. `response_view`
+            # ne dit que la FORME d'une reponse individuelle deja autorisee --
+            # `{"cardValue": ...}` pour le poker, inchange.
+            by_participant = {r.participant_id: r.payload for r in item_responses}
             block["votes"] = [
-                {"participantId": str(p.public_id), "cardValue": by_participant[p.id]}
+                {"participantId": str(p.public_id), **spec.response_view(by_participant[p.id])}
                 for p in participants
                 if p.id in by_participant
             ]
@@ -1320,6 +1685,24 @@ def _facilitator_participant(room):
 def facilitator_present(room):
     fac = _facilitator_participant(room)
     return bool(fac and fac.is_connected)
+
+
+def facilitator_public_id(room):
+    """L'identifiant public (`str(public_id)`) du facilitateur AUTORITAIRE du
+    round courant, ou `None` si la salle n'en a aucun.
+
+    Round de correction 2 (brief tache 6a-5) : point d'accroche pour diffuser
+    un fait reserve au facilitateur SANS que chaque connexion de la salle
+    n'ait a se re-resoudre elle-meme pour savoir si ELLE l'est. Voir le
+    commentaire de `realtime/consumers.py::facilitation_event`, qui compare
+    cet identifiant a celui que chaque connexion connait deja d'elle-meme
+    (`self.public_id`, fixe a la jointure) -- zero requete par destinataire,
+    contre deux avant (`_resolve()` + l'acces a `rnd` que fait
+    `is_facilitator`). Une SEULE requete ici, a l'emission
+    (`_facilitator_participant`), au lieu d'une par connexion a la livraison.
+    """
+    fac = _facilitator_participant(room)
+    return str(fac.public_id) if fac else None
 
 
 def can_claim(room):
@@ -1449,7 +1832,9 @@ def build_state_sync(participant):
         my_responses_list = list(Response.objects.filter(round=rnd, participant=participant))
         my_responses = {str(r.item_id): r.payload for r in my_responses_list}
         if rnd.state == RoundState.ACTED:
-            acted = rnd.results.first()
+            # Meme ordre explicite que dans `build_agenda` : les deux chemins
+            # doivent montrer LE MEME resultat (round de correction 1).
+            acted = _leading_result(rnd)
             result = acted.chosen_value if acted else None
 
     payload = {
@@ -1481,6 +1866,21 @@ def build_state_sync(participant):
         # alias meurent en 5b, pas avant.
         "items": items_payload(rnd),
         "round": {"id": rnd.id if rnd else None, "state": round_state},
+        # `config` du round courant (dot voting design §5, tache 6a corr. 3),
+        # A LA RACINE du snapshot (contrat -- Facilitation_frontend la lit en
+        # `s.config`) -- PAS un secret -- c'est un reglage du round, connu de
+        # tous, au meme titre que son etat ou ses items. `state.sync` ne
+        # rejoue aucun evenement (regle du depot), donc un facilitateur qui
+        # recharge sa page PENDANT qu'il compose un round doit retrouver son
+        # interrupteur `liveTotals` tel qu'il l'a pose, pas la valeur par
+        # defaut de son ecran -- sans quoi il croit les totaux secrets alors
+        # que le serveur, lui, les a gardes visibles : une fausse assurance
+        # sur un reglage de confidentialite, pas un simple affichage perime.
+        # `{}` quand aucun round n'est courant, meme defaut que `Round.config`.
+        # NE PAS CONFONDRE avec `liveTotals` plus bas : cette cle dit quel
+        # REGLAGE est en vigueur, elle n'ouvre RIEN par elle-meme -- les
+        # totaux eux-memes restent sous la garde de `live_totals_payload`.
+        "config": rnd.config if rnd else {},
         "deadline": deadline_iso(room),
         "timer": {"enabled": room.timer_enabled, "seconds": room.timer_seconds},
         # Announced to everyone, not just the facilitator: a voter must know whether
@@ -1527,6 +1927,34 @@ def build_state_sync(participant):
         and rnd.source_resolved_at is None
     ):
         payload["chainingCandidates"] = chaining_candidates(room, rnd.id)
+    # Totaux en direct et reste a placer (round de correction 1, brief tache
+    # 6a-5) : `state.sync` ne rejoue AUCUN evenement (regle du depot, deja
+    # appliquee ci-dessus a `itemResults` et `chainingCandidates`) -- un
+    # facilitateur ou un votant qui recharge sa page en cours de round doit
+    # donc retrouver dans CET instantane tout ce que les diffusions
+    # `response.totals`/`response.pending` (`realtime/consumers.py`) lui
+    # auraient deja appris, aux MEMES conditions qu'elles, pas a des
+    # conditions relachees pour l'occasion.
+    #
+    # `liveTotals` : a TOUT destinataire, mais seulement si
+    # `live_totals_payload` rend quelque chose -- round `open` ET config du
+    # round `liveTotals: true` (meme garde que la diffusion, meme fonction,
+    # donc aucune divergence possible entre les deux chemins).
+    live_totals = live_totals_payload(room)
+    if live_totals is not None:
+        payload["liveTotals"] = live_totals
+    # `pendingBudgets` : reserve au facilitateur, et NON CALCULE pour tout
+    # autre destinataire -- meme garde AVANT le calcul que `chainingCandidates`
+    # juste au-dessus, jamais une cle emise puis a masquer cote client. Le
+    # test de la garde (`is_facilitator`, round-scoped -- `rnd.facilitator_id`
+    # s'il existe, sinon `participant.role`) est le MEME que celui qui filtre
+    # `response.pending` a l'emission (`consumers.py::facilitation_event`) :
+    # une seule definition de "qui est facilitateur", jamais deux qui
+    # pourraient un jour diverger.
+    if is_facilitator(room, participant):
+        remaining = remaining_budgets(room)
+        if remaining is not None:
+            payload["pendingBudgets"] = remaining
     return payload
 
 

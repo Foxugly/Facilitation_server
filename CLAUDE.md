@@ -524,6 +524,40 @@ Weighted Ranking, QCM/Poll, ROTI.
   après son propre `session.join`, jamais un seul ping partagé pour garantir
   l'état de plusieurs connexions à la fois.
 
+  **Second complément, appris en 6a tâche 5 : sur la connexion qui DÉCLENCHE
+  elle-même l'action, un seul aller-retour ne suffit pas non plus.** Prouver
+  qu'une connexion ne reçoit PAS une diffusion qu'elle vient elle-même de
+  provoquer (ex. un votant qui émet `response.cast` et ne doit voir aucun
+  `response.totals` en mode secret) est un cas distinct du complément
+  ci-dessus (A qui observe B) : ici A observe ce que A lui-même a déclenché.
+  Un seul `ping`/`pong` sur A a laissé passer une mutation qui aurait dû le
+  faire échouer — `response.totals` apparaissait bien, mais **au tour
+  suivant**, après le `pong`.
+
+  Cause, dans `channels/consumer.py` (`await_many_dispatch`) : chaque
+  connexion fait courir DEUX tâches concurrentes — `receive` (les messages
+  client, dont le `ping`) et `channel_receive` (les diffusions de groupe,
+  dont celle que `response.cast` vient de provoquer sur SA PROPRE
+  connexion). Quand les deux sont prêtes en même temps, elles sont
+  départagées dans l'ordre de la liste `[receive, self.channel_receive]` :
+  le `ping`, déjà en file au moment du `response.cast`, est dispatché AVANT
+  la diffusion que ce `response.cast` vient lui-même de déclencher, qui
+  n'atteint donc le même correspondant qu'au tour suivant.
+
+  Établi empiriquement (`realtime/tests/test_dot_voting_live.py`,
+  `_ping_pong_types`) : neutraliser le gate de configuration testé ne faisait
+  PAS échouer le test avec un seul `ping`/`pong` ; le remède, deux tours
+  immédiats (deux `ping`/`pong` de suite sur la même connexion, tous les
+  types collectés), a fait échouer le test comme attendu sur la même
+  mutation. **Le remède : deux allers-retours, pas un**, quand la connexion
+  qui vérifie une absence est celle qui a déclenché l'action :
+
+  ```python
+  for _ in range(2):
+      await comm.send_json_to({"v": 1, "type": "ping", "payload": {}})
+      await _drain_until(comm, "pong")  # collecter les types vus en chemin
+  ```
+
 - **Coordonnées d'infrastructure, relevées sur la box le 2026-09-10.** Port **8009**
   (`8000`–`8008` tous occupés, dont `8006` daphne Poker, `8007` gunicorn billing, `8008` daphne
   Fabric ; suivant occupé : `8125` netdata). Redis **db5** (`db0`–`db4` pris — un index partagé

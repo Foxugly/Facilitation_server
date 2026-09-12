@@ -151,6 +151,7 @@ Envoyé à un seul client (au `join` initial, à la reconnexion, à l'arrivée d
   "agenda": [ { "id": 12, "text": "Qui décide du budget outillage ?", "status": "current", "state": "open", "result": null, "everDecided": false, "canRank": false, "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ] } ],
   "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ],
   "round": { "id": 12, "state": "open" },
+  "config": { "liveTotals": true },
   "deadline": null,
   "timer": { "enabled": false, "seconds": 10 },
   "reveal": { "anonymous": false, "canAnonymise": false }
@@ -163,6 +164,7 @@ Champ par champ (`realtime/services.py::build_state_sync`) :
 - Si `roundState === "revealed"` **ou `"acted"`**, `state.sync` inclut aussi `itemResults` (§8.2.a) — un retardataire qui arrive après la révélation **voit les résultats** (le client traite `revealed` et `acted` comme un seul état d'affichage), et votera au tour suivant. Comme `vote.revealed`, il s'agit d'un décompte qui respecte l'anonymat : jamais de lien participant → carte sur un round anonyme.
 - `state.sync` porte aussi `chainingCandidates` (§8.5.a), **uniquement si le destinataire est le facilitateur** et que le round courant est lié en mode `manual`, pas encore résolu — même forme que le `candidates` de `round.candidates`. Un facilitateur qui (re)connecte sur un tel round revoit ainsi ses candidats sans avoir à re-sélectionner le round ; la clé est absente (pas vide) pour tout autre destinataire ou toute autre situation — réservée au facilitateur, la garde se fait avant le calcul, jamais par un masquage après coup.
 - **Depuis 5a** (§8.1), `state.sync` porte aussi `items` — la liste des items du round courant, même forme que dans les faits `item.*` (`[{id, text, sequence}]`) — et `round` — `{id, state}` du round courant (`id: null` si aucun round actif). `subject` reste émis en doublon (le texte du premier item) : aucune date n'est fixée pour son retrait — c'est une clé de `state.sync`, distincte des anciennes intentions entrantes `subject.set`/`subject.add`/`subject.select` (§8.1.b), retirées en 5b.
+- **Depuis 6a (tâche « correction 3 »), `state.sync` porte aussi `config`** — la config du round courant (`Round.config`, §8.3), **à la racine du snapshot** (`{}` si aucun round actif ou si le round n'a jamais été configuré, même défaut que le modèle). Ce n'est **pas** un secret, contrairement aux totaux que cette config gouverne (§8.7) : c'est un réglage du round, connu de tous, au même titre que son état ou ses items — aucune garde à l'émission, aucun filtrage par destinataire. La présence de cette clé **n'ouvre rien par elle-même** ; elle dit seulement quel réglage est en vigueur (`{"liveTotals": true}` signifie « les totaux sont visibles pendant ce round », pas « voici les totaux »). Avant cet ajout, un facilitateur qui rechargeait sa page en composant un round voyait son interrupteur revenir à la valeur par défaut de l'écran alors que le serveur avait gardé le réglage posé — une fausse assurance sur un réglage de confidentialité, le sens de l'erreur le plus dangereux de cette famille (`state.sync` ne rejoue aucun événement, règle constante du dépôt).
 - `room.isTeam` (`room.team_id is not None`) pilote le gating client de certaines options (le timer, notamment, est réservé aux salles d'équipe) ; le serveur reste de toute façon autoritaire côté validation.
 - `myRole` et `myParticipantId` sont le rôle et l'identifiant **du destinataire**, renvoyés par le serveur — jamais déduits d'un état client persisté : une promotion facilitateur doit se voir immédiatement chez le facilitateur lui-même, pas seulement chez les autres.
 - `resultLayout` fige la mise en page du dépouillement pour la salle (choisie par l'équipe à la création) : le client y adapte l'affichage dès la révélation.
@@ -170,6 +172,7 @@ Champ par champ (`realtime/services.py::build_state_sync`) :
 - `agenda` porte le scénario — chaque round de la salle, son état et, s'il a été acté, la valeur retenue et ses items. Chaque entrée porte `status` (`current`/`done`/`pending`, où on en est dans la séance) **et** `state` — le `RoundState` brut du round (`idle`/`open`/`revealed`/`acted`, même forme que le `round` de `state.sync`). Les deux coexistent parce qu'elles répondent à des questions différentes : un round ouvert puis abandonné pour un autre reste `status: "pending"` (rien n'a été acté) mais `state: "open"` — donc non retirable (`round.remove`, §8.4) — alors qu'un round jamais ouvert est aussi `status: "pending"` mais `state: "idle"`, lui retirable. `status` seul ne distingue pas ces deux cas. `everDecided` coexiste avec `result` et `state` parce qu'il répond à une troisième question, indépendante des deux premières : ce round a-t-il déjà porté un `Result`, une fois, n'importe quand — alors que `result` dit quelle valeur est retenue *là* (`null` aussi bien pour "jamais acté" que pour "acté puis réinitialisé" par `vote.reset`, qui vide les réponses mais laisse le `Result` en place). `everDecided` lève cette ambiguïté en restant `true` après un reset, parce qu'il teste exactement le même critère que la première garde de `remove_round` (§8.4) — sans cette clé, le front proposerait le retrait d'un round acté-puis-réinitialisé (`status: "pending"`, `state: "idle"`, `result: null`, en apparence un round jamais joué), et le serveur le refuserait. `canRank` répond à une quatrième question, elle aussi indépendante des trois autres — pas une redondance : si CE round sert un jour de source à un chaînage `top N` (§8.5), le serveur honorera-t-il un `top` non nul, ou refusera-t-il systématiquement (`bind_round`, `error` `state.invalid_transition`) ? La réponse vient du registre, seul à savoir si la stratégie de ce round déclare `rank_value` (`ActivitySpec.rank_value`, `realtime/activities.py`) — aucune activité actuelle (`delegation_v1`, `fist_of_five_v1`) n'en déclare, un consensus par item n'étant pas un ordre entre items, donc `canRank` vaut `false` partout aujourd'hui. Sans cette clé, le front proposerait systématiquement un champ « top N » que `bind_round` refuserait à coup sûr.
 - `deadline` est l'échéance ISO du round `open` courant (`null` sinon) ; `timer` porte le réglage courant de la salle (`enabled`, `seconds`).
 - `reveal.anonymous` annonce le mode de révélation du round courant **avant que les votants ne répondent** ; `reveal.canAnonymise` dit si la salle (équipe payante) a le droit de basculer en anonyme.
+- **Depuis 6a tâche 5 (round de correction 1)**, `state.sync` porte aussi `liveTotals` et `pendingBudgets` (§8.7), aux **mêmes conditions** que les diffusions `response.totals`/`response.pending` — `state.sync` ne rejoue aucun événement, donc un rechargement de page en cours de round doit retrouver ce que ces faits auraient déjà appris. `liveTotals` : à tout destinataire, seulement si le round est `open` et que sa config l'autorise. `pendingBudgets` : **non calculé du tout** (pas seulement omis) pour un destinataire qui n'est pas le facilitateur.
 
 ---
 
@@ -484,6 +487,126 @@ l'inversion ne touche que l'émetteur de `round.select` lui-même. Figé par
 (`realtime/tests/test_chaining_ws.py`) : sans ce test, une réorganisation du
 traitement pourrait inverser cet ordre sans qu'aucun autre test ne le
 remarque, cassant un client qui s'y serait fié.
+
+---
+
+## 8.6 Dépouillement et résultat pilotés par l'activité (6a)
+
+> Ajouté 2026-09-12, livraison 6a tâche 4 (`.superpowers/sdd/2026-09-12-6a-dot-voting/`).
+> Aucun nouvel événement : `vote.revealed` et `result.act` existants deviennent
+> **génériques**. Le poker est inchangé, cle par cle.
+
+**`itemResults[]` porte ce que déclare l'activité.** Le bloc n'est plus figé sur
+`tally`/`spread` : le serveur y fusionne l'agrégat que rend l'activité (`ActivitySpec.aggregate`),
+plus les deux clés du contrat, `itemId` et `anonymous`, qui gagnent toujours en cas de collision.
+
+- **Delegation Poker / Fist of Five** : `{ itemId, tally, spread, anonymous, votes? }` —
+  strictement la forme de §8.2.a, inchangée.
+- **Dot Voting** : `{ itemId, totalPoints, responseCount, rank, anonymous, votes? }`.
+
+`votes[]` suit la même règle : `{ participantId }` plus ce que déclare l'activité —
+`cardValue` pour le poker (inchangé), `points` pour Dot Voting. L'invariant §6.a tient
+toujours **par construction** : sur un round anonyme, aucun bloc ne porte `votes`, rien de
+nominatif n'étant construit.
+
+**`result.act` a deux régimes**, selon que l'activité fige son résultat à la révélation :
+
+| Activité | `chosenValue` attendu | Effet |
+|---|---|---|
+| Poker (ne fige rien à la révélation) | une **carte du deck actif** | écrit le `Result` (inchangé) |
+| Dot Voting (fige à la révélation) | **absent / `null`** | conclut le round ; le classement, déjà figé, n'est pas réécrit. Une valeur non vide est refusée (`state.invalid_transition`, `rejectedType: "result.act"`). |
+
+**Le résultat d'une activité qui fige est écrit dès `vote.revealed`** (révélation manuelle
+comme par échéance), et `vote.revealed` le **relit** au lieu de réagréger : une réponse qui
+changerait après coup ne rebat pas un classement déjà montré. C'est ce résultat figé que le
+chaînage « top N » (§8.5) reprend.
+
+---
+
+## 8.7 Totaux en direct et reste à placer (6a, tâche 5)
+
+> Ajouté 2026-09-12, livraison 6a tâche 5 (`.superpowers/sdd/2026-09-12-6a-dot-voting/`).
+> Deux faits nouveaux après `response.cast` (et, depuis le round de correction 2, après
+> `item.add` et `vote.reset` — voir plus bas), de **portées différentes** — à ne pas confondre.
+
+**`response.totals`** — à **tous**, mais **seulement si** la config du round courant
+l'autorise (`Round.config.liveTotals`, §8.3, déclaré par `dot_voting_v1`). Le défaut est le
+**secret** : une config absente (`{}`, valeur par défaut du modèle) ou `liveTotals: false`
+valent toutes deux un refus — jamais un oubli de configuration traité comme un « oui ». Émis
+uniquement pendant que le round est `open` (`realtime/services.py::live_totals_payload`).
+
+```json
+{ "itemResults": [ { "itemId": 42, "totalPoints": 5, "responseCount": 2 } ] }
+```
+
+Ce que ce bloc porte est **toujours un agrégat** — le même `ActivitySpec.aggregate` que
+`vote.revealed`/`itemResults` (§8.6) — **jamais** de clé `votes` ni de lien participant →
+jetons, quel que soit le mode d'anonymat du round : l'invariant du secret tient ici **par
+construction** (le serveur ne construit qu'un total, jamais une réponse individuelle), pas par
+un filtrage a posteriori. **Nuance (round de correction 2) : cela ne dit rien du canal par
+delta.** En mode visible, un observateur voit le total d'UN item bouger juste après qu'un
+participant y a posé un jeton — une attribution *faible* (quel item, approximativement quand),
+jamais un jeton individuel ni son auteur. Ce n'est pas un défaut : le mode visible est un choix
+**explicite** du facilitateur (§8.3), qui accepte cette fuite d'information résiduelle en
+l'activant — mais la promesse « par construction » ne porte que sur le *payload*, pas sur ce
+qu'un observateur attentif peut inférer de la *cadence* des messages.
+
+**`response.pending`** — au **facilitateur seul**, filtré **à l'émission** (jamais un masquage
+côté client) :
+
+```json
+{ "remaining": { "p-1": 2, "p-2": 4 } }
+```
+
+`remaining` porte, pour **chaque** participant de la salle (y compris ceux n'ayant encore rien
+posé), ce qu'il lui reste à placer — `ActivitySpec.remaining_budget`, `None` pour le poker (rien
+n'est alors diffusé). Les jetons n'étant pas obligatoires (design §4), « a fini » cesse d'être
+déductible du seul nombre de réponses ; c'est ce que ce fait donne au facilitateur, lui seul.
+
+Le filtrage facilitateur-seul est **générique** : `_broadcast(mtype, payload, audience=
+"facilitator", audience_id=...)` diffuse quand même au groupe entier (le channel layer ne cible
+pas un membre seul) — le message **transite** par le canal jusqu'à la file de **chaque**
+connexion de la salle, il n'atteint simplement jamais leur socket s'il ne leur est pas destiné.
+`facilitation_event` — exécuté **par chaque connexion** — ne l'écrit sur SA socket que si
+`audienceId` correspond à l'identifiant public que CETTE connexion connaît déjà d'elle-même
+(`self.public_id`, fixé à la jointure). Un participant ordinaire ne l'écrit donc **jamais** sur
+sa propre socket.
+
+**Optimisation (round de correction 2) : l'identité du facilitateur est résolue UNE SEULE
+fois, à l'émission** (`services.facilitator_public_id`, une requête), plutôt que par chaque
+connexion à la livraison (`_resolve()` + `is_facilitator()`, deux requêtes — dans une salle
+pleine, une trentaine de requêtes pour un seul jeton posé). Conséquence à connaître :
+**l'autorité n'est plus relue au moment de la livraison, elle est figée au moment de
+l'émission.** La fenêtre entre les deux est infime, et le destinataire ainsi figé est bien celui
+qui facilitait quand le fait s'est produit — mais un transfert de main (`facilitator.transfer`,
+`facilitator.claim`) survenant *pile* dans cette fenêtre serait honoré avec un message de
+retard : l'ancien facilitateur recevrait ce dernier `response.pending`, pas le nouveau.
+Acceptable — sans conséquence au-delà d'un affichage en retard d'un seul message.
+
+**Ré-émission (round de correction 2) : `item.add` et `vote.reset` invalident silencieusement
+un affichage déjà envoyé, sans qu'aucun jeton ne soit reposé** — ajouter un item change `n`
+(donc le budget `2n` et la borne par item), réinitialiser vide les réponses. Les deux
+ré-émettent donc `response.totals`/`response.pending` (mêmes conditions, mêmes fonctions) après
+leurs faits propres (`item.added`/`agenda.updated`/`subject.updated`, ou `vote.wasReset`).
+Après un `vote.reset` qui remet le round à `idle`, `response.totals` ne repart généralement
+**pas** (le round n'est plus `open` — rien à recalculer) : le client traite déjà `vote.wasReset`
+comme l'invalidation de tout affichage du tour précédent. `response.pending`, lui, repart
+toujours après un reset : `remaining_budgets` ne dépend pas de l'état du round et rend alors le
+budget plein, une valeur fraîche.
+
+**Ré-émission (round de correction 3) : `vote.open` et `item.remove` rejoignent le club.**
+`vote.open` est la **seule** transition qui fait basculer `live_totals_payload` de `None` à un
+agrégat (`idle → open`, sa seule garde d'état) — pourtant elle ne rediffusait rien jusqu'ici :
+entre l'ouverture et le premier jeton posé, les participants déjà connectés croyaient les totaux
+masqués alors que la config du round les rend visibles, pendant qu'un retardataire qui recharge
+(`state.sync`, même garde que `response.totals`) voyait des zéros — deux écrans contradictoires
+dans la même salle. `vote.open` diffuse donc désormais `response.totals` après `vote.opened`/
+`participation.update`, **à zéro** si la config l'autorise (mêmes conditions, même fonction que
+partout ailleurs). `item.remove` change `n` (donc le budget `2n` et la borne par item) exactement
+comme `item.add` — même classe de défaut que ci-dessus, dernier cas non traité. `remove_item`
+n'étant autorisé que sur un round encore `idle` (`realtime/services.py::remove_item`),
+`response.totals` y reste `None` en pratique ; c'est `response.pending` qui se corrige, `§8.7`
+rangeant déjà les deux faits sous le même intitulé.
 
 ---
 

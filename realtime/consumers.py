@@ -75,6 +75,13 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self._broadcast_items(room, "item.added", item["id"])
             await self._broadcast_agenda(room)
             await self._broadcast_current_item(room)
+            # Round de correction 2 (brief tache 6a-5) : ajouter un item
+            # change `n` (donc le budget 2n et la borne par item de Dot
+            # Voting) -- sans rediffuser, l'affichage restait perime jusqu'au
+            # prochain jeton pose. Sans effet pour le poker (et tout round
+            # pas encore ouvert) : les deux fonctions rendent alors `None`.
+            await self._broadcast_live_totals(room)
+            await self._broadcast_pending_budgets(room)
         elif mtype == "item.update":
             item = await database_sync_to_async(services.update_item)(
                 room, participant, payload.get("itemId"), payload.get("text", "")
@@ -86,6 +93,17 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             item_id = await database_sync_to_async(services.remove_item)(room, participant, payload.get("itemId"))
             await self._broadcast_items(room, "item.removed", item_id)
             await self._broadcast_agenda(room)
+            # Meme classe de defaut que `item.add` plus haut (round de
+            # correction 2) -- retirer un item change `n` exactement comme en
+            # ajouter un, et `remove_item` n'invalidait pas l'affichage.
+            # `response.totals` reste None ici en pratique (`remove_item`
+            # n'est autorise que sur un round encore IDLE, voir sa docstring
+            # dans `realtime/services.py`), mais `response.pending` ne depend
+            # pas de l'etat du round et se corrige bel et bien -- §8.7 range
+            # les deux faits sous le meme intitule ("Totaux en direct et
+            # reste a placer").
+            await self._broadcast_live_totals(room)
+            await self._broadcast_pending_budgets(room)
         elif mtype == "item.reorder":
             await database_sync_to_async(services.reorder_items)(room, participant, payload.get("itemIds") or [])
             await self._broadcast_items(room, "item.reordered", None)
@@ -207,6 +225,16 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             deadline_iso = await database_sync_to_async(services.deadline_iso)(room)
             await self._broadcast("vote.opened", {"deadline": deadline_iso})
             await self._broadcast_participation(room)
+            # `response.totals` (contrat §8.7, tache 6a corr. 3) : l'ouverture
+            # est le SEUL moment ou `live_totals_payload` bascule de `None` a
+            # un agregat -- le round passe idle -> open, sa seule garde d'etat.
+            # Sans cette diffusion, deux ecrans contradictoires cohabitent dans
+            # la meme salle jusqu'au premier jeton pose : ceux deja connectes
+            # affichent encore "totaux masques", ceux qui rechargent (via
+            # `state.sync`, qui applique la meme garde) voient des zeros. Meme
+            # fonction, memes conditions que partout ailleurs -- rien construit
+            # quand la config du round ne rend pas les totaux visibles.
+            await self._broadcast_live_totals(room)
             self._schedule_timeout(room.code, deadline)
         elif mtype == "response.cast":
             # Ouvert a tous les participants (pas une intention de controle : pas
@@ -217,6 +245,18 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 room, participant, payload.get("itemId"), payload.get("payload") or {}
             )
             await self._broadcast_participation(room)
+            # Deux diffusions neuves (design dot voting §4-§5, brief tache
+            # 6a-5, contrat §8.7), de portee DIFFERENTE -- a ne pas confondre :
+            # - `response.totals` : A TOUS, mais seulement si `live_totals_payload`
+            #   rend quelque chose -- round `open` ET config du round
+            #   `liveTotals: true` (defaut : secret, `None` sinon). Jamais de
+            #   lien participant -> jetons : un AGREGAT, rien d'autre.
+            # - `response.pending` : au FACILITATEUR SEUL, `audience="facilitator"`
+            #   -- filtre A L'EMISSION dans `facilitation_event` ci-dessous,
+            #   jamais un masquage cote client. `None` pour le poker (aucune
+            #   notion de budget), rien n'est alors diffuse.
+            await self._broadcast_live_totals(room)
+            await self._broadcast_pending_budgets(room)
         elif mtype == "vote.reveal":
             await database_sync_to_async(services.reveal)(room, participant)
             self._cancel_timeout(room.code)
@@ -231,6 +271,15 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             self._cancel_timeout(room.code)
             await self._broadcast("vote.wasReset", {"nextState": next_state})
             await self._broadcast_participation(room)
+            # Round de correction 2 (brief tache 6a-5) : reinitialiser vide
+            # les reponses -- sans rediffuser, le reste a placer affiche
+            # restait perime (l'ancien total, pas le budget plein qui vient
+            # de se liberer) jusqu'au prochain jeton pose sur le round
+            # suivant. `response.totals` ne repart generalement pas ici (le
+            # round est redevenu `idle`) : voir la docstring de
+            # `_broadcast_live_totals`.
+            await self._broadcast_live_totals(room)
+            await self._broadcast_pending_budgets(room)
         elif mtype == "reveal.setMode":
             anonymous = await database_sync_to_async(services.set_reveal_mode)(
                 room, participant, payload.get("anonymous")
@@ -294,6 +343,40 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         data = await database_sync_to_async(services.participation)(room)
         await self._broadcast("participation.update", data)
 
+    async def _broadcast_live_totals(self, room):
+        """`response.totals` (contrat §8.7) : a TOUT le groupe, mais
+        seulement si `live_totals_payload` rend quelque chose (round `open`
+        ET config du round `liveTotals: true` -- defaut : secret).
+
+        Appelee non seulement apres `response.cast`, mais aussi apres tout
+        evenement qui peut rendre l'affichage perime SANS qu'aucun jeton
+        n'ait ete repose (round de correction 2, brief) : `item.add` change
+        `n` (donc la borne par item et le budget 2n) et `vote.reset` vide
+        les reponses -- sans cette rediffusion, l'ecran gardait des valeurs
+        perimees jusqu'au PROCHAIN jeton pose. Apres un `vote.reset` qui
+        remet le round a `idle`, cette fonction ne rediffuse rien (le round
+        n'est plus `open`) : le client traite deja `vote.wasReset` comme
+        l'invalidation de tout affichage du tour precedent, `response.totals`
+        y compris."""
+        totals = await database_sync_to_async(services.live_totals_payload)(room)
+        if totals is not None:
+            await self._broadcast("response.totals", totals)
+
+    async def _broadcast_pending_budgets(self, room):
+        """`response.pending` (contrat §8.7) : au FACILITATEUR SEUL, filtre
+        a l'emission (voir `_broadcast`/`facilitation_event`). Memes
+        declencheurs que `_broadcast_live_totals` ci-dessus -- et
+        contrairement a elle, `remaining_budgets` ne depend pas de l'etat du
+        round : apres un `vote.reset`, elle rend le budget PLEIN (les
+        reponses viennent d'etre videes), une valeur fraiche et non perimee,
+        diffusee ici aussi."""
+        remaining = await database_sync_to_async(services.remaining_budgets)(room)
+        if remaining is not None:
+            fac_id = await database_sync_to_async(services.facilitator_public_id)(room)
+            await self._broadcast(
+                "response.pending", {"remaining": remaining}, audience="facilitator", audience_id=fac_id
+            )
+
     async def _broadcast_presence(self, room):
         present = await database_sync_to_async(services.facilitator_present)(room)
         await self._broadcast("facilitator.presence", {"present": present})
@@ -319,10 +402,28 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             message["cid"] = cid
         await self.send_json(message)
 
-    async def _broadcast(self, mtype, payload):
-        await self.channel_layer.group_send(
-            self.group, {"type": "facilitation.event", "mtype": mtype, "payload": payload}
-        )
+    async def _broadcast(self, mtype, payload, audience=None, audience_id=None):
+        """`audience="facilitator"` (brief tache 6a-5, contrat §8.7) : le
+        message part quand meme vers TOUT le groupe (`group_send` ne sait pas
+        cibler un seul membre) -- il TRANSITE donc jusqu'a la file de CHAQUE
+        connexion, sans jamais atteindre leur socket si elles ne sont pas
+        visees (voir `facilitation_event` ci-dessous, qui fait le tri). Dire
+        qu'il n'en « transite jamais l'octet » serait faux ; dire qu'aucune
+        connexion non visee ne l'ECRIT sur SA socket est la formulation
+        exacte.
+
+        `audience_id` (round de correction 2, optimisation performance) :
+        l'identifiant du destinataire vise, resolu ICI, A L'EMISSION, une
+        SEULE fois pour tout le groupe (`services.facilitator_public_id`,
+        une requete) -- au lieu de laisser chaque connexion se re-resoudre
+        elle-meme a la livraison (`_resolve()` + `is_facilitator()`, deux
+        requetes, repetees par connexion). Voir `facilitation_event` pour ce
+        que ce choix change sur l'autorite."""
+        message = {"type": "facilitation.event", "mtype": mtype, "payload": payload}
+        if audience:
+            message["audience"] = audience
+            message["audienceId"] = audience_id
+        await self.channel_layer.group_send(self.group, message)
 
     async def _error(self, code, message, rejected_type, cid):
         await self._emit("error", {
@@ -330,6 +431,50 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         }, cid)
 
     async def facilitation_event(self, event):
+        # Filtrage a l'emission, PAS a la livraison (round de correction 2) :
+        # `event["audienceId"]` est l'identifiant public du facilitateur tel
+        # que RESOLU AU MOMENT DE L'EMISSION (`_broadcast`, une seule requete
+        # pour tout le groupe) -- compare ici a `self.public_id`, deja connu
+        # de CETTE connexion depuis sa jointure (`_handle_join`), sans la
+        # moindre requete. Avant ce changement, CHAQUE connexion du groupe
+        # se re-resolvait elle-meme (`_resolve()` + `is_facilitator()`, deux
+        # requetes) pour repondre a la meme question -- dans une salle
+        # pleine, une trentaine de requetes pour UN SEUL jeton pose, sur une
+        # machine qui heberge dix applications Django et a deja sature une
+        # fois cette annee.
+        #
+        # CE QUE CELA CHANGE, A DIRE FRANCHEMENT : l'autorite n'est plus
+        # RELUE au moment de la livraison, elle est FIGEE au moment de
+        # l'emission. La fenetre entre les deux est infime (le temps
+        # qu'`await self.channel_layer.group_send(...)` distribue le
+        # message aux files des connexions du groupe), et le destinataire
+        # ainsi fige est bien celui qui facilitait quand le fait s'est
+        # produit -- mais un transfert de main (`facilitator.transfer`,
+        # `facilitator.claim`) survenant PILE dans cette fenetre serait
+        # honore avec un message de retard : l'ANCIEN facilitateur recevrait
+        # ce dernier `response.pending`, pas le nouveau. Acceptable --
+        # improbable, sans consequence au-dela d'un affichage en retard d'un
+        # seul message -- mais assume et dit ici, pas decouvert plus tard.
+        if event.get("audience") == "facilitator":
+            audience_id = event.get("audienceId")
+            # ECHEC FERME (relecture round de correction 2) : sous l'ancien
+            # mecanisme (chaque connexion se re-resolvait elle-meme), une
+            # information manquante etait sans consequence -- la connexion
+            # allait chercher la verite en base. Avec une comparaison
+            # d'identifiants, ce n'est plus vrai : si `audienceId` est
+            # ABSENT (`None`), le comparer nu a `self.public_id` peut
+            # reussir PAR ACCIDENT pour une connexion dont l'identifiant
+            # public ne serait pas encore etabli (`getattr`, pas
+            # `self.public_id` : cette connexion n'aurait meme pas
+            # l'attribut avant sa jointure) -- `None == None` livrerait
+            # alors le fait a TOUT LE MONDE, l'inverse exact de ce que ce
+            # filtre existe pour garantir. Le garde-fou `audience_id is
+            # None` refuse donc de livrer a QUICONQUE plutot que de risquer
+            # cette coincidence. Un fait reserve qu'on laisse tomber par
+            # exces de prudence est un defaut visible et corrigeable ; un
+            # fait reserve livre a tous serait une fuite silencieuse.
+            if audience_id is None or audience_id != getattr(self, "public_id", None):
+                return
         await self._emit(event["mtype"], event["payload"])
 
     def _schedule_timeout(self, code, deadline):
