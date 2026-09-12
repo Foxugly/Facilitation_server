@@ -339,6 +339,16 @@ def build_agenda(room):
     """Le scenario : chaque ROUND de la salle avec son etat et, s'il a ete acte, la
     valeur retenue. L'`id` est desormais un id de round — le front le renvoie tel
     quel.
+
+    `status` et `state` repondent a deux questions distinctes. `status`
+    ("current"/"done"/"pending") dit ou on en est dans la seance. `state` est
+    tel quel le `RoundState` du modele (contrat §5, meme forme que le `round`
+    de `state.sync`) : il dit si ce round a deja vecu. Les deux ne se
+    deduisent pas l'un de l'autre -- un round ouvert puis abandonne pour un
+    autre reste `status: "pending"` (rien n'a ete acte) mais `state: "open"`
+    (pas retirable, cf `remove_round`). Sans cette deuxieme cle, le front ne
+    peut pas distinguer ce cas d'un round jamais ouvert (`state: "idle"`,
+    retirable) et proposerait un geste que le serveur refuserait.
     """
     current_id = room.current_round_id
     out = []
@@ -354,6 +364,7 @@ def build_agenda(room):
             "id": rnd.id,
             "text": first.text if first else "",
             "status": status,
+            "state": rnd.state,
             "result": result,
             "items": items_payload(rnd),
         })

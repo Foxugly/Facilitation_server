@@ -148,7 +148,7 @@ Envoyé à un seul client (au `join` initial, à la reconnexion, à l'arrivée d
   "myResponses": { "42": { "card": "consult" } },
   "result": null,
   "facilitatorPresent": true,
-  "agenda": [ { "id": 12, "text": "Qui décide du budget outillage ?", "status": "current", "result": null, "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ] } ],
+  "agenda": [ { "id": 12, "text": "Qui décide du budget outillage ?", "status": "current", "state": "open", "result": null, "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ] } ],
   "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ],
   "round": { "id": 12, "state": "open" },
   "deadline": null,
@@ -166,7 +166,7 @@ Champ par champ (`realtime/services.py::build_state_sync`) :
 - `myRole` et `myParticipantId` sont le rôle et l'identifiant **du destinataire**, renvoyés par le serveur — jamais déduits d'un état client persisté : une promotion facilitateur doit se voir immédiatement chez le facilitateur lui-même, pas seulement chez les autres.
 - `resultLayout` fige la mise en page du dépouillement pour la salle (choisie par l'équipe à la création) : le client y adapte l'affichage dès la révélation.
 - `availableDecks` liste le catalogue de decks jouables par cette salle (léger : pas les cartes), pour un sélecteur de deck côté facilitateur.
-- `agenda` porte le scénario — chaque round de la salle, son état et, s'il a été acté, la valeur retenue et ses items.
+- `agenda` porte le scénario — chaque round de la salle, son état et, s'il a été acté, la valeur retenue et ses items. Chaque entrée porte `status` (`current`/`done`/`pending`, où on en est dans la séance) **et** `state` — le `RoundState` brut du round (`idle`/`open`/`revealed`/`acted`, même forme que le `round` de `state.sync`). Les deux coexistent parce qu'elles répondent à des questions différentes : un round ouvert puis abandonné pour un autre reste `status: "pending"` (rien n'a été acté) mais `state: "open"` — donc non retirable (`round.remove`, §8.4) — alors qu'un round jamais ouvert est aussi `status: "pending"` mais `state: "idle"`, lui retirable. `status` seul ne distingue pas ces deux cas.
 - `deadline` est l'échéance ISO du round `open` courant (`null` sinon) ; `timer` porte le réglage courant de la salle (`enabled`, `seconds`).
 - `reveal.anonymous` annonce le mode de révélation du round courant **avant que les votants ne répondent** ; `reveal.canAnonymise` dit si la salle (équipe payante) a le droit de basculer en anonyme.
 

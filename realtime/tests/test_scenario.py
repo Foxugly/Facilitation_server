@@ -230,3 +230,60 @@ def test_replaying_a_round_that_is_not_last_appends_at_the_end(room_with_facilit
     assert [entry["id"] for entry in agenda] == [a_id, b_id, c_id, replay_id]
     room.refresh_from_db()
     assert room.current_round_id == replay_id
+
+
+def _agenda_entry(agenda, round_id):
+    return next(entry for entry in agenda if entry["id"] == round_id)
+
+
+@pytest.mark.django_db
+def test_agenda_state_of_a_prepared_round_never_opened_is_idle(room_with_facilitator):
+    """Round prepare, jamais ouvert : c'est le cas retirable (`remove_round`
+    l'autorise). `status` dit deja "pending" -- c'est `state` qui dit POURQUOI
+    il est retirable."""
+    room, fac, _voter = room_with_facilitator
+    a_id, b_id, _c_id = _three_rounds(room, fac)
+
+    agenda = services.build_agenda(room)
+
+    entry = _agenda_entry(agenda, b_id)
+    assert entry["status"] == "pending"
+    assert entry["state"] == "idle"
+
+
+@pytest.mark.django_db
+def test_agenda_state_of_an_open_round_abandoned_for_another_is_open(room_with_facilitator):
+    """Le cas qui motive tout le changement : A est ouvert, des reponses
+    arrivent, puis le facilitateur bascule sur B sans reveler ni acter A. A
+    n'est plus courant et ne porte aucun Result, donc `status` reste
+    "pending" -- identique au round b jamais ouvert du test precedent. Seul
+    `state` ("open" ici, "idle" la-bas) distingue les deux, et c'est cette
+    distinction que `remove_round` applique deja (round de correction 1)."""
+    room, fac, voter = room_with_facilitator
+    a_id, b_id, _c_id = _three_rounds(room, fac)
+    services.open_vote(room, fac)
+    cast_first_item(room, voter, "4")
+    services.select_round(room, fac, b_id)  # bascule sans reveler ni acter A
+
+    agenda = services.build_agenda(room)
+
+    entry = _agenda_entry(agenda, a_id)
+    assert entry["status"] == "pending"
+    assert entry["state"] == "open"
+
+
+@pytest.mark.django_db
+def test_agenda_state_of_an_acted_round_is_acted(room_with_facilitator):
+    """A est acte puis on bascule le courant sur B : si A restait courant,
+    `status` afficherait "current" (priorite du pointeur sur le resultat dans
+    `build_agenda`) et ne testerait pas le cas vise ici."""
+    room, fac, voter = room_with_facilitator
+    a_id, b_id, _c_id = _three_rounds(room, fac)
+    _act(room, fac, voter, "4")
+    services.select_round(room, fac, b_id)
+
+    agenda = services.build_agenda(room)
+
+    entry = _agenda_entry(agenda, a_id)
+    assert entry["status"] == "done"
+    assert entry["state"] == "acted"
