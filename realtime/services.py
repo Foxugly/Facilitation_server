@@ -349,6 +349,19 @@ def build_agenda(room):
     (pas retirable, cf `remove_round`). Sans cette deuxieme cle, le front ne
     peut pas distinguer ce cas d'un round jamais ouvert (`state: "idle"`,
     retirable) et proposerait un geste que le serveur refuserait.
+
+    `everDecided` repond a une TROISIEME question, encore distincte des deux
+    premieres : ce round a-t-il deja porte un `Result`, une fois, n'importe
+    quand -- independamment de son etat courant. `result` dit QUELLE valeur
+    est retenue LA, et vaut `null` autant pour "jamais acte" que pour "acte
+    puis reinitialise" (cf le commentaire sur `acted` ci-dessous) : les deux
+    cas sont indiscernables par `result` seul. `everDecided` leve cette
+    ambiguite en gardant `true` apres un `vote.reset`, parce qu'il teste
+    exactement ce que garde `remove_round` (premiere garde : "porte deja un
+    `Result`") -- pas un critere voisin. Sans cette cle, le front proposerait
+    le retrait d'un round acte-puis-reinitialise (`status: "pending"`,
+    `state: "idle"`, `result: null`, en apparence un round jamais joue), et le
+    serveur le refuserait.
     """
     current_id = room.current_round_id
     out = []
@@ -357,7 +370,8 @@ def build_agenda(room):
         # Le filtre d'etat n'est pas decoratif : `vote.reset` remet le round a IDLE
         # en LAISSANT son Result en place. Sans lui, un round reinitialise
         # reapparaitrait « done », avec l'ancienne valeur, alors qu'il est a rejouer.
-        acted = rnd.results.first() if rnd.state == RoundState.ACTED else None
+        decided_result = rnd.results.first()
+        acted = decided_result if rnd.state == RoundState.ACTED else None
         result = acted.chosen_value if acted else None
         status = "current" if rnd.id == current_id else ("done" if result is not None else "pending")
         out.append({
@@ -366,6 +380,7 @@ def build_agenda(room):
             "status": status,
             "state": rnd.state,
             "result": result,
+            "everDecided": decided_result is not None,
             "items": items_payload(rnd),
         })
     return out

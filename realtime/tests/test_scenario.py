@@ -287,3 +287,53 @@ def test_agenda_state_of_an_acted_round_is_acted(room_with_facilitator):
     entry = _agenda_entry(agenda, a_id)
     assert entry["status"] == "done"
     assert entry["state"] == "acted"
+
+
+@pytest.mark.django_db
+def test_agenda_ever_decided_is_true_for_an_acted_round(room_with_facilitator):
+    """Cas simple : un round acte porte la decision."""
+    room, fac, voter = room_with_facilitator
+    a_id, _b_id, _c_id = _three_rounds(room, fac)
+    _act(room, fac, voter, "4")
+
+    agenda = services.build_agenda(room)
+
+    entry = _agenda_entry(agenda, a_id)
+    assert entry["everDecided"] is True
+
+
+@pytest.mark.django_db
+def test_agenda_ever_decided_survives_a_reset(room_with_facilitator):
+    """Le cas qui motive `everDecided` : B est acte puis `vote.reset` le remet
+    a `idle` SANS supprimer son `Result` (meme garde que `remove_round`,
+    premiere condition). L'agenda affiche alors `status: "pending"`,
+    `state: "idle"` et `result: None` -- en apparence un round jamais joue.
+    Sans `everDecided`, le front proposerait son retrait et le serveur le
+    refuserait (`test_removing_an_acted_round_reset_to_idle_is_still_refused`)."""
+    room, fac, voter = room_with_facilitator
+    a_id, b_id, c_id = _three_rounds(room, fac)
+    services.select_round(room, fac, b_id)
+    _act(room, fac, voter, "4")
+    services.reset_round(room, fac)
+    services.select_round(room, fac, c_id)
+
+    agenda = services.build_agenda(room)
+
+    entry = _agenda_entry(agenda, b_id)
+    assert entry["status"] == "pending"
+    assert entry["state"] == "idle"
+    assert entry["result"] is None
+    assert entry["everDecided"] is True
+
+
+@pytest.mark.django_db
+def test_agenda_ever_decided_is_false_for_a_round_never_played(room_with_facilitator):
+    """Contre-cas : un round prepare jamais ouvert ne porte aucune decision --
+    c'est bien le cas que `remove_round` autorise a retirer."""
+    room, fac, _voter = room_with_facilitator
+    _a_id, b_id, _c_id = _three_rounds(room, fac)
+
+    agenda = services.build_agenda(room)
+
+    entry = _agenda_entry(agenda, b_id)
+    assert entry["everDecided"] is False
