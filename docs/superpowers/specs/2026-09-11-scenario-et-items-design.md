@@ -37,7 +37,7 @@ Trois conséquences structurent tout le reste :
 |---|---|
 | Portée | Schéma **et** contrat WS. Livraison couplée back + front. |
 | Scénario | File de rounds préparés portés par la room, chacun avec ses items. `Room.subjects` disparaît. |
-| Type d'activité | Par round (`Round.vote_type` + `Round.config`). `Room.vote_type` n'est plus que le défaut à la création. |
+| Type d'activité | Par round, porté par `Round.deck_snapshot` (`voteType` + `resolutionStrategy`) et `Round.config` — **pas** de FK `Round.vote_type` (décision revue en 5c, voir §3). `Room.vote_type` n'est plus que le défaut à la création. |
 | Chaînage | Liaison déclarée (`Round.source_round` + règle), **copie** des items au démarrage, `Item.origin_item` pour la traçabilité. Jamais une référence vivante. |
 | Création d'items | Déclarée par le registre : facilitateur seul (poker) ou tous les participants (brainstorming). `Item.author` porte l'auteur. |
 | Subset du chaînage | **Mode choisi par liaison** : automatique (tout / top N) ou manuel (le facilitateur coche au démarrage du round consommateur). |
@@ -59,10 +59,26 @@ Room ──< Round (séquentiels, le scénario) ──< Item ──< Response
 **`Round`** — gagne :
 
 - `sequence` (PositiveSmallInteger) : la place dans le scénario.
-- `vote_type` (FK `decks.VoteType`) : l'activité jouée. Renseigné à la création
-  depuis `Room.vote_type`.
+- ~~`vote_type` (FK `decks.VoteType`)~~ — **décision révisée en 5c : ce champ
+  n'existe pas et n'existera pas.** Le type d'un round, c'est celui de son
+  `deck_snapshot` (`voteType` + `resolutionStrategy`), déjà figé sur le round
+  depuis la préparation. Une FK `vote_type` aurait dupliqué cette information
+  dans les tables `decks`, que la couche temps réel n'a **pas le droit de
+  lire** (règle d'immuabilité du dépôt : elle ne lit que les blobs figés).
+  Deux sources de vérité finissent par diverger — un round dont le `vote_type`
+  dirait une chose et le `deck_snapshot` une autre serait un bug qu'aucun test
+  n'attraperait. Coût si cette décision se révèle fausse : si une activité
+  devait un jour exister sans deck, elle n'aurait aucun porteur de type — à
+  rouvrir à ce moment-là, pas avant.
 - `config` (JSON, défaut `{}`) : la configuration de l'activité, validée par le
   schéma que déclare le registre.
+- **Appris en 5c, non anticipé par ce design :** un round garde son type (son
+  `deck_snapshot`) **pour toute sa vie**. `vote.reset` ne l'efface plus, et
+  rejouer un round acté (`_replay_round`) le recopie sur le round neuf, avec
+  `config` et les items. Sans cette règle, un round dont le deck actif de la
+  room aurait changé de type entretemps (poker → dot voting, ou l'inverse)
+  reviendrait rejoué dans un autre type que celui qui a produit ses items et
+  son `Result` d'origine.
 - `source_round` (FK self, null) et `source_rule` (JSON, null) : la liaison de
   chaînage.
 - perd `subject` (FK unique) au profit du `related_name` `items`.
@@ -247,7 +263,7 @@ poker jouable de bout en bout, et les e2e front verts quand le contrat bouge.
 |---|---|---|---|
 | **5a** ✅ fait | `Item` | `Subject` → `Item` sur le round, `Item.author` (inutilisé par le poker, mais le champ existe), migration de données, `Result.item`, `history` repointé, events `item.*` + `round.select`, `state.sync.items[]`, alias hérités. **Back seul** : les alias rendent le front inchangé, il bascule en 5b. | e2e `vote-cycle`, `round-flow`, `team-room` verts **contre le dépôt front non modifié**. |
 | **5b** ✅ fait | `Response` | `Vote` → `Response` + `payload` + `item`, unicité `(item, participant)`, agrégation par item, `response.cast`. Suppression des alias 5a. | Un round poker à 2 items se dépouille item par item. |
-| **5c** | Type par round | `Round.vote_type` + `config`, validation par le registre, `round.configure`, **`items_authored_by` appliqué** (le poker reste facilitateur-seul, la porte est ouverte pour le brainstorming). | Deux rounds de types différents dans une même room ; `item.add` refusé à un votant sur un round poker. |
+| **5c** ✅ fait | Type par round | `Round.config` (deck figé dès la préparation, sur le round — pas de `vote_type` en FK, voir §3), validation par le registre (`config_schema`), `round.configure`. `items_authored_by` générique **n'a pas été livré** : le poker reste facilitateur-seul via la garde existante (`_require_facilitator`), sans mécanisme par activité — reporté. | Deux rounds de types différents dans une même room, chacun gardant son deck, son dépouillement et son résultat ; `item.add` refusé à un votant sur un round poker. |
 | **5d** | Scénario préparé | `Round.sequence`, file de rounds, `scenario.*`, écran de préparation front. | Un scénario de 3 rounds préparé avant l'ouverture de la room, joué dans l'ordre. |
 | **5e** | Chaînage | `source_round`, `source_rule` (`auto` et `manual`), résolution en copie, `origin_item`, recopie de `author`, garde-fous du registre, écran de sélection manuelle côté front. | Round 1 poker → round 2 alimenté par ses résultats, en auto **et** en manuel. |
 
