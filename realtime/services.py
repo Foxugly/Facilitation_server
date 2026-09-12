@@ -362,6 +362,18 @@ def build_agenda(room):
     le retrait d'un round acte-puis-reinitialise (`status: "pending"`,
     `state: "idle"`, `result: null`, en apparence un round jamais joue), et le
     serveur le refuserait.
+
+    `canRank` repond a une QUATRIEME question, elle aussi independante des
+    trois autres : si CE round sert un jour de source a un chainage `top N`
+    (design 2026-09-11 §7), le serveur honorera-t-il seulement `mode: "auto"`
+    et `top: null`, ou acceptera-t-il aussi un `top` non nul ? La reponse ne
+    se devine pas cote client -- elle vient du registre, seul a savoir si la
+    strategie de CE round declare `rank_value` (`ActivitySpec.rank_value`,
+    `realtime/activities.py`) : un consensus par item (delegation, fist-of-
+    five) n'a rien a ordonner ENTRE items, donc `bind_round` refuse deja tout
+    `top` non nul sur une telle source. Sans cette cle, le front proposerait
+    systematiquement un champ « top N » que `bind_round` refuserait a coup
+    sur -- exactement le geste que ce programme s'interdit d'offrir.
     """
     current_id = room.current_round_id
     out = []
@@ -374,6 +386,7 @@ def build_agenda(room):
         acted = decided_result if rnd.state == RoundState.ACTED else None
         result = acted.chosen_value if acted else None
         status = "current" if rnd.id == current_id else ("done" if result is not None else "pending")
+        spec = spec_for(_round_resolution_strategy(rnd, room))
         out.append({
             "id": rnd.id,
             "text": first.text if first else "",
@@ -381,6 +394,7 @@ def build_agenda(room):
             "state": rnd.state,
             "result": result,
             "everDecided": decided_result is not None,
+            "canRank": spec.rank_value is not None,
             "items": items_payload(rnd),
         })
     return out
