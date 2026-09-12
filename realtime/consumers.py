@@ -132,6 +132,23 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 {"enabled": summary["timerEnabled"], "seconds": summary["timerSeconds"]},
             )
             await self._broadcast_participation(room)
+        elif mtype == "round.configure":
+            out = await database_sync_to_async(services.configure_round)(
+                room,
+                participant,
+                payload.get("roundId"),
+                deck_id=payload.get("deckId"),
+                config=payload.get("config"),
+            )
+            await self._broadcast(
+                "round.configured",
+                {"roundId": out["roundId"], "deckSnapshot": out["deckSnapshot"], "config": out["config"]},
+            )
+            # deck.changed (contrat SS8.3) n'est diffuse que si un deckId a ete
+            # fourni : les clients actuels savent deja traiter ce fait, l'omettre
+            # laisserait leur affichage de deck perime.
+            if payload.get("deckId") is not None:
+                await self._broadcast("deck.changed", {"deckSnapshot": out["deckSnapshot"]})
         elif mtype == "vote.open":
             deadline = await database_sync_to_async(services.open_vote)(room, participant)
             deadline_iso = await database_sync_to_async(services.deadline_iso)(room)

@@ -8,9 +8,10 @@ mutation validates the state machine and raises ``RoomError`` on an illegal move
 from collections import Counter
 
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
-from realtime.activities import RoomError, spec_for, validate_payload
+from realtime.activities import RoomError, spec_for, validate_config, validate_payload
 
 from rooms.models import (
     Item,
@@ -265,8 +266,25 @@ def _replay_round(room, participant, source):
     l'item d'origine — la premiere copie, comme le fait la migration de donnees —
     et l'auteur suit l'item, un post-it ne perdant pas son auteur en changeant de
     round (design §7).
+
+    Rejouer, c'est la MEME activite avec des reponses neuves : le deck (donc le
+    TYPE) et la config suivent, comme les items. Sans ca, un round dont le deck
+    actif de la room a change de type entretemps (poker -> dot voting, ou
+    l'inverse) reviendrait rejoue dans un AUTRE type que celui qui a produit ses
+    items et son Result d'origine. Si la source n'a jamais fige de deck (prepare
+    sans choix explicite, jamais ouverte), `source.deck_snapshot` est deja None :
+    on ne fige alors rien de plus que ce que la source avait elle-meme, et le
+    round neuf herite du deck actif a l'ouverture, comme aujourd'hui.
     """
-    rnd = Round.objects.create(room=room, state=RoundState.IDLE, facilitator=participant)
+    rnd = Round.objects.create(
+        room=room,
+        state=RoundState.IDLE,
+        facilitator=participant,
+        deck_snapshot=source.deck_snapshot,
+        # dict(...) : une copie, pas la meme reference — la source et le rejeu
+        # ne doivent jamais partager un objet mutable en memoire.
+        config=dict(source.config),
+    )
     for item in source.items.all():
         Item.objects.create(
             round=rnd,
@@ -348,6 +366,7 @@ def set_timer(room, participant, enabled, seconds):
     return {"enabled": room.timer_enabled, "seconds": room.timer_seconds}
 
 
+@transaction.atomic
 def prepare_round(
     room,
     participant,
@@ -360,14 +379,18 @@ def prepare_round(
     timer_seconds=None,
 ):
     """Step 1 of the two-step round flow: compose and announce the next round in one
-    atomic call — pick/set the subject, the deck, the reveal mode and the timer — but
-    leave it IDLE (not open). Opening is a separate step (``open_vote``).
+    call — pick/set the subject, the deck, the reveal mode and the timer — but leave
+    it IDLE (not open). Opening is a separate step (``open_vote``).
 
-    Doing it atomically is what lets the facilitator manipulate the panel as a *form*
-    (subject + details) and commit it in one go: every setting is applied while the
-    round provably exists and is idle, so none of them can race or reject (that's
-    what used to make toggling the reveal mode before any subject existed pop an
-    error). Reuses the single-setting services so the rules stay in one place.
+    This lets the facilitator manipulate the panel as a *form* (subject + details)
+    and commit it in one go: every setting is applied while the round provably
+    exists and is idle, so none of them can race (that's what used to make toggling
+    the reveal mode before any subject existed pop an error). Wrapped in
+    ``transaction.atomic`` so this is genuinely atomic: if a later setting is
+    rejected (e.g. an anonymous reveal without a subscription), whatever this same
+    call already wrote — the deck included — rolls back with it, instead of leaving
+    the round half-configured. Reuses the single-setting services so the rules stay
+    in one place.
     """
     _require_facilitator(room, participant, "round.prepare")
     # 1) Make the chosen round current (creating/resetting it). `subject_id` designe
@@ -386,6 +409,13 @@ def prepare_round(
     #    that the idle round exists.
     if deck_id is not None:
         select_deck(room, participant, deck_id)
+        # Fige le deck SUR LE ROUND des la preparation, et non a l'ouverture :
+        # sans cela, preparer un second round avec un autre deck reecrirait
+        # celui de la room et changerait le type du premier sous les pieds du
+        # facilitateur. C'est ce qui rend un scenario multi-activites possible.
+        room.refresh_from_db(fields=["deck_snapshot"])
+        rnd.deck_snapshot = room.deck_snapshot
+        rnd.save(update_fields=["deck_snapshot"])
     if anonymous is not None:
         set_reveal_mode(room, participant, anonymous)
     # Timer: team-only feature. Silently ignored (not refused) for an anonymous
@@ -408,6 +438,47 @@ def prepare_round(
     }
 
 
+@transaction.atomic
+def configure_round(room, participant, round_id, *, deck_id=None, config=None):
+    """Fige la config d'un round (et, en option, son deck) AVANT ouverture —
+    meme raison que pour le mode d'anonymat (`set_reveal_mode`) : les
+    participants doivent savoir a quoi ils jouent avant de jouer.
+
+    Le deck est fige via le MEME chemin que `prepare_round` (task 1) plutot
+    que reecrit ici : `select_deck` change le deck ACTIF de la room, puis on
+    reporte ce choix sur le round pour qu'un changement ulterieur du deck actif
+    ne le lui reecrive pas sous les pieds.
+
+    Enveloppe dans `transaction.atomic` : une configuration refusee par
+    `validate_config` ne doit laisser AUCUNE ecriture derriere elle, y compris
+    le deck deja applique plus haut dans ce meme appel — sans quoi un coup
+    refuse serait quand meme applique pour moitie.
+    """
+    _require_facilitator(room, participant, "round.configure")
+    rnd = room.rounds.filter(id=round_id).first()
+    if rnd is None:
+        raise RoomError("state.invalid_transition", "Unknown round", "round.configure")
+    if rnd.state != RoundState.IDLE:
+        raise RoomError("state.invalid_transition", "Round already started", "round.configure")
+    if deck_id is not None:
+        select_deck(room, participant, deck_id)
+        room.refresh_from_db(fields=["deck_snapshot"])
+        rnd.deck_snapshot = room.deck_snapshot
+        rnd.save(update_fields=["deck_snapshot"])
+    if config is not None:
+        snapshot = rnd.deck_snapshot if rnd.deck_snapshot else room.deck_snapshot
+        strategy = (snapshot or {}).get("resolutionStrategy", "")
+        validate_config(strategy, config)
+        rnd.config = config
+        rnd.save(update_fields=["config"])
+    room.touch()
+    return {
+        "roundId": rnd.id,
+        "deckSnapshot": rnd.deck_snapshot if rnd.deck_snapshot else room.deck_snapshot,
+        "config": rnd.config,
+    }
+
+
 def open_vote(room, participant):
     _require_facilitator(room, participant, "vote.open")
     rnd = current_round(room)
@@ -417,7 +488,11 @@ def open_vote(room, participant):
         raise RoomError("state.invalid_transition", "Not idle", "vote.open")
     # Freeze the deck this round is played with: the room's active deck may change
     # afterwards, and the round's values must keep their meaning (history labels).
-    rnd.deck_snapshot = room.deck_snapshot
+    # Un round prepare avec un deck explicite l'a deja fige (prepare_round) : ne
+    # pas l'ecraser ici, sinon preparer un round B reecrirait le type du round A
+    # des l'ouverture de A.
+    if rnd.deck_snapshot is None:
+        rnd.deck_snapshot = room.deck_snapshot
     rnd.state = RoundState.OPEN
     rnd.opened_at = timezone.now()
     rnd.vote_deadline = (
@@ -551,11 +626,19 @@ def reset_round(room, participant):
         raise RoomError("state.invalid_transition", "No round", "vote.reset")
     rnd.responses.all().delete()
     rnd.state = RoundState.IDLE
-    rnd.deck_snapshot = None
+    # Le deck NE se remet plus a None ici (avant cette tache, ca laissait
+    # open_vote le refiger sur le deck ACTIF de la room, seule semantique
+    # possible tant qu'un round n'avait pas de deck propre). Depuis que
+    # prepare_round fige le deck SUR LE ROUND des la preparation, et que
+    # open_vote ne l'ecrase plus s'il est deja fige, effacer ici ferait
+    # perdre au round son type au reset : le rouvrir lui donnerait alors le
+    # deck ACTIF courant de la room — celui d'un AUTRE round prepare entre
+    # temps — au lieu du sien. Un round garde son type pour toute sa vie ;
+    # le changer explicitement passe par select_deck / prepare_round.
     rnd.opened_at = None
     rnd.revealed_at = None
     rnd.vote_deadline = None
-    rnd.save(update_fields=["deck_snapshot", "state", "opened_at", "revealed_at", "vote_deadline"])
+    rnd.save(update_fields=["state", "opened_at", "revealed_at", "vote_deadline"])
     room.touch()
     return "idle"
 

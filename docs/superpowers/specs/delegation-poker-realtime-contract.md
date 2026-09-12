@@ -339,6 +339,32 @@ Un bloc `itemResults[]` n'émet jamais `votes` sur un round anonyme — l'invari
 
 ---
 
+## 8.3 `round.configure` — config par round (5c)
+
+> Ajoute 2026-09-12, livraison 5c (`.superpowers/sdd/2026-09-12-5c-type-par-round/`).
+> Le registre d'activites (`realtime/activities.py::ActivitySpec.config_schema`)
+> sait desormais valider une config par round ; `round.configure` ouvre ce
+> reglage sur le contrat WS, separement d'un `round.prepare` complet — utile
+> pour ne toucher qu'au deck, ou qu'a la config, sans repasser par le sujet.
+
+Entrant (facilitateur seul, comme les autres intentions de controle) :
+
+| `type` | `payload` | Effet |
+|--------|-----------|-------|
+| `round.configure` | `{ roundId, deckId?, config? }` | Fige la config (et, en option, le deck) d'un round encore `idle`. `deckId` et `config` sont tous deux optionnels : configurer sans changer de deck fonctionne, changer de deck sans configuration aussi. `config` est valide contre le `config_schema` de l'activite du deck en jeu (`realtime/activities.py::validate_config`) ; une cle inconnue ou un type errone est refuse. Refuse si le round n'existe pas ou n'est plus `idle` (`error` `state.invalid_transition`, `rejectedType: "round.configure"`). |
+
+Sortant (tous) :
+
+| `type` | `payload` | Emis apres |
+|--------|-----------|------------|
+| `round.configured` | `{ roundId, deckSnapshot, config }` | `round.configure`, toujours. |
+| `deck.changed` (§5) | `{ deckSnapshot }` | `round.configure`, **seulement si `deckId` a ete fourni** — meme fait que celui deja diffuse par `deck.select`/`round.prepare` (§5), pour que les clients actuels n'aient pas de nouveau gestionnaire a ecrire pour suivre un changement de deck. |
+
+`round.configure` ne touche pas au sujet ni aux items : contrairement a `round.prepare`,
+il ne cree ni ne selectionne aucun round — `roundId` doit deja exister et etre `idle`.
+
+---
+
 ## 9. Hors périmètre (Phase 1)
 
 - ~~❌ `facilitator.transfer` **volontaire** (Phase 2)~~ — **implémenté** : l'intention WS

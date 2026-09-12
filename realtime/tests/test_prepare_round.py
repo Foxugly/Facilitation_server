@@ -9,6 +9,7 @@ applies every detail against it.
 import pytest
 from django.contrib.auth import get_user_model
 
+from decks.models import Deck
 from decks.seed import create_standard_deck
 from realtime import services
 from realtime.services import RoomError
@@ -32,6 +33,35 @@ def _fresh_room(team=None):
     fac = Participant.objects.create(room=room, token=generate_token(), display_name="Sam", role=Role.FACILITATOR)
     voter = Participant.objects.create(room=room, token=generate_token(), display_name="Alex", role=Role.VOTER)
     return room, fac, voter
+
+
+def _second_deck(vote_type):
+    """Un second deck jouable, une seule carte suffit a distinguer les
+    snapshots (meme helper que `test_round_type.py`)."""
+    deck = Deck.objects.create(vote_type=vote_type, is_standard=False, card_back_image="decks/backs/b.webp")
+    deck.set_current_language("en")
+    deck.name = "Fibonacci"
+    deck.save()
+    deck.cards.create(value="13", slug="thirteen", order=1, background_image="decks/cards/13.webp")
+    return deck
+
+
+def _fresh_room_with_two_decks(team=None):
+    """Comme `_fresh_room`, mais la room peut basculer vers un second deck —
+    necessaire pour observer une ecriture de deck partiellement appliquee."""
+    standard = create_standard_deck()
+    other = _second_deck(standard.vote_type)
+    snapshots = [build_deck_snapshot(standard), build_deck_snapshot(other)]
+    code = generate_unique_code(lambda c: Room.objects.filter(code=c).exists())
+    room = Room(
+        code=code, vote_type=standard.vote_type, deck_snapshot=snapshots[0],
+        deck_snapshots=snapshots, team=team,
+    )
+    room.touch(save=False)
+    room.save()
+    fac = Participant.objects.create(room=room, token=generate_token(), display_name="Sam", role=Role.FACILITATOR)
+    voter = Participant.objects.create(room=room, token=generate_token(), display_name="Alex", role=Role.VOTER)
+    return room, fac, voter, standard, other
 
 
 @pytest.fixture
@@ -122,6 +152,31 @@ def test_prepare_by_subject_id_selects_a_queued_subject(db):
 
     assert summary["subject"] == "Second"
     assert services._current_round(room).id == second_round_id
+
+
+@pytest.mark.django_db
+def test_prepare_round_rejects_atomically_leaving_deck_unchanged(db):
+    """Un appel qui change de deck ET porte un reglage refuse (l'anonymat sur
+    une room gratuite) ne doit RIEN laisser ecrit, deck compris : `deck_id`
+    est applique avant `anonymous` dans le corps de `prepare_round`, donc sans
+    transaction le deck de la room aurait deja bascule vers `other` quand
+    `set_reveal_mode` leve.
+
+    Verifie par mutation : retirer `@transaction.atomic` sur `prepare_round`
+    fait echouer ce test (le deck de la room passe a `other` malgre le
+    refus, et le round cree par `subject_text` survit). Voir le rapport de
+    tache pour la trace."""
+    room, fac, voter, standard, other = _fresh_room_with_two_decks()  # pas de team = room gratuite
+
+    with pytest.raises(RoomError) as exc:
+        services.prepare_round(room, fac, subject_text="X", deck_id=other.pk, anonymous=True)
+    assert exc.value.code == "forbidden.subscription_required"
+
+    room.refresh_from_db(fields=["deck_snapshot"])
+    assert room.deck_snapshot["deckId"] == standard.pk
+    # "Aucune ecriture" veut dire aucune : le round cree par `subject_text`
+    # avant le rejet ne doit pas non plus survivre.
+    assert not room.rounds.exists()
 
 
 @pytest.mark.django_db
