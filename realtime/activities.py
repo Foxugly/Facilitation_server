@@ -125,6 +125,18 @@ class ActivitySpec:
     #: prudent que `consumes`.
     produces: str = "none"
 
+    #: Un `Result` de cette activite porte-t-il un ORDRE exploitable pour un
+    #: chainage "top N" (design 2026-09-11 §7) ? Signature :
+    #: (Result) -> une cle triable, PLUS GRANDE = PLUS prioritaire. `None` (le
+    #: defaut) veut dire "aucun classement" -- `bind_round` (services.py) doit
+    #: alors REFUSER un `source_rule.top` non nul A LA DECLARATION, pas
+    #: silencieusement l'ignorer au demarrage du round consommateur. Aucune
+    #: activite du registre actuel (`delegation_v1`, `fist_of_five_v1`) n'en
+    #: fournit : un niveau de delegation ou un score fist-of-five est un
+    #: CONSENSUS par item, pas un ordre ENTRE items -- ce sera le rapport d'une
+    #: future activite de type Dot Voting / Weighted Ranking, pas du code ici.
+    rank_value: Callable[[object], object] | None = field(default=None)
+
     def __post_init__(self):
         if self.aggregate is None:
             object.__setattr__(self, "aggregate", _default_aggregate(self.ordinal))
