@@ -39,7 +39,7 @@ gunicorn/WSGI, parce que Channels l'exige. La brique temps réel est isolée dan
 | `Room` | l'atelier / la réunion. Persiste sur toute la séance. | existe |
 | `Round` | une activité lancée dans la room. | **existe** (ex-`VoteSession`, migration 0009) |
 | `Item` | un sujet manipulé par une activité. | **existe** (migrations 0010-0012) |
-| `Response` | la contribution d'un participant à un round. | **à renommer depuis `Vote`** |
+| `Response` | la contribution d'un participant à un item. | **existe** (ex-`Vote`, migrations 0013-0016) |
 
 **Le mot « Session » est banni du domaine.** Il entrait en collision frontale avec l'ancien
 `VoteSession`. Ne jamais l'introduire, même en commentaire. Le code en est désormais purgé
@@ -47,7 +47,7 @@ gunicorn/WSGI, parce que Channels l'exige. La brique temps réel est isolée dan
 message WebSocket `session.join`, qui appartient au contrat (§4) et dont le renommage
 casserait `Facilitation_frontend`. Le renommer suppose de livrer les deux dépôts ensemble.
 
-**Convention :** les attributs de modèle s'appellent `round` (`Vote.round`, `Result.round`,
+**Convention :** les attributs de modèle s'appellent `round` (`Response.round`, `Result.round`,
 `Room.current_round`), mais les **variables locales s'appellent `rnd`** — `round` masquerait
 le builtin Python, que `services.set_timer` utilise réellement.
 
@@ -71,7 +71,7 @@ py -m venv .venv
 ```
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 258 passed
+.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 284 passed
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py # un fichier
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py::test_nom -x
 .\.venv\Scripts\python.exe -m pytest -k "reveal and not deck"
@@ -138,18 +138,22 @@ la room passe par le WS.
 `rooms.api_urls` est monté à la racine de `api/v1/` et **doit rester en dernier** dans
 `config/urls.py`, sinon il avale `auth/`, `teams/`, `decks/`… (le fichier le dit en commentaire).
 
-## Trois couches dans la brique temps réel
+## Quatre couches dans la brique temps réel
 
 1. `realtime/consumers.py` — `RoomConsumer`, mince. Valide l'enveloppe versionnée
    (`v == PROTOCOL_VERSION`, `type`, `payload`, `cid`), dispatche, et **rediffuse le fait**.
    Chaque appel domaine est enrobé dans `database_sync_to_async`. Les tâches de révélation à
    échéance vivent dans un dict `_timer_tasks` **au niveau du module**, pas sur l'instance :
    elles doivent survivre à la déconnexion du client qui a ouvert le vote.
-2. `realtime/services.py` (675 lignes, le vrai cœur) — logique de domaine **synchrone et
+2. `realtime/services.py` (882 lignes, le vrai cœur) — logique de domaine **synchrone et
    pauvre en framework** : machine à états, autorité, décomptes, `build_state_sync`. Gardée
    sync pour être testable sans socket. Un coup illégal lève
    `RoomError(code, message, rejected_type)` au lieu de s'appliquer.
-3. `rooms/models.py` — persistance.
+3. `realtime/activities.py` — registre d'activités embryonnaire (`ActivitySpec` : schéma de
+   payload, agrégateur, valeur jouable, par `resolution_strategy`). `services.py` route déjà
+   dessus (`cast_response`, `revealed_payload`), mais le registre ne porte pas encore tout ce
+   que la cible prévoit (`config_schema`, `produces`/`consumes`, `items_authored_by` — 5c).
+4. `rooms/models.py` — persistance.
 
 Le serveur fait autorité : les clients émettent des **intentions**, le serveur valide et
 diffuse le **fait**. Les intentions de contrôle passent par `_require_facilitator`. Les
@@ -184,12 +188,14 @@ les managers des équipes qu'il possède.
 ## Comportement routé par `resolution_strategy`
 
 Principe P1 de la spec : *la DB décrit un type de vote, le code décide du comportement.*
-`ORDINAL_RESOLUTION_STRATEGIES` dans `services.py` conditionne l'écart min/max — un deck non
-ordinal (vote romain, fist-of-five) renvoie `{min: None, max: None}` au lieu de calculer un
-« 0 – 0 » de faux consensus à partir des seules valeurs qui passent `isdigit()`.
+`realtime/activities.py::ACTIVITY_REGISTRY` (clé = `VoteType.resolution_strategy`) déclare,
+par `ActivitySpec`, le drapeau `ordinal` qui conditionne l'écart min/max — un deck non ordinal
+(vote romain, fist-of-five) renvoie `{min: None, max: None}` au lieu de calculer un « 0 – 0 »
+de faux consensus à partir des seules valeurs qui passent `isdigit()`. Une stratégie absente du
+registre retombe sur `DEFAULT_SPEC` (non ordinal, prudent).
 
-C'est ce registre embryonnaire qui rend la cible atteignable : **Planning Poker sera un
-`VoteType` et un deck Fibonacci, pas du nouveau code.**
+C'est ce registre qui rend la cible atteignable : **Planning Poker sera un `VoteType` et un
+deck Fibonacci, pas du nouveau code.**
 
 ## Deux sens différents du mot « rôle »
 
@@ -347,12 +353,18 @@ facilitateur puisse reformuler un sujet sans réécrire l'historique de l'activi
 3. **Extraire le poker** de `room.component` en première activité. Rendu identique, donc
    vérifiable à l'œil.
 4. **Registre d'activités**, back et front.
-5. **N items par round**, désormais un programme en cinq livraisons **5a → 5e**, détaillé
-   dans `docs/superpowers/specs/2026-09-11-scenario-et-items-design.md` (conception) et
-   `docs/superpowers/plans/2026-09-11-5a-items-du-round.md` (plan). **5a est faite** :
-   `Round.items` (migrations 0010-0012), les intentions `item.*` + `round.select`, et
-   `items`/`round` dans `state.sync` (contrat §8.1). Les alias `subject.*`/`agenda.updated`
-   restent en service et meurent en 5b. **Additif** : le poker garde ses champs actuels.
+5. **N items par round**, un programme en cinq livraisons **5a → 5e**, détaillé dans
+   `docs/superpowers/specs/2026-09-11-scenario-et-items-design.md` (conception, §8 marque
+   l'avancement) et `docs/superpowers/plans/2026-09-11-5a-items-du-round.md` /
+   `.superpowers/sdd/2026-09-11-5b-responses/` (plan et exécution). **5a et 5b sont faites** :
+   - **5a** : `Round.items` (migrations 0010-0012), les intentions `item.*` + `round.select`
+     + `round.add`, `items`/`round` dans `state.sync` (contrat §8.1).
+   - **5b** : `Vote` → `Response` (migrations 0013-0016), `payload` JSON par item, contrainte
+     d'unicité `(item, participant)`, `response.cast`, agrégation par item déportée dans
+     `realtime/activities.py` (registre d'activités). Les alias hérités (`subject.*`,
+     `vote.cast`, `myVote`, clés plates `tally`/`spread`/`votes`) ont tous été retirés une fois
+     la bascule de `Facilitation_frontend` vérifiée en production (contrat §8.1.b/§8.2.b).
+   **5c, 5d et 5e n'ont pas démarré.** **Additif** : le poker garde ses champs actuels.
 6. **Dot Voting** — première activité neuve. Choisie avant Weighted Ranking parce qu'elle
    exerce le modèle N-items sans le risque du drag & drop tactile.
 
@@ -361,7 +373,7 @@ Weighted Ranking, QCM/Poll, ROTI.
 
 ## Règles de travail
 
-- **`pytest` vert à chaque commit.** Référence actuelle : 258 passed.
+- **`pytest` vert à chaque commit.** Référence actuelle : 284 passed.
 - Le poker existant doit continuer à fonctionner **à chaque étape**. Aucune étape ne livre
   une régression « qu'on corrigera après ».
 - Étapes petites et testables. Pas de réécriture de masse.
@@ -374,16 +386,20 @@ Weighted Ranking, QCM/Poll, ROTI.
 
 À vérifier avant de citer une ligne « Cible » comme un fait :
 
-- **Le WS écrit aujourd'hui.** `RoomConsumer` reçoit des intentions (`vote.cast`,
-  `subject.set`, `round.prepare`…) et écrit en base via `services`. La cible « le WS diffuse
+- **Le WS écrit aujourd'hui.** `RoomConsumer` reçoit des intentions (`response.cast`,
+  `item.add`, `round.prepare`…) et écrit en base via `services`. La cible « le WS diffuse
   uniquement, toutes les écritures passent par REST » est une **refonte à faire**, pas une
   description. L'API REST actuelle se limite à créer / rejoindre une room.
 - **DRF uniquement.** Aucune trace de Django Ninja dans le dépôt ; ne pas l'introduire sans
   décision explicite.
 - **`Room.owner`, `can_facilitate`, `can_administer`, `facilitator_live_view`
   n'existent pas.** Seul `Team.owner` existe. L'autorité en room passe aujourd'hui par
-  `rooms.Role.FACILITATOR` + `_require_facilitator`. `origin_item` **existe** (`Item.origin_item`,
-  migration 0010) mais est **inutilisé jusqu'en 5e** (chaînage entre activités).
+  `rooms.Role.FACILITATOR` + `_require_facilitator`. `origin_item` **existe et est déjà
+  utilisé** (`services._replay_round` : reprendre un round acté du scénario crée une copie de
+  ses items, `origin_item` pointant l'original) — mais seulement pour rejouer un round de la
+  **même** activité dans le scénario du poker. Le chaînage inter-activités visé par 5e
+  (`source_round`/`source_rule`, résolution en copie depuis la sortie d'une AUTRE activité)
+  n'existe pas encore.
 - **`reveal_on_timeout` révèle automatiquement**, alors que la cible veut un reveal manuel.
 - **CLOSED n'existe pas** dans `RoundState`.
 
@@ -477,6 +493,30 @@ Weighted Ranking, QCM/Poll, ROTI.
 - **Valider les migrations sur PostgreSQL.** Le dev local est en sqlite ; les violations
   NOT NULL / unique que sqlite laisse passer casseront en prod. La CI teste bien sur Postgres
   (délibérément) — faire confiance à la CI plutôt qu'à un pytest local vert.
+- **Une migration qui écrit des données ET modifie le schéma dans la MÊME transaction peut
+  passer sur sqlite et casser sur PostgreSQL.** Rencontré pendant 5b :
+  `0014_votes_to_responses` transvasait les votes en réponses via `RunPython`, et la migration
+  suivante voulait faire basculer la contrainte d'unicité de `Response` de
+  `(round, participant)` vers `(item, participant)` dans la foulée. La CI a échoué sur
+  PostgreSQL avec `cannot ALTER TABLE "rooms_response" because it has pending trigger events` —
+  sqlite ne connaît pas cette contrainte, donc la suite locale restait verte pendant que la CI
+  (PostgreSQL 16) rejetait le push. Correctif : scinder en deux migrations, chacune dans sa
+  propre transaction — `0014` (RunPython, données) se valide avant que `0015`
+  (`response_item_participant`, schéma) n'ouvre la sienne. Réflexe pour toute prochaine
+  migration de données suivie d'un changement de contrainte/colonne sur la même table : les
+  séparer par défaut, sqlite ne préviendra pas.
+- **Retirer un alias du contrat WS suppose de vérifier, DANS LE DÉPÔT `Facilitation_frontend`,
+  qu'il n'est plus émis — pas seulement de l'avoir prévu dans un plan.** Le plan 5b prévoyait
+  de retirer `subject.set`/`subject.add`/`subject.select` en même temps que `vote.cast`
+  (commit `9dc26ab`). Retrait annulé en urgence dans la foulée (`e4cc1e9`) une fois constaté
+  que `Facilitation_frontend` (`room-socket.service.ts`) émettait toujours les trois — la
+  bascule du front sur `item.*`/`round.select` planifiée en 5a n'avait en réalité jamais eu
+  lieu, contrairement à ce que le plan supposait. Sans cette vérification, le déploiement
+  aurait cassé la pose de sujet, l'ajout à la file et la sélection d'agenda **en production**.
+  Le retrait effectif n'a eu lieu que trois déploiements plus tard (`4216152`), après une
+  relecture confirmant que le front déployé n'émettait plus que la forme moderne. Réflexe :
+  un plan qui affirme « le front a basculé » n'est une preuve de rien — grep (ou lire en prod)
+  le dépôt frontend réellement déployé avant de retirer un alias.
 - Index Redis : la prod utilise `redis://127.0.0.1:6379/3` sur une box partagée.
 - `ROOM_MAX_PARTICIPANTS` (15) est une limite de **lisibilité** — les cartes tombent à ~61px
   à 15 sièges autour de l'ovale. Figée sur `Room.max_participants` à la création, tout comme

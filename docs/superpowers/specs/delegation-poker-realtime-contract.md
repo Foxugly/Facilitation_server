@@ -77,7 +77,7 @@ Tous les messages (deux sens) partagent une enveloppe **versionnée** :
 | `vote.open` | facilitateur | `{ }` | Ouvre le tour (`idle → open`). Refusé si pas de sujet. |
 | `vote.reveal` | facilitateur | `{ }` | `open → revealed`. Autorisé dès **≥ 1 vote** (pas de quorum). |
 | `result.act` | facilitateur | `{ chosenValue }` | `revealed → acted`. Fige le résultat retenu (défaut proposé = mode/médiane, modifiable). |
-| `vote.reset` | facilitateur | `{ }` | Efface les votes du tour → `idle` (si nouveau sujet à saisir) ou `open`. |
+| `vote.reset` | facilitateur | `{ }` | Efface les réponses du round courant, le remet à `idle`. |
 | `facilitator.claim` | tout participant présent | `{ }` | **Uniquement** si le garde-fou est actif (§6.f). Premier arrivé = nouveau facilitateur. |
 
 > Cette table date de la Phase 1 (2026-07-07) et décrivait aussi `subject.set` et
@@ -102,7 +102,7 @@ Toute intention **incohérente avec l'état courant** (ex. `response.cast` hors 
 | `vote.opened` | tous | `{ }` (état → `open`) |
 | `vote.revealed` | tous | `{ itemResults: [...] }` (§8.2.a) — décompte **par item**, jamais de lien participant → carte sur un round anonyme. Seules les valeurs ayant ≥ 1 voix figurent, dans l'ordre du deck. Porte aussi `reason: "timeout" \| "facilitator"`. |
 | `result.acted` | tous | `{ chosenValue }` (état → `acted`) |
-| `vote.wasReset` | tous | `{ nextState: "idle" \| "open" }` |
+| `vote.wasReset` | tous | `{ nextState: "idle" }` |
 | `facilitator.changed` | tous | `{ newFacilitatorId }` |
 | `error` | 1 client | `{ code, message, rejectedType, cid }` (§7) |
 
@@ -112,24 +112,43 @@ Envoyé à un seul client (au `join` initial, à la reconnexion, à l'arrivée d
 
 ```json
 {
-  "room": { "code": "K7RM4P", "title": "Sprint retro" },
+  "room": { "code": "K7RM4P", "title": "Sprint retro", "isTeam": false },
   "protocolVersion": 1,
   "roundState": "open",
   "subject": "Qui décide du budget outillage ?",
   "deckSnapshot": { "voteType": "delegation_poker", "cards": [ /* … calques + trad */ ] },
+  "availableDecks": [ { "deckId": 3, "voteType": "delegation_poker", "cardBack": { /* … */ } } ],
   "participants": [
     { "participantId": "p-1", "username": "Sam", "role": "facilitator", "hasVoted": true },
     { "participantId": "p-2", "username": "Alex", "role": "voter", "hasVoted": false }
   ],
+  "myRole": "voter",
+  "myParticipantId": "p-2",
+  "resultLayout": "cards",
   "myResponses": { "42": { "card": "consult" } },
   "result": null,
-  "facilitatorPresent": true
+  "facilitatorPresent": true,
+  "agenda": [ { "id": 12, "text": "Qui décide du budget outillage ?", "status": "current", "result": null, "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ] } ],
+  "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ],
+  "round": { "id": 12, "state": "open" },
+  "deadline": null,
+  "timer": { "enabled": false, "seconds": 10 },
+  "reveal": { "anonymous": false, "canAnonymise": false }
 }
 ```
 
-- `myResponses` = **les réponses du seul client destinataire**, indexées par id d'item (les autres restent secrètes tant que `roundState !== "revealed"`). L'ancienne clé `myVote` (le vote du premier item seul) est retirée en fin de 5b (§8.2.b) — voir §8.2.a.
-- Si `roundState === "revealed"`, `state.sync` inclut aussi `itemResults` (§8.2.a) — un retardataire qui arrive en `revealed` **voit les résultats**, et votera au tour suivant. Comme `vote.revealed`, il s'agit d'un décompte qui respecte l'anonymat : jamais de lien participant → carte sur un round anonyme.
+Champ par champ (`realtime/services.py::build_state_sync`) :
+
+- `myResponses` = **les réponses du seul client destinataire**, indexées par id d'item (les autres restent secrètes tant que `roundState` n'est ni `revealed` ni `acted`). L'ancienne clé `myVote` (le vote du premier item seul) est retirée en fin de 5b (§8.2.b) — voir §8.2.a.
+- Si `roundState === "revealed"` **ou `"acted"`**, `state.sync` inclut aussi `itemResults` (§8.2.a) — un retardataire qui arrive après la révélation **voit les résultats** (le client traite `revealed` et `acted` comme un seul état d'affichage), et votera au tour suivant. Comme `vote.revealed`, il s'agit d'un décompte qui respecte l'anonymat : jamais de lien participant → carte sur un round anonyme.
 - **Depuis 5a** (§8.1), `state.sync` porte aussi `items` — la liste des items du round courant, même forme que dans les faits `item.*` (`[{id, text, sequence}]`) — et `round` — `{id, state}` du round courant (`id: null` si aucun round actif). `subject` reste émis en doublon (le texte du premier item) : aucune date n'est fixée pour son retrait — c'est une clé de `state.sync`, distincte des anciennes intentions entrantes `subject.set`/`subject.add`/`subject.select` (§8.1.b), retirées en 5b.
+- `room.isTeam` (`room.team_id is not None`) pilote le gating client de certaines options (le timer, notamment, est réservé aux salles d'équipe) ; le serveur reste de toute façon autoritaire côté validation.
+- `myRole` et `myParticipantId` sont le rôle et l'identifiant **du destinataire**, renvoyés par le serveur — jamais déduits d'un état client persisté : une promotion facilitateur doit se voir immédiatement chez le facilitateur lui-même, pas seulement chez les autres.
+- `resultLayout` fige la mise en page du dépouillement pour la salle (choisie par l'équipe à la création) : le client y adapte l'affichage dès la révélation.
+- `availableDecks` liste le catalogue de decks jouables par cette salle (léger : pas les cartes), pour un sélecteur de deck côté facilitateur.
+- `agenda` porte le scénario — chaque round de la salle, son état et, s'il a été acté, la valeur retenue et ses items.
+- `deadline` est l'échéance ISO du round `open` courant (`null` sinon) ; `timer` porte le réglage courant de la salle (`enabled`, `seconds`).
+- `reveal.anonymous` annonce le mode de révélation du round courant **avant que les votants ne répondent** ; `reveal.canAnonymise` dit si la salle (équipe payante) a le droit de basculer en anonyme.
 
 ---
 
