@@ -54,6 +54,23 @@ def subjects_to_items(apps):
         result.save(update_fields=["item"])
 
 
+def backfill_round_sequence(apps):
+    """Numerote les rounds existants dans l'ordre ou ils ont ete crees, PAR
+    SALLE (tache 1, design 2026-09-12).
+
+    Compteur par salle et non global : un compteur global donnerait, a la
+    seconde salle venue, des sequences qui continuent celles de la premiere
+    (4, 5, ...) au lieu de repartir a 1 -- sans rapport avec la position du
+    round DANS SA salle, qui est ce que `build_agenda` doit exprimer.
+    """
+    Room = apps.get_model("rooms", "Room")
+
+    for room in Room.objects.all():
+        for position, rnd in enumerate(room.rounds.all().order_by("created_at", "id"), start=1):
+            rnd.sequence = position
+            rnd.save(update_fields=["sequence"])
+
+
 def votes_to_responses(apps):
     """Rattache chaque reponse a l'item de son round et transpose sa valeur de
     carte en payload (design section 3).

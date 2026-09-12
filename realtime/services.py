@@ -172,8 +172,11 @@ def items_payload(rnd):
 
 def _new_round(room, participant, text):
     """Un round neuf portant un premier item. Le scenario est une file de rounds :
-    poser un nouveau sujet, c'est ouvrir un round de plus."""
-    rnd = Round.objects.create(room=room, state=RoundState.IDLE, facilitator=participant)
+    poser un nouveau sujet, c'est ouvrir un round de plus, a la suite de la file
+    existante (tache 1) -- jamais a la place d'un round present."""
+    rnd = Round.objects.create(
+        room=room, state=RoundState.IDLE, facilitator=participant, sequence=room.rounds.count() + 1
+    )
     Item.objects.create(round=rnd, text=text, sequence=1)
     return rnd
 
@@ -324,7 +327,7 @@ def build_agenda(room):
     """
     current_id = room.current_round_id
     out = []
-    for rnd in room.rounds.all().order_by("created_at", "id").prefetch_related("items", "results"):
+    for rnd in room.rounds.all().order_by("sequence", "id").prefetch_related("items", "results"):
         first = rnd.items.first()
         # Le filtre d'etat n'est pas decoratif : `vote.reset` remet le round a IDLE
         # en LAISSANT son Result en place. Sans lui, un round reinitialise
@@ -359,11 +362,16 @@ def _replay_round(room, participant, source):
     sans choix explicite, jamais ouverte), `source.deck_snapshot` est deja None :
     on ne fige alors rien de plus que ce que la source avait elle-meme, et le
     round neuf herite du deck actif a l'ouverture, comme aujourd'hui.
+
+    La SEQUENCE, elle, ne suit PAS la source (tache 1) : un rejeu se place a la
+    fin de la file de la salle, il ne s'insere pas a la place du round qu'il
+    rejoue.
     """
     rnd = Round.objects.create(
         room=room,
         state=RoundState.IDLE,
         facilitator=participant,
+        sequence=room.rounds.count() + 1,
         deck_snapshot=source.deck_snapshot,
         # dict(...) : une copie, pas la meme reference — la source et le rejeu
         # ne doivent jamais partager un objet mutable en memoire.
