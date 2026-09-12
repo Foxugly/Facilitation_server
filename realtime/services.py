@@ -103,6 +103,14 @@ def current_round(room):
 
 
 def _is_facilitator(room, participant):
+    # Compare par PK (`participant.id`), donc suppose `participant` persistant
+    # (un PK non-None). Vrai de tout `Participant` recu du consumer (resolu par
+    # `resolve_participant`, toujours charge depuis la DB) -- mais un futur
+    # appelant qui passerait une instance non sauvegardee casserait la garde en
+    # silence (`None == None`). `assert` plutot que lever : c'est un bug
+    # d'appelant a corriger avant merge, pas une entree utilisateur a refuser
+    # proprement.
+    assert participant.id is not None, "participant non persistant"
     rnd = current_round(room)
     # Authority is the round facilitator; before any round exists, the room's
     # sole facilitator participant holds it (contract §2).
@@ -128,12 +136,22 @@ def _require_item_author(room, participant, item, rejected_type):
     sans auteur ne redevient modifiable par AUCUN participant ordinaire — une
     regle deliberee, pas un hasard du SET_NULL : un depart de salle ne doit pas
     se traduire par une ouverture de l'ecriture a tous.
+
+    Deux refus distincts, deux codes distincts (correction ronde 1) : sous une
+    activite facilitateur-seul, un participant ordinaire n'a jamais pretendu
+    faciliter -- `forbidden.not_facilitator` reste exact. Sous une activite
+    "participants", il EST autorise a creer/editer/supprimer, juste pas CET
+    item -- le confondre avec un refus d'autorite (`forbidden.not_facilitator`,
+    message « Not the facilitator ») serait factuellement faux et
+    indistinguable, cote front, d'un vrai refus de role.
     """
     if _is_facilitator(room, participant):
         return
     strategy = _round_resolution_strategy(item.round, room)
-    if spec_for(strategy).items_authored_by == "participants" and item.author_id == participant.id:
-        return
+    if spec_for(strategy).items_authored_by == "participants":
+        if item.author_id == participant.id:
+            return
+        raise RoomError("forbidden.not_item_author", "Not this item's author", rejected_type)
     raise RoomError("forbidden.not_facilitator", "Not the facilitator", rejected_type)
 
 
@@ -270,6 +288,16 @@ def remove_item(room, participant, item_id):
 
 
 def reorder_items(room, participant, item_ids):
+    # Arbitrage ronde 1 : `reorder_items` reste FACILITATEUR SEUL, meme sous
+    # `items_authored_by = "participants"` -- volontairement non couvert par
+    # `_require_item_author`. Creer/editer/supprimer portent sur la
+    # contribution PROPRE d'un participant ; reordonner porte sur la LISTE
+    # ENTIERE du round, items des autres compris -- c'est un geste de
+    # facilitation (ranger un tableau), pas un droit d'auteur. Laisser un
+    # participant reordonner lui permettrait de faire remonter son propre
+    # post-it en deplacant ceux des autres, ce que l'activite ne doit pas
+    # autoriser. Voir le test
+    # `test_a_voter_cannot_reorder_items_even_when_they_may_add_their_own`.
     _require_facilitator(room, participant, "item.reorder")
     rnd = current_round(room)
     known = {i.id: i for i in (rnd.items.all() if rnd else [])}

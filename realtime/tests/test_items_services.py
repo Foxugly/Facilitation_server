@@ -49,7 +49,15 @@ def test_add_item_puts_n_items_on_the_same_round(room_with_facilitator):
 @pytest.mark.django_db
 def test_a_voter_may_not_add_an_item_to_a_poker_round(room_with_facilitator):
     """En 5a la creation d'items reste facilitateur seul. Le registre ouvrira la
-    porte aux participants en 5c (`items_authored_by`)."""
+    porte aux participants en 5c (`items_authored_by`).
+
+    Verifie par mutation (correction ronde 1, trace dans le rapport de tache) :
+    remplacer dans `add_item` la condition
+    `spec_for(strategy).items_authored_by != "participants" and not is_facilitator`
+    par `False` (le filtre du registre neutralise, donc plus aucune garde sur
+    QUI peut poser un item) fait PASSER silencieusement l'appel ci-dessous — ce
+    test echoue alors sur `pytest.raises` (`DID NOT RAISE`). Remettre la
+    condition le fait a nouveau passer."""
     room, fac, voter = room_with_facilitator
     services.set_current_item(room, fac, "Budget ?")
 
@@ -266,11 +274,15 @@ def test_a_voter_may_not_edit_or_remove_anothers_item(
     with pytest.raises(RoomError) as exc:
         services.update_item(room, other, theirs["id"], "Je modifie Alex")
     assert exc.value.rejected_type == "item.update"
+    # Code distinct de "forbidden.not_facilitator" (correction ronde 1) : `other`
+    # n'a jamais pretendu faciliter, son refus porte sur la propriete de l'item.
+    assert exc.value.code == "forbidden.not_item_author"
     assert Item.objects.get(id=theirs["id"]).text == "Post-it de Alex"
 
     with pytest.raises(RoomError) as exc:
         services.remove_item(room, other, theirs["id"])
     assert exc.value.rejected_type == "item.remove"
+    assert exc.value.code == "forbidden.not_item_author"
     assert Item.objects.filter(id=theirs["id"]).exists()
 
 
@@ -313,6 +325,7 @@ def test_an_item_without_an_author_is_not_editable_by_an_ordinary_participant(
     with pytest.raises(RoomError) as exc:
         services.update_item(room, other, orphan["id"], "Je recupere l'orphelin")
     assert exc.value.rejected_type == "item.update"
+    assert exc.value.code == "forbidden.not_item_author"
 
     services.update_item(room, fac, orphan["id"], "Le facilitateur, lui, peut")
     assert Item.objects.get(id=orphan["id"]).text == "Le facilitateur, lui, peut"
@@ -336,3 +349,33 @@ def test_a_voter_cannot_open_a_round_by_adding_the_first_item(
 
     assert exc.value.rejected_type == "item.add"
     assert services.current_round(room) is None
+
+
+@pytest.mark.django_db
+def test_a_voter_cannot_reorder_items_even_when_they_may_add_their_own(
+    room_with_facilitator, delegation_v1_authored_by_participants
+):
+    """Arbitrage ronde 1 (`services.reorder_items`) : creer et editer SA PROPRE
+    contribution ne donne pas le droit de reordonner LA LISTE ENTIERE du round.
+    Reordonner est un geste de facilitation (ranger un tableau), pas un droit
+    d'auteur — un participant qui deplacerait les post-its des autres pour
+    faire remonter le sien detournerait l'activite. `reorder_items` reste donc
+    facilitateur seul meme quand ce meme votant peut, dans le meme round,
+    ajouter et editer son propre item."""
+    room, fac, voter = room_with_facilitator
+    services.set_current_item(room, fac, "Budget ?")
+    mine = services.add_item(room, voter, "Mon post-it")
+    room.refresh_from_db()
+    rnd = services.current_round(room)
+    before = [i["id"] for i in services.items_payload(rnd)]
+
+    # Le meme votant peut creer ET editer son propre item (la politique ouvre
+    # bien l'ecriture) : ce n'est pas un probleme d'autorite generale.
+    services.update_item(room, voter, mine["id"], "Mon post-it corrige")
+
+    with pytest.raises(RoomError) as exc:
+        services.reorder_items(room, voter, list(reversed(before)))
+
+    assert exc.value.rejected_type == "item.reorder"
+    assert exc.value.code == "forbidden.not_facilitator"
+    assert [i["id"] for i in services.items_payload(rnd)] == before
