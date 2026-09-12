@@ -1,8 +1,8 @@
-"""`response.cast` dans le contrat WS, `vote.cast` en alias herite (contrat §8.2).
+"""`response.cast` dans le contrat WS (contrat §8.2).
 
 `response.cast` est ouvert a tous les participants (pas une intention de controle).
-`vote.cast` doit continuer a produire exactement les memes diffusions qu'avant 5b, pour
-que Facilitation_frontend (non modifie) continue de jouer pendant la fenetre.
+L'alias herite `vote.cast` et les cles plates de `vote.revealed` sont retires en fin
+de 5b (contrat §8.2.b) : `itemResults` est desormais la seule forme du decompte.
 """
 import pytest
 from channels.db import database_sync_to_async
@@ -54,27 +54,10 @@ async def test_response_cast_on_two_items_does_not_overwrite_either():
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_vote_cast_alias_produces_the_same_broadcast_as_before_5b():
-    code, fac_token, voter_token = await database_sync_to_async(_make_room)()
-    fac, _ = await _join(fac_token, code)
-    voter, _ = await _join(voter_token, code)
-
-    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Q1"}})
-    await _drain_until(fac, "item.added")
-    await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
-    await _drain_until(fac, "vote.opened")
-
-    await voter.send_json_to({"v": 1, "type": "vote.cast", "payload": {"cardValue": "4"}})
-    msg = await _drain_until(fac, "participation.update", pred=lambda p: p["voted"] == 1)
-
-    assert msg["payload"]["total"] == 2
-
-    await fac.disconnect()
-    await voter.disconnect()
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_vote_revealed_carries_item_results_and_flat_keys():
+async def test_vote_revealed_carries_item_results_only():
+    """`vote.revealed` ne porte plus que `itemResults` : les cles plates
+    (`tally`/`spread`/`votes` au premier niveau) et l'alias entrant `vote.cast`
+    sont retires en fin de 5b (contrat §8.2.b)."""
     code, fac_token, voter_token = await database_sync_to_async(_make_room)()
     fac, _ = await _join(fac_token, code)
     voter, _ = await _join(voter_token, code)
@@ -84,13 +67,16 @@ async def test_vote_revealed_carries_item_results_and_flat_keys():
     item_id = added["payload"]["itemId"]
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(fac, "vote.opened")
-    await voter.send_json_to({"v": 1, "type": "vote.cast", "payload": {"cardValue": "4"}})
+    await voter.send_json_to(
+        {"v": 1, "type": "response.cast", "payload": {"itemId": item_id, "payload": {"card": "4"}}}
+    )
     await _drain_until(fac, "participation.update", pred=lambda p: p["voted"] == 1)
 
     await fac.send_json_to({"v": 1, "type": "vote.reveal", "payload": {}})
     revealed = await _drain_until(fac, "vote.revealed")
     payload = revealed["payload"]
 
+    assert set(payload.keys()) == {"itemResults", "anonymous", "reason"}
     assert payload["itemResults"] == [
         {
             "itemId": item_id,
@@ -100,9 +86,6 @@ async def test_vote_revealed_carries_item_results_and_flat_keys():
             "votes": payload["itemResults"][0]["votes"],
         }
     ]
-    # Cles plates herites (contrat §8.2.b), recopiees du premier (et seul) bloc.
-    assert payload["tally"] == [{"cardValue": "4", "count": 1}]
-    assert payload["spread"] == {"min": 4, "max": 4}
     assert payload["reason"] == "facilitator"
 
     await fac.disconnect()

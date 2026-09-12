@@ -11,6 +11,7 @@ from decks.models import Deck
 from decks.seed import create_standard_deck
 from realtime import services
 from realtime.services import RoomError
+from realtime.tests.helpers import cast_first_item
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Item, Participant, Role, Room, RoundState, Round
 from rooms.snapshot import build_deck_snapshot
@@ -138,4 +139,4 @@ def test_vote_values_follow_the_round_deck_not_the_room(room_with_two_decks):
     services.open_vote(room, fac)  # freezes the standard deck (values "1".."7")
 
     with pytest.raises(RoomError):
-        services.cast_vote(room, voter, "13")  # only exists in the other deck
+        cast_first_item(room, voter, "13")  # only exists in the other deck

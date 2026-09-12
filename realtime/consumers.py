@@ -96,24 +96,8 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             self._cancel_timeout(room.code)
             await self._broadcast("vote.wasReset", {"nextState": "idle"})
             await self._broadcast("round.selected", {**out, "nextState": "idle"})
-            # Herite : le front d'aujourd'hui n'ecoute que ceux-la (alias, 5b).
             await self._broadcast("subject.updated", {"text": out["text"]})
             await self._broadcast_agenda(room)
-        # --- alias herites, supprimes en 5b -----------------------------
-        elif mtype == "subject.set":
-            # Alias herite : emet UNIQUEMENT subject.updated + agenda.updated, comme
-            # avant (Interfaces du brief task-4). Pas de item.updated ici : ce
-            # message en plus depasse la limite de 8 messages tolerable par
-            # _drain_until dans les tests existants du consumer.
-            text = await database_sync_to_async(services.set_current_item)(room, participant, payload.get("text", ""))
-            await self._broadcast("subject.updated", {"text": text})
-            await self._broadcast_agenda(room)
-        elif mtype == "subject.add":
-            await database_sync_to_async(services.add_scenario_item)(room, participant, payload.get("text", ""))
-            await self._broadcast_agenda(room)
-            await self._broadcast_current_item(room)
-        elif mtype == "subject.select":
-            return await self._dispatch("round.select", {"roundId": payload.get("subjectId")}, cid)
         elif mtype == "round.prepare":
             summary = await database_sync_to_async(services.prepare_round)(
                 room,
@@ -152,10 +136,6 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await database_sync_to_async(services.cast_response)(
                 room, participant, payload.get("itemId"), payload.get("payload") or {}
             )
-            await self._broadcast_participation(room)
-        # --- alias herite, supprime en fin de 5b (contrat §8.2.b) --------
-        elif mtype == "vote.cast":
-            await database_sync_to_async(services.cast_vote)(room, participant, payload.get("cardValue"))
             await self._broadcast_participation(room)
         elif mtype == "vote.reveal":
             await database_sync_to_async(services.reveal)(room, participant)

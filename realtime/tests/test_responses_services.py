@@ -2,9 +2,9 @@
 
 `cast_response` cible desormais un ITEM et non plus un round : un round peut
 porter plusieurs items, chacun avec sa propre Response par participant
-(contrainte `uniq_response_item_participant`). `cast_vote` reste une facade
-poker par-dessus, et `revealed_payload` porte un bloc par item tout en
-recopiant celui du premier dans ses cles plates historiques.
+(contrainte `uniq_response_item_participant`). `revealed_payload` porte un
+bloc par item ; les cles plates historiques (`tally`/`spread`/`votes`) et la
+facade `cast_vote` ont ete retirees en fin de 5b (contrat §8.2.b).
 """
 import pytest
 
@@ -49,7 +49,6 @@ def test_cast_response_writes_the_targeted_item_and_refuses_a_foreign_item():
 
     stored = Response.objects.get(item=item, participant=voter)
     assert stored.payload == {"card": "4"}
-    assert stored.card_value == "4"
 
 
 @pytest.mark.django_db
@@ -98,7 +97,7 @@ def test_cast_response_refuses_off_deck_card_and_off_schema_payload():
 
 
 @pytest.mark.django_db
-def test_revealed_payload_carries_a_block_per_item_and_mirrors_the_first_in_flat_keys():
+def test_revealed_payload_carries_a_block_per_item():
     room, fac, voter, rnd, item1 = _room()
     item2 = Item.objects.create(round=rnd, text="Budget", sequence=2)
     other_voter = Participant.objects.create(
@@ -112,6 +111,10 @@ def test_revealed_payload_carries_a_block_per_item_and_mirrors_the_first_in_flat
 
     payload = services.revealed_payload(room)
 
+    # Les cles plates historiques (tally/spread/votes au premier niveau) sont
+    # parties avec l'alias `vote.cast` en fin de 5b (contrat §8.2.b) : seul
+    # `itemResults` porte desormais le decompte.
+    assert set(payload.keys()) == {"itemResults", "anonymous"}
     assert [block["itemId"] for block in payload["itemResults"]] == [item1.id, item2.id]
     assert payload["itemResults"][0]["tally"] == [
         {"cardValue": "4", "count": 1},
@@ -119,21 +122,15 @@ def test_revealed_payload_carries_a_block_per_item_and_mirrors_the_first_in_flat
     ]
     assert payload["itemResults"][0]["spread"] == {"min": 4, "max": 6}
     assert payload["itemResults"][1]["tally"] == [{"cardValue": "2", "count": 1}]
-    # Cles plates historiques : recopiees du PREMIER item, pas un recalcul distinct.
-    assert payload["tally"] == payload["itemResults"][0]["tally"]
-    assert payload["spread"] == payload["itemResults"][0]["spread"]
 
 
 @pytest.mark.django_db
 def test_anonymous_round_hides_votes_on_every_item_block():
     """L'invariant d'anonymat doit tenir PAR ITEM : c'est le coeur de la tache 3.
 
-    La boucle par bloc est deliberement AVANT l'assertion sur la cle plate
-    `votes` : celle-ci est recopiee du premier bloc de `itemResults`, donc une
-    mutation qui reintroduit `votes` la fait, elle aussi, reapparaitre — si
-    l'assertion plate venait en premier, elle echouerait seule et la preuve
-    par item ne serait jamais exercee. Voir le round de correction 1 du
-    rapport pour la trace de la mutation qui a motive ce reordonnancement.
+    Depuis le retrait des cles plates historiques (fin 5b), `itemResults` est
+    la SEULE forme du decompte : plus de mirroir a cote qui pourrait, lui,
+    laisser fuiter `votes`.
 
     Verifie par mutation en developpant ce test : retirer la garde
     `if not anonymous` autour de `block["votes"] = ...` dans
@@ -156,7 +153,6 @@ def test_anonymous_round_hides_votes_on_every_item_block():
     assert len(payload["itemResults"]) == 2
     for block in payload["itemResults"]:
         assert "votes" not in block
-    assert "votes" not in payload
     assert payload["itemResults"][0]["tally"] == [{"cardValue": "4", "count": 1}]
     assert payload["itemResults"][1]["tally"] == [{"cardValue": "2", "count": 1}]
     # Ceinture et bretelles : l'identifiant du votant n'apparait nulle part.
@@ -164,7 +160,10 @@ def test_anonymous_round_hides_votes_on_every_item_block():
 
 
 @pytest.mark.django_db
-def test_build_state_sync_carries_my_responses_and_my_vote():
+def test_build_state_sync_carries_my_responses():
+    """`myVote` (la reponse du seul premier item) est parti avec les autres
+    formes plates en fin de 5b — `myResponses` porte desormais toutes les
+    reponses du participant, par item, seule forme du contrat."""
     room, fac, voter, rnd, item1 = _room()
     item2 = Item.objects.create(round=rnd, text="Budget", sequence=2)
     services.open_vote(room, fac)
@@ -173,7 +172,7 @@ def test_build_state_sync_carries_my_responses_and_my_vote():
 
     state = services.build_state_sync(voter)
 
-    assert state["myVote"] == "4"
+    assert "myVote" not in state
     assert state["myResponses"] == {
         str(item1.id): {"card": "4"},
         str(item2.id): {"card": "2"},

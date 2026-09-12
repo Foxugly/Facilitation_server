@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from realtime import services
 from realtime.services import RoomError
+from realtime.tests.helpers import cast_first_item
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Participant, Role, Room, RoundState
 from rooms.snapshot import build_deck_snapshot
@@ -115,7 +116,7 @@ def test_vote_after_deadline_is_refused(room_with_facilitator):
     rnd.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
     rnd.save(update_fields=["vote_deadline"])
     with pytest.raises(RoomError):
-        services.cast_vote(room, voter, "4")
+        cast_first_item(room, voter, "4")
 
 
 @pytest.mark.django_db
@@ -136,12 +137,12 @@ def test_select_subject_clears_stale_deadline_after_reveal(room_with_facilitator
     room, facilitator, voter = room_with_facilitator
     services.set_timer(room, facilitator, True, 30)
     services.set_current_item(room, facilitator, "Recrutement")
-    # L'alias `subject.select` designe desormais un ROUND (design 2026-09-11 §5) :
+    # `select_round` (ex-`select_subject`) designe un ROUND (design 2026-09-11 §5) :
     # l'id a reprendre est celui du round courant.
     round_id = services._current_round(room).id
     services.open_vote(room, facilitator)
     assert services._current_round(room).vote_deadline is not None
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, voter, "4")
     services.reveal(room, facilitator)
 
     services.select_round(room, facilitator, round_id)
@@ -171,7 +172,7 @@ def test_reveal_on_timeout_reveals_when_deadline_passed(room_with_facilitator):
     services.set_timer(room, facilitator, True, 30)
     services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, voter, "4")
     rnd = services._current_round(room)
     rnd.vote_deadline = timezone.now() - timezone.timedelta(seconds=1)
     rnd.save(update_fields=["vote_deadline"])
@@ -204,7 +205,7 @@ def test_reveal_on_timeout_works_with_zero_votes(room_with_facilitator):
     rnd.save(update_fields=["vote_deadline"])
 
     assert services.reveal_on_timeout(room) is True
-    assert services.revealed_payload(room)["tally"] == []
+    assert services.revealed_payload(room)["itemResults"][0]["tally"] == []
 
 
 @pytest.mark.django_db
@@ -221,13 +222,13 @@ def test_revealed_payload_is_nominative_by_default(room_with_facilitator):
     room, facilitator, voter = room_with_facilitator
     services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
-    services.cast_vote(room, facilitator, "4")
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, facilitator, "4")
+    cast_first_item(room, voter, "4")
     services.reveal(room, facilitator)
 
     payload = services.revealed_payload(room)
     assert payload["anonymous"] is False
-    assert {v["participantId"] for v in payload["votes"]} == {
+    assert {v["participantId"] for v in payload["itemResults"][0]["votes"]} == {
         str(facilitator.public_id), str(voter.public_id)
     }
 
@@ -241,12 +242,12 @@ def test_revealed_payload_emits_no_link_when_anonymous(room_with_facilitator):
     room.current_round.is_anonymous = True
     room.current_round.save(update_fields=["is_anonymous"])
     services.open_vote(room, facilitator)
-    services.cast_vote(room, facilitator, "4")
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, facilitator, "4")
+    cast_first_item(room, voter, "4")
     services.reveal(room, facilitator)
 
     payload = services.revealed_payload(room)
-    assert "votes" not in payload
+    assert all("votes" not in block for block in payload["itemResults"])
     serialized = json.dumps(payload)
     assert str(voter.public_id) not in serialized
     assert str(facilitator.public_id) not in serialized
@@ -257,11 +258,11 @@ def test_revealed_payload_counts_votes_per_value(room_with_facilitator):
     room, facilitator, voter = room_with_facilitator
     services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
-    services.cast_vote(room, facilitator, "4")
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, facilitator, "4")
+    cast_first_item(room, voter, "4")
     services.reveal(room, facilitator)
 
-    assert services.revealed_payload(room)["tally"] == [{"cardValue": "4", "count": 2}]
+    assert services.revealed_payload(room)["itemResults"][0]["tally"] == [{"cardValue": "4", "count": 2}]
 
 
 @pytest.mark.django_db
@@ -270,11 +271,11 @@ def test_revealed_payload_omits_values_without_votes(room_with_facilitator):
     room, facilitator, voter = room_with_facilitator
     services.set_current_item(room, facilitator, "Recrutement")
     services.open_vote(room, facilitator)
-    services.cast_vote(room, facilitator, "1")
-    services.cast_vote(room, voter, "7")
+    cast_first_item(room, facilitator, "1")
+    cast_first_item(room, voter, "7")
     services.reveal(room, facilitator)
 
-    tally = services.revealed_payload(room)["tally"]
+    tally = services.revealed_payload(room)["itemResults"][0]["tally"]
     assert [entry["cardValue"] for entry in tally] == ["1", "7"]
     assert all(entry["count"] >= 1 for entry in tally)
 
@@ -291,4 +292,5 @@ def test_revealed_payload_empty_when_no_votes(room_with_facilitator):
     services.reveal_on_timeout(room)
 
     payload = services.revealed_payload(room)
-    assert payload["tally"] == [] and payload["spread"]["min"] is None
+    block = payload["itemResults"][0]
+    assert block["tally"] == [] and block["spread"]["min"] is None

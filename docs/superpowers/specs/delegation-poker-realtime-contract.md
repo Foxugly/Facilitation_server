@@ -15,7 +15,7 @@
 | # | Principe | Décision |
 |---|----------|----------|
 | 1 | **Serveur = source de vérité** | Le client émet des *intentions* ; le serveur décide et **rediffuse le fait** à tous. Pas d'affichage optimiste : le client attend l'écho serveur. |
-| 2 | **Autorité facilitateur** | Les événements de contrôle (`vote.open/reveal/reset`, `result.act`, `subject.set`) ne sont acceptés **que** du facilitateur. Le serveur **rejette** sinon (le masquage front n'est qu'un confort). |
+| 2 | **Autorité facilitateur** | Les événements de contrôle (`vote.open/reveal/reset`, `result.act`, `item.*`, `round.select`) ne sont acceptés **que** du facilitateur. Le serveur **rejette** sinon (le masquage front n'est qu'un confort). |
 | 3 | **Rôle porté par le token, pas par la connexion** | À la reconnexion, token → participant → rôle + vote restaurés. Une coupure ne perd pas le rôle. |
 | 4 | **Secret réel des votes** | Aucune valeur de vote n'est diffusée avant `reveal`. Avant : seulement « a voté / pas voté ». |
 | 5 | **HTTP crée/résout la salle ; WS gère la vie dans la salle** | Le socket ne s'ouvre qu'une fois *dans* la salle. |
@@ -45,7 +45,7 @@
 Tous les messages (deux sens) partagent une enveloppe **versionnée** :
 
 ```json
-{ "v": 1, "type": "vote.cast", "payload": { }, "cid": "c-8f3a", "ts": 1720353600 }
+{ "v": 1, "type": "response.cast", "payload": { }, "cid": "c-8f3a", "ts": 1720353600 }
 ```
 
 - **`v`** — version de protocole. Le serveur **rejette proprement** (`error` type `protocol.version`) une version qu'il ne comprend pas. Front et back se déployant séparément (repos distincts), ce champ évite les casses silencieuses.
@@ -74,15 +74,19 @@ Tous les messages (deux sens) partagent une enveloppe **versionnée** :
 | `type` | Émetteur autorisé | `payload` | Effet |
 |--------|-------------------|-----------|-------|
 | `session.join` | tous | `{ participantToken }` | (Re)entrée dans la salle. Le serveur répond **au seul client** par `state.sync` (§5), et diffuse `participant.joined` aux autres. |
-| `subject.set` | facilitateur | `{ text }` | Définit/édite le sujet courant (état `idle`). |
 | `vote.open` | facilitateur | `{ }` | Ouvre le tour (`idle → open`). Refusé si pas de sujet. |
-| `vote.cast` | votant *(et facilitateur s'il vote)* | `{ cardValue }` | Enregistre/**remplace** le vote de l'émetteur. Autorisé **tant que `open`**. Idempotent (même valeur = no-op). |
 | `vote.reveal` | facilitateur | `{ }` | `open → revealed`. Autorisé dès **≥ 1 vote** (pas de quorum). |
 | `result.act` | facilitateur | `{ chosenValue }` | `revealed → acted`. Fige le résultat retenu (défaut proposé = mode/médiane, modifiable). |
 | `vote.reset` | facilitateur | `{ }` | Efface les votes du tour → `idle` (si nouveau sujet à saisir) ou `open`. |
 | `facilitator.claim` | tout participant présent | `{ }` | **Uniquement** si le garde-fou est actif (§6.f). Premier arrivé = nouveau facilitateur. |
 
-Toute intention **incohérente avec l'état courant** (ex. `vote.cast` en `revealed`) est **rejetée** par `error`, pas appliquée (§6.b).
+> Cette table date de la Phase 1 (2026-07-07) et décrivait aussi `subject.set` et
+> `vote.cast` : le premier est remplacé par `item.add`/`item.update`/`round.select`
+> (§8.1.a), le second par `response.cast` (§8.2.a). Les deux ont vécu en alias
+> hérités et sont retirés en fin de 5b (§8.1.b, §8.2.b) — ne pas les réintroduire.
+
+Toute intention **incohérente avec l'état courant** (ex. `response.cast` hors `open`) est
+**rejetée** par `error`, pas appliquée (§6.b).
 
 ---
 
@@ -96,7 +100,7 @@ Toute intention **incohérente avec l'état courant** (ex. `vote.cast` en `revea
 | `participation.update` | tous | `{ voted: number, total: number, votedIds: string[] }` — **jamais de valeurs** |
 | `subject.updated` | tous | `{ text }` |
 | `vote.opened` | tous | `{ }` (état → `open`) |
-| `vote.revealed` | tous | `{ tally: [{ cardValue, count }], spread: { min, max } }` — **révélation anonyme** : décompte par valeur, aucun lien participant → carte. Seules les valeurs ayant ≥ 1 voix figurent, dans l'ordre du deck. Porte aussi `reason: "timeout" \| "facilitator"`. |
+| `vote.revealed` | tous | `{ itemResults: [...] }` (§8.2.a) — décompte **par item**, jamais de lien participant → carte sur un round anonyme. Seules les valeurs ayant ≥ 1 voix figurent, dans l'ordre du deck. Porte aussi `reason: "timeout" \| "facilitator"`. |
 | `result.acted` | tous | `{ chosenValue }` (état → `acted`) |
 | `vote.wasReset` | tous | `{ nextState: "idle" \| "open" }` |
 | `facilitator.changed` | tous | `{ newFacilitatorId }` |
@@ -117,15 +121,15 @@ Envoyé à un seul client (au `join` initial, à la reconnexion, à l'arrivée d
     { "participantId": "p-1", "username": "Sam", "role": "facilitator", "hasVoted": true },
     { "participantId": "p-2", "username": "Alex", "role": "voter", "hasVoted": false }
   ],
-  "myVote": "consult",
+  "myResponses": { "42": { "card": "consult" } },
   "result": null,
   "facilitatorPresent": true
 }
 ```
 
-- `myVote` = **le vote du client destinataire uniquement** (les autres restent secrets tant que `roundState !== "revealed"`).
-- Si `roundState === "revealed"`, `state.sync` inclut aussi le `tally` (un retardataire qui arrive en `revealed` **voit les résultats**, et votera au tour suivant). Comme `vote.revealed`, il s'agit d'un décompte anonyme : jamais de lien participant → carte.
-- **Depuis 5a** (§8.1), `state.sync` porte aussi `items` — la liste des items du round courant, même forme que dans les faits `item.*` (`[{id, text, sequence}]`) — et `round` — `{id, state}` du round courant (`id: null` si aucun round actif). `subject` reste émis en doublon, en alias déprécié : les deux coexistent jusqu'à la bascule front de 5b (§8.1.b).
+- `myResponses` = **les réponses du seul client destinataire**, indexées par id d'item (les autres restent secrètes tant que `roundState !== "revealed"`). L'ancienne clé `myVote` (le vote du premier item seul) est retirée en fin de 5b (§8.2.b) — voir §8.2.a.
+- Si `roundState === "revealed"`, `state.sync` inclut aussi `itemResults` (§8.2.a) — un retardataire qui arrive en `revealed` **voit les résultats**, et votera au tour suivant. Comme `vote.revealed`, il s'agit d'un décompte qui respecte l'anonymat : jamais de lien participant → carte sur un round anonyme.
+- **Depuis 5a** (§8.1), `state.sync` porte aussi `items` — la liste des items du round courant, même forme que dans les faits `item.*` (`[{id, text, sequence}]`) — et `round` — `{id, state}` du round courant (`id: null` si aucun round actif). `subject` reste émis en doublon (le texte du premier item) : ni la fenêtre 5a ni 5b n'ont fixé de date pour son retrait, contrairement aux alias entrants `subject.*`/`vote.cast` — voir §8.1.b, §8.2.b.
 
 ---
 
@@ -133,8 +137,8 @@ Envoyé à un seul client (au `join` initial, à la reconnexion, à l'arrivée d
 
 | # | Situation | Règle |
 |---|-----------|-------|
-| a | **Secret des votes** | Aucune valeur avant `reveal`. `participation.update` ne porte que des IDs/compteurs. `myVote` n'est renvoyé qu'à son propriétaire. **Après `reveal`, l'anonymat persiste** : le serveur n'émet qu'un décompte agrégé, jamais de couple participant → carte. Limite inhérente à connaître : avec un seul votant, `participation.update` (qui a voté) et le décompte (quelle carte) se recoupent — l'anonymat n'est atteignable qu'à partir de deux votants. |
-| b | **Ordering / idempotence** | Le serveur **ignore** toute action incohérente avec l'état (ex. `vote.cast` hors `open`). Re-voter la même carte = no-op ; voter une autre carte en `open` = remplacement. |
+| a | **Secret des votes** | Aucune valeur avant `reveal`. `participation.update` ne porte que des IDs/compteurs. `myResponses` n'est renvoyé qu'à son propriétaire. **Après `reveal`, l'anonymat persiste** : le serveur n'émet qu'un décompte agrégé, jamais de couple participant → carte. Limite inhérente à connaître : avec un seul votant, `participation.update` (qui a voté) et le décompte (quelle carte) se recoupent — l'anonymat n'est atteignable qu'à partir de deux votants. |
+| b | **Ordering / idempotence** | Le serveur **ignore** toute action incohérente avec l'état (ex. `response.cast` hors `open`). Re-voter la même carte = no-op ; voter une autre carte en `open` = remplacement. |
 | c | **Révéler sans quorum** | Autorisé dès ≥ 1 vote. Un absent ne bloque pas la salle. |
 | d | **Quitter avant révélation** | Le vote déjà émis **reste compté** (il fait partie du tour). `participant.left` diffusé, mais le vote persiste. |
 | e | **Rejoindre en `revealed`** | Le retardataire reçoit un `state.sync` **incluant les résultats** ; il vote au tour suivant. |
@@ -169,8 +173,9 @@ Codes attendus (liste extensible) : `protocol.version`, `forbidden.not_facilitat
 > Ajouté 2026-09-11, livraison 5a (`docs/superpowers/plans/2026-09-11-5a-items-du-round.md`).
 > Le round porte désormais **N items séquentiels** (`Round.items`, migrations 0010-0012),
 > et non plus un sujet unique. Le WS gagne cinq nouvelles intentions et cinq nouveaux
-> faits ; les anciens messages `subject.*`/`agenda.updated` restent en service comme
-> **alias hérités**, décrits en 8.1.b.
+> faits ; les anciens messages entrants `subject.set`/`subject.add`/`subject.select`
+> ont vécu en alias hérités le temps que `Facilitation_frontend` bascule, et sont
+> retirés en fin de 5b — voir 8.1.b.
 
 ### 8.1.a Nouveaux événements
 
@@ -208,16 +213,20 @@ n'y en a aucun), `items` la liste complète et à jour des items de ce round
 plus `text` (le texte du premier item du round sélectionné, pour compatibilité avec les
 clients qui n'affichent qu'un sujet) et `nextState`, toujours `"idle"`.
 
-### 8.1.b Alias hérités — supprimés en 5b
+### 8.1.b Alias hérités — retirés en fin de 5b
 
-> Note datée 2026-09-11 : `subject.set`, `subject.add`, `subject.select` (entrants) et
-> `subject.updated`, `agenda.updated` (sortants) sont des **alias hérités** vers les
-> intentions ci-dessus, conservés le temps que `Facilitation_frontend` bascule sur
-> `item.*`/`round.select`. Forme de payload et comportement **inchangés** (§4, §5) — aucune
-> intention n'a été retirée. `subject.select` délègue intégralement à `round.select` et
-> hérite donc aussi de ses diffusions (`vote.wasReset`, `round.selected`), en plus de
-> `subject.updated`/`agenda.updated`. **Ces alias seront supprimés en 5b** : ne pas leur
-> ajouter de nouveau comportement, ne construire aucune fonctionnalité neuve dessus.
+> Note datée 2026-09-11, mise à jour en fin de 5b : `subject.set`, `subject.add`,
+> `subject.select` (entrants) ont vécu en **alias hérités** vers `item.add`/
+> `item.update`/`round.select` le temps que `Facilitation_frontend` bascule. Le
+> frontend de production ne les émet plus, et le consumer ne les reconnaît plus :
+> un client qui les enverrait encore reçoit `error` (`state.invalid_transition`,
+> "Unknown type").
+>
+> `subject.updated` et `agenda.updated` (sortants), en revanche, **ne sont pas
+> retirés** : ce ne sont pas des alias à proprement parler mais les faits que
+> `item.add`/`item.update`/`round.select` diffusent eux-mêmes (voir la table
+> 8.1.a) — la note précédente les annonçait à tort comme voués au même sort que
+> les entrants. Ils restent le contrat courant.
 
 ---
 
@@ -227,7 +236,8 @@ clients qui n'affichent qu'un sujet) et `nextState`, toujours `"idle"`.
 > écrit et agrège désormais une réponse **par item** (`Response.payload`, validé par le
 > registre d'activités — `ActivitySpec.validate_value`), et non plus un vote unique par
 > round. Le WS gagne une intention ouverte à tous les participants ; `vote.cast` et les
-> clés plates de `vote.revealed` deviennent des **alias hérités**, décrits en 8.2.b.
+> clés plates de `vote.revealed` ont vécu en **alias hérités** le temps de la bascule
+> front, et sont retirés en fin de 5b — voir 8.2.b.
 
 ### 8.2.a Nouvel événement
 
@@ -238,12 +248,13 @@ facilitateur, contrairement à `item.*` en 8.1.a) :
 |--------|-----------|-------|
 | `response.cast` | `{ itemId, payload }` | Enregistre/**remplace** la réponse de l'émetteur pour cet item (`payload` validé par le schéma que déclare le registre pour l'activité active). Autorisé **tant que le round est `open`**. Refusé si `itemId` n'appartient pas au round courant (`error` `state.invalid_transition`, `rejectedType: "response.cast"`). |
 
-Sortant : `participation.update` (§5), diffusé après `response.cast` exactement comme après
-`vote.cast` — la forme du fait ne change pas (`{ voted, total, votedIds }`, jamais de valeur).
+Sortant : `participation.update` (§5), diffusé après `response.cast` — la forme du fait ne
+change pas (`{ voted, total, votedIds }`, jamais de valeur).
 
 `vote.revealed` (§5) gagne une clé `itemResults` — **et non `items`**, déjà pris par la forme
 `[{id, text, sequence}]` de `state.sync`/8.1 : fusionner les deux sous le même nom écraserait
-silencieusement l'un des deux côté client. Forme :
+silencieusement l'un des deux côté client. Forme (depuis le retrait des clés plates en fin
+de 5b, §8.2.b, `itemResults` est la SEULE forme du décompte) :
 
 ```json
 {
@@ -251,26 +262,26 @@ silencieusement l'un des deux côté client. Forme :
     { "itemId": 42, "tally": [{ "cardValue": "5", "count": 2 }], "spread": { "min": 5, "max": 5 }, "anonymous": false, "votes": [ /* si nominatif */ ] }
   ],
   "anonymous": false,
-  "tally": [ /* copie du premier bloc de itemResults, alias herite — voir 8.2.b */ ],
-  "spread": { /* idem */ },
-  "votes": [ /* idem, absent si round anonyme */ ],
   "reason": "timeout" | "facilitator"
 }
 ```
 
 Un bloc `itemResults[]` n'émet jamais `votes` sur un round anonyme — l'invariant §6.a tient
-**par item**, pas seulement sur les clés plates.
+**par item**.
 
-### 8.2.b Alias hérités — supprimés en fin de 5b
+### 8.2.b Alias hérités — retirés en fin de 5b
 
-> Note datée 2026-09-11 : `vote.cast` (entrant) et les clés plates `tally`/`spread`/`votes`
-> de `vote.revealed` (sortant) sont des **alias hérités**. `vote.cast {cardValue}` délègue
-> intégralement à `response.cast` (résout le premier item du round courant, façade
-> `services.cast_vote`) et produit exactement les mêmes diffusions qu'avant 5b — c'est ce
-> qui permet à `Facilitation_frontend` (non modifié) de continuer à jouer pendant la
-> fenêtre. Les clés plates de `vote.revealed` restent recopiées du **premier** bloc de
-> `itemResults`. **Ces alias seront supprimés en fin de 5b** : ne pas leur ajouter de
-> nouveau comportement, ne construire aucune fonctionnalité neuve dessus.
+> Note datée 2026-09-11, mise à jour en fin de 5b : `vote.cast` (entrant) et les clés
+> plates `tally`/`spread`/`votes` de `vote.revealed` (sortant) ont vécu en **alias
+> hérités** — `vote.cast {cardValue}` délégait à `response.cast` via la façade
+> `services.cast_vote` (résolution du premier item du round courant), et les clés
+> plates étaient recopiées du premier bloc de `itemResults`. Les deux ont vécu le temps
+> que `Facilitation_frontend` bascule sur `response.cast`/`itemResults`/`myResponses` ;
+> ce basculement est vérifié en production, et **la fenêtre de compatibilité est
+> refermée** : `services.cast_vote` n'existe plus, `vote.cast` n'est plus un type
+> reconnu par le consumer (`error` `state.invalid_transition`), et ni `vote.revealed`
+> ni `state.sync` ne portent plus `tally`/`spread`/`votes` au premier niveau ni
+> `myVote`. Ne pas les réintroduire — `itemResults`/`myResponses` sont la seule forme.
 
 ---
 

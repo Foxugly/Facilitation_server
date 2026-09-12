@@ -13,6 +13,7 @@ from django.contrib.auth import get_user_model
 
 from decks.seed import create_standard_deck
 from realtime import services
+from realtime.tests.helpers import cast_first_item
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Item, Participant, Role, Room, Round
 from rooms.snapshot import build_deck_snapshot
@@ -45,69 +46,33 @@ def paid_team(db):
 
 
 @pytest.mark.django_db
-def test_state_sync_of_a_revealed_round_carries_votes_and_spread(db):
-    room, fac, voter, _ = _room()
-    services.open_vote(room, fac)
-    services.cast_vote(room, voter, "4")
-    services.cast_vote(room, fac, "6")
-    services.reveal(room, fac)
-
-    payload = services.build_state_sync(voter)
-
-    assert payload["roundState"] == "revealed"
-    assert payload["tally"] == [{"cardValue": "4", "count": 1}, {"cardValue": "6", "count": 1}]
-    # Le lien participant -> carte : c'est lui qui fait retourner les cartes du tapis.
-    assert {v["participantId"] for v in payload["votes"]} == {str(voter.public_id), str(fac.public_id)}
-    # L'ecart aussi, sinon il disparait de l'ecran au rechargement.
-    assert payload["spread"] == {"min": 4, "max": 6}
-
-
-@pytest.mark.django_db
-def test_state_sync_of_an_anonymous_revealed_round_emits_no_participant_card_link(paid_team):
-    """L'invariant d'anonymat prime : le decompte, jamais le lien."""
-    room, fac, voter, _ = _room(team=paid_team)
-    services.set_reveal_mode(room, fac, True)
-    services.open_vote(room, fac)
-    services.cast_vote(room, voter, "4")
-    services.reveal(room, fac)
-
-    payload = services.build_state_sync(voter)
-
-    assert payload["tally"] == [{"cardValue": "4", "count": 1}]
-    assert "votes" not in payload
-    # Ceinture et bretelles : le decompte ne porte aucun identifiant. L'invariant est
-    # l'absence de lien participant -> carte, non l'absence des participants : la liste
-    # des presents figure legitimement dans l'etat, on voit qui est dans la salle.
-    assert all(set(entree) == {"cardValue", "count"} for entree in payload["tally"])
-
-
-@pytest.mark.django_db
 def test_state_sync_of_an_acted_round_still_carries_the_detail(db):
     """Le client traite « acte » comme un round revele : meme besoin de detail."""
     room, fac, voter, _ = _room()
     services.open_vote(room, fac)
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, voter, "4")
     services.reveal(room, fac)
     services.act_result(room, fac, "4")
 
     payload = services.build_state_sync(voter)
+    block = payload["itemResults"][0]
 
     assert payload["roundState"] == "acted"
     assert payload["result"] == "4"
-    assert payload["tally"] == [{"cardValue": "4", "count": 1}]
-    assert [v["cardValue"] for v in payload["votes"]] == ["4"]
+    assert block["tally"] == [{"cardValue": "4", "count": 1}]
+    assert [v["cardValue"] for v in block["votes"]] == ["4"]
 
 
 @pytest.mark.django_db
 def test_state_sync_of_an_anonymous_revealed_round_emits_no_link_in_item_results(paid_team):
-    """Meme invariant que les cles plates, mais dans le bloc par item (``itemResults``) :
-    un arrivant sur un round anonyme deja revele ne doit voir aucun lien
-    participant -> carte, ni dans les cles plates, ni dans aucun bloc de ``itemResults``.
+    """L'invariant d'anonymat prime : le decompte, jamais le lien — porte
+    desormais par le bloc par item (``itemResults``), seule forme du contrat
+    depuis le retrait des cles plates historiques en fin de 5b.
     """
     room, fac, voter, _ = _room(team=paid_team)
     services.set_reveal_mode(room, fac, True)
     services.open_vote(room, fac)
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, voter, "4")
     services.reveal(room, fac)
 
     payload = services.build_state_sync(voter)
@@ -116,21 +81,27 @@ def test_state_sync_of_an_anonymous_revealed_round_emits_no_link_in_item_results
     for block in payload["itemResults"]:
         assert "votes" not in block
         assert block["tally"] == [{"cardValue": "4", "count": 1}]
+        # Ceinture et bretelles : le decompte ne porte aucun identifiant. L'invariant
+        # est l'absence de lien participant -> carte, non l'absence des participants :
+        # la liste des presents figure legitimement dans l'etat, on voit qui est la.
+        assert all(set(entree) == {"cardValue", "count"} for entree in block["tally"])
 
 
 @pytest.mark.django_db
 def test_state_sync_of_a_nominative_revealed_round_carries_item_results(db):
     """Un arrivant sur un round nominatif deja revele recoit ``itemResults``
-    renseigne, avec le decompte attendu — pas seulement les cles plates heritees.
+    renseigne, avec le decompte et le lien participant -> carte attendus — c'est
+    lui qui fait retourner les cartes du tapis au rechargement.
     """
     room, fac, voter, _ = _room()
     services.open_vote(room, fac)
-    services.cast_vote(room, voter, "4")
-    services.cast_vote(room, fac, "6")
+    cast_first_item(room, voter, "4")
+    cast_first_item(room, fac, "6")
     services.reveal(room, fac)
 
     payload = services.build_state_sync(voter)
 
+    assert payload["roundState"] == "revealed"
     assert len(payload["itemResults"]) == 1
     block = payload["itemResults"][0]
     assert block["tally"] == [{"cardValue": "4", "count": 1}, {"cardValue": "6", "count": 1}]
@@ -140,14 +111,13 @@ def test_state_sync_of_a_nominative_revealed_round_carries_item_results(db):
 
 @pytest.mark.django_db
 def test_state_sync_of_an_open_round_leaks_nothing(db):
-    """Avant la revelation, personne ne doit connaitre la carte d'un autre."""
+    """Avant la revelation, personne ne doit connaitre la carte d'un autre —
+    ``itemResults`` (seule forme du decompte depuis fin 5b) doit rester absent."""
     room, fac, voter, _ = _room()
     services.open_vote(room, fac)
-    services.cast_vote(room, voter, "4")
+    cast_first_item(room, voter, "4")
 
     payload = services.build_state_sync(fac)
 
     assert payload["roundState"] == "open"
-    assert "votes" not in payload
-    assert "tally" not in payload
-    assert "spread" not in payload
+    assert "itemResults" not in payload

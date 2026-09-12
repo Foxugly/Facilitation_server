@@ -120,6 +120,19 @@ def _current_round_id(code):
     return Room.objects.get(code=code).current_round_id
 
 
+def _add_scenario_item(code, token, text):
+    """Ajoute une entree d'agenda directement au niveau service : depuis le
+    retrait de l'alias `subject.add` (contrat §8.1.b), il n'existe plus de
+    message WS pour composer un scenario a l'avance."""
+    room = Room.objects.get(code=code)
+    participant = Participant.objects.get(token=token)
+    return services.add_scenario_item(room, participant, text)
+
+
+def _agenda(code):
+    return services.build_agenda(Room.objects.get(code=code))
+
+
 @pytest.mark.django_db(transaction=True)
 async def test_full_vote_cycle_and_secret_of_votes():
     code, fac_token, voter_token = await database_sync_to_async(_make_room)()
@@ -131,13 +144,17 @@ async def test_full_vote_cycle_and_secret_of_votes():
     voter, _ = await _join(voter_token, code)
     await _drain_until(fac, "participant.joined")
 
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Who owns the budget?"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Who owns the budget?"}})
+    added = await _drain_until(fac, "item.added")
+    item_id = added["payload"]["itemId"]
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "vote.opened")
 
     # voter casts — participation updates carry IDs/counts, NEVER values (secret §6.a)
-    await voter.send_json_to({"v": 1, "type": "vote.cast", "payload": {"cardValue": "5"}})
+    await voter.send_json_to(
+        {"v": 1, "type": "response.cast", "payload": {"itemId": item_id, "payload": {"card": "5"}}}
+    )
     part = await _drain_until(fac, "participation.update", pred=lambda p: p["voted"] == 1)
     # Secret of votes (§6.a): participation carries only counts + participant IDs,
     # never a card value — the payload has exactly these three keys.
@@ -148,10 +165,11 @@ async def test_full_vote_cycle_and_secret_of_votes():
     # (Anonymous reveal is a per-round option of paid teams — see test_reveal_mode.)
     await fac.send_json_to({"v": 1, "type": "vote.reveal", "payload": {}})
     revealed = await _drain_until(voter, "vote.revealed")
+    block = revealed["payload"]["itemResults"][0]
     assert revealed["payload"]["anonymous"] is False
-    assert [v["cardValue"] for v in revealed["payload"]["votes"]] == ["5"]
-    assert revealed["payload"]["tally"] == [{"cardValue": "5", "count": 1}]
-    assert revealed["payload"]["spread"] == {"min": 5, "max": 5}
+    assert [v["cardValue"] for v in block["votes"]] == ["5"]
+    assert block["tally"] == [{"cardValue": "5", "count": 1}]
+    assert block["spread"] == {"min": 5, "max": 5}
 
     await fac.send_json_to({"v": 1, "type": "result.act", "payload": {"chosenValue": "5"}})
     acted = await _drain_until(voter, "result.acted")
@@ -166,7 +184,7 @@ async def test_voter_cannot_open_vote_authority():
     code, fac_token, voter_token = await database_sync_to_async(_make_room)()
     fac, _ = await _join(fac_token, code)
     voter, _ = await _join(voter_token, code)
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "X"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "X"}})
 
     # a voter trying a control intention is rejected, not applied
     await voter.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
@@ -184,18 +202,22 @@ async def test_reconnection_restores_vote_and_state():
     voter, _ = await _join(voter_token, code)
     await _drain_until(fac, "participant.joined")
 
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Budget?"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget?"}})
+    added = await _drain_until(fac, "item.added")
+    item_id = added["payload"]["itemId"]
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "vote.opened")
-    await voter.send_json_to({"v": 1, "type": "vote.cast", "payload": {"cardValue": "3"}})
+    await voter.send_json_to(
+        {"v": 1, "type": "response.cast", "payload": {"itemId": item_id, "payload": {"card": "3"}}}
+    )
     await _drain_until(fac, "participation.update", pred=lambda p: p["voted"] == 1)
 
     # Network drop + reconnect with the same token restores room + vote (contract §8).
     await voter.disconnect()
     voter2, sync2 = await _join(voter_token, code)
     assert sync2["payload"]["roundState"] == "open"
-    assert sync2["payload"]["myVote"] == "3"
+    assert sync2["payload"]["myResponses"][str(item_id)] == {"card": "3"}
 
     await fac.disconnect()
     await voter2.disconnect()
@@ -232,15 +254,18 @@ async def test_agenda_add_and_select():
     code, fac_token, _ = await database_sync_to_async(_make_room)()
     fac, _ = await _join(fac_token, code)
 
-    await fac.send_json_to({"v": 1, "type": "subject.add", "payload": {"text": "Q1"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Q1"}})
     await _drain_until(fac, "agenda.updated")
-    await fac.send_json_to({"v": 1, "type": "subject.add", "payload": {"text": "Q2"}})
-    a2 = await _drain_until(fac, "agenda.updated", pred=lambda p: len(p["agenda"]) == 2)
-    agenda = a2["payload"]["agenda"]
+    # Le second round de l'agenda est compose directement au niveau service :
+    # l'alias `subject.add` qui l'exposait au WS est retire (contrat §8.1.b),
+    # et seul `round.select` (sous test ci-dessous) reste accessible du WS.
+    second_id = await database_sync_to_async(_add_scenario_item)(code, fac_token, "Q2")
+
+    agenda = await database_sync_to_async(_agenda)(code)
     assert [x["text"] for x in agenda] == ["Q1", "Q2"]
     assert agenda[0]["status"] == "current" and agenda[1]["status"] == "pending"
 
-    await fac.send_json_to({"v": 1, "type": "subject.select", "payload": {"subjectId": agenda[1]["id"]}})
+    await fac.send_json_to({"v": 1, "type": "round.select", "payload": {"roundId": second_id}})
     a3 = await _drain_until(fac, "agenda.updated", pred=lambda p: p["agenda"][1]["status"] == "current")
     assert a3["payload"]["agenda"][1]["status"] == "current" and a3["payload"]["agenda"][0]["status"] == "pending"
 
@@ -277,7 +302,7 @@ async def test_timeout_reveals_on_reconnect_reconciliation():
 
     await fac.send_json_to({"v": 1, "type": "timer.set", "payload": {"enabled": True, "seconds": 30}})
     await _drain_until(voter, "timer.changed")
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Budget?"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget?"}})
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     opened = await _drain_until(voter, "vote.opened")
@@ -320,7 +345,7 @@ async def test_scheduled_timeout_reveals_without_reconnect(monkeypatch):
 
     await fac.send_json_to({"v": 1, "type": "timer.set", "payload": {"enabled": True, "seconds": 0}})
     await _drain_until(voter, "timer.changed")
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Budget?"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget?"}})
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "vote.opened")
@@ -339,22 +364,25 @@ async def test_scheduled_timeout_reveals_without_reconnect(monkeypatch):
 async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     """Non-regression for the `_timer_tasks` module dict bookkeeping in consumers.py.
 
-    Kills two independent mutants a review flagged as passing the suite unnoticed:
+    Kills the mutant a review flagged as passing the suite unnoticed: restoring
+    the unconditional `finally: _timer_tasks.pop(code, None)` in _fire_timeout
+    (the original bug) -- a *cancelled* task's cleanup evicts whatever task now
+    occupies its room-code slot, even if that's a brand new one scheduled after
+    it. Also verifies that `round.select` and `vote.reset` each cancel a
+    tracked task immediately, as their explicit `_cancel_timeout()` call promises.
 
-    (1) restoring the unconditional `finally: _timer_tasks.pop(code, None)` in
-        _fire_timeout (the original bug) -- a *cancelled* task's cleanup evicts
-        whatever task now occupies its room-code slot, even if that's a brand new
-        one scheduled after it;
-    (2) dropping the `self._cancel_timeout(room.code)` call from the subject.select
-        branch of _dispatch -- a pending task then survives untouched instead of
-        being cancelled the moment the facilitator switches subjects.
+    (Anciennement demontre via l'alias `subject.set`/`subject.select`, retires
+    en fin de 5a/5b : toute transition moderne qui ramene le round a idle
+    (`round.select`, `round.prepare`, `vote.reset`) annule desormais le timer
+    explicitement, donc « une transition idle qui oublie d'annuler » n'a plus
+    d'equivalent a tester -- c'est une amelioration, pas une lacune.)
 
     TIMER_MIN_SECONDS is patched to 0 (as test_scheduled_timeout_reveals_without_reconnect
     does) only to allow a small, comfortably-nonzero `seconds` below the normal 10s
     floor. The delay is never waited out for real: every cancellation below is
-    explicit (vote.open / subject.select / vote.reset), asyncio.sleep(delay) is
-    aborted instantly by .cancel(), and _settle() gives the loop a few bare ticks
-    (no real time) to actually deliver the CancelledError into each task's `finally`.
+    explicit (vote.reset / round.select), asyncio.sleep(delay) is aborted
+    instantly by .cancel(), and _settle() gives the loop a few bare ticks (no
+    real time) to actually deliver the CancelledError into each task's `finally`.
     """
     monkeypatch.setattr(services, "TIMER_MIN_SECONDS", 0)
     code, fac_token, voter_token = await database_sync_to_async(_make_room)(True)
@@ -364,7 +392,7 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
 
     await fac.send_json_to({"v": 1, "type": "timer.set", "payload": {"enabled": True, "seconds": 5}})
     await _drain_until(voter, "timer.changed")
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Budget?"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget?"}})
     await _drain_until(voter, "subject.updated")
 
     # 1) Open the vote: task A is registered for the room under its code.
@@ -374,23 +402,20 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     task_a = consumers._timer_tasks.get(code)
     assert task_a is not None and not task_a.done()
 
-    # 2) subject.set while OPEN creates a brand new IDLE round (services.set_current_item
-    # always takes the "create a new subject+round" branch when the current one
-    # isn't idle) -- but the subject.set branch of _dispatch never touches
-    # _timer_tasks. Task A is left exactly as it was: still tracked, still alive.
-    # (Harmless if it ever fired: reveal_on_timeout() guards on round state, and the
-    # round is idle again.)
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "New topic?"}})
-    await _drain_until(voter, "subject.updated")
-    await _settle()
-    assert consumers._timer_tasks.get(code) is task_a
-    assert not task_a.done()
+    # 2) vote.reset cancels A explicitly (its own `_cancel_timeout` call) and
+    # sends the round back to IDLE. Task A's cancellation is merely SCHEDULED
+    # here -- the loop has not yet delivered CancelledError into `_fire_timeout`,
+    # so its `finally` clause has not run.
+    await fac.send_json_to({"v": 1, "type": "vote.reset", "payload": {}})
+    await _drain_until(voter, "participation.update")
+    assert code not in consumers._timer_tasks
 
-    # 3) Open the (new) vote again: _schedule_timeout cancels A synchronously and
-    # installs task B under the same room-code key. The critical assertion: once the
-    # loop has actually delivered A's CancelledError (and run its finally clause), B
-    # must still be the tracked task -- the original bug's unconditional pop() would
-    # have evicted B here, because A's finally ran *after* B already replaced it.
+    # 3) Open the (same) round again: _schedule_timeout installs task B under
+    # the same room-code key. The critical assertion: once the loop has
+    # actually delivered A's CancelledError (and run its finally clause), B
+    # must still be the tracked task -- the original bug's unconditional pop()
+    # would have evicted B here, because A's finally ran *after* B already
+    # replaced it in the dict.
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "participation.update")
     await _settle()
@@ -408,21 +433,21 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     )
     assert not task_b.done()
 
-    # 4) subject.select on the very subject/round currently open must cancel B
-    # immediately (the _cancel_timeout() call in the subject.select branch). Without
-    # it, B would survive untouched here.
-    subject_id = await database_sync_to_async(_current_round_id)(code)
-    await fac.send_json_to({"v": 1, "type": "subject.select", "payload": {"subjectId": subject_id}})
+    # 4) round.select on the very round currently open must cancel B
+    # immediately (the _cancel_timeout() call in the round.select branch).
+    # Without it, B would survive untouched here.
+    round_id = await database_sync_to_async(_current_round_id)(code)
+    await fac.send_json_to({"v": 1, "type": "round.select", "payload": {"roundId": round_id}})
     await _drain_until(voter, "agenda.updated")
     assert code not in consumers._timer_tasks, (
-        "task B was not cancelled by subject.select -- the "
+        "task B was not cancelled by round.select -- the "
         "'self._cancel_timeout(room.code)' call is missing from that branch"
     )
     await _settle()
     assert task_b.done()
 
-    # 5) Open once more (the reselected subject is idle again, same non-empty text):
-    # task C is registered.
+    # 5) Open once more (the reselected round is idle again, same non-empty
+    # text): task C is registered.
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "participation.update")
     await _settle()
@@ -471,7 +496,7 @@ async def test_timer_resumes_on_reconnect_after_restart(monkeypatch):
 
     await fac.send_json_to({"v": 1, "type": "timer.set", "payload": {"enabled": True, "seconds": 30}})
     await _drain_until(voter, "timer.changed")
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Budget?"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget?"}})
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "vote.opened")
@@ -545,7 +570,7 @@ async def test_reconnect_does_not_duplicate_tracked_timer_task():
 
     await fac.send_json_to({"v": 1, "type": "timer.set", "payload": {"enabled": True, "seconds": 30}})
     await _drain_until(voter, "timer.changed")
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Budget?"}})
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget?"}})
     await _drain_until(voter, "subject.updated")
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "vote.opened")

@@ -10,6 +10,7 @@ from django.contrib.auth import get_user_model
 from decks.models import Deck
 from decks.seed import create_standard_deck
 from realtime import services
+from realtime.tests.helpers import cast_first_item
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Item, Participant, Result, Role, Room, RoundState
 from rooms.snapshot import build_deck_snapshot
@@ -53,7 +54,7 @@ def room_with_two_decks(db):
 
 def _play(room, fac, voter, card):
     services.open_vote(room, fac)
-    services.cast_vote(room, voter, card)
+    cast_first_item(room, voter, card)
     services.reveal(room, fac)
     return services.act_result(room, fac, card)
 

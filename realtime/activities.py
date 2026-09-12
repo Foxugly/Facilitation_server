@@ -104,7 +104,8 @@ def _default_aggregate(ordinal):
     tache 3 : c'est lui que toute strategie sans agregateur explicite recoit."""
 
     def aggregate(responses, card_values):
-        counts = Counter(r.card_value for r in responses)
+        values = [r.payload.get("card") for r in responses]
+        counts = Counter(values)
         tally = [
             {"cardValue": value, "count": counts[value]}
             for value in card_values
@@ -112,7 +113,7 @@ def _default_aggregate(ordinal):
         ]
         spread = {"min": None, "max": None}
         if ordinal:
-            numeric = [int(r.card_value) for r in responses if r.card_value.isdigit()]
+            numeric = [int(v) for v in values if isinstance(v, str) and v.isdigit()]
             if numeric:
                 spread = {"min": min(numeric), "max": max(numeric)}
         return {"tally": tally, "spread": spread}

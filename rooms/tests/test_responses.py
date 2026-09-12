@@ -68,8 +68,8 @@ def test_same_participant_can_respond_to_two_items_of_the_same_round(standard_de
     item_b = Item.objects.create(round=rnd, text="Delai ?", sequence=2)
     p = Participant.objects.create(room=room, token=generate_token(), display_name="Alex")
 
-    Response.objects.create(round=rnd, participant=p, item=item_a, card_value="4", payload={"card": "4"})
-    Response.objects.create(round=rnd, participant=p, item=item_b, card_value="8", payload={"card": "8"})
+    Response.objects.create(round=rnd, participant=p, item=item_a, payload={"card": "4"})
+    Response.objects.create(round=rnd, participant=p, item=item_b, payload={"card": "8"})
 
     assert Response.objects.filter(round=rnd, participant=p).count() == 2
 
@@ -81,16 +81,16 @@ def test_two_responses_to_the_same_item_violate_the_unique_constraint(standard_d
     Le second create() doit lever IntegrityError."""
     room, rnd, item = _round_with_item(standard_deck)
     p = Participant.objects.create(room=room, token=generate_token(), display_name="Alex")
-    Response.objects.create(round=rnd, participant=p, item=item, card_value="4", payload={"card": "4"})
+    Response.objects.create(round=rnd, participant=p, item=item, payload={"card": "4"})
 
     with pytest.raises(IntegrityError):
         with transaction.atomic():
             # atomic() imbrique : le savepoint absorbe l'echec SQL, la
             # transaction de test (pytest-django) reste utilisable ensuite.
-            Response.objects.create(round=rnd, participant=p, item=item, card_value="8", payload={"card": "8"})
+            Response.objects.create(round=rnd, participant=p, item=item, payload={"card": "8"})
 
     assert Response.objects.filter(item=item, participant=p).count() == 1
-    assert Response.objects.get(item=item, participant=p).card_value == "4"
+    assert Response.objects.get(item=item, participant=p).payload == {"card": "4"}
 
 
 @pytest.mark.django_db
@@ -102,13 +102,12 @@ def test_update_or_create_overwrites_the_response_to_the_same_item(standard_deck
     p = Participant.objects.create(room=room, token=generate_token(), display_name="Alex")
 
     Response.objects.update_or_create(
-        item=item, participant=p, defaults={"round": rnd, "card_value": "4", "payload": {"card": "4"}}
+        item=item, participant=p, defaults={"round": rnd, "payload": {"card": "4"}}
     )
     Response.objects.update_or_create(
-        item=item, participant=p, defaults={"round": rnd, "card_value": "8", "payload": {"card": "8"}}
+        item=item, participant=p, defaults={"round": rnd, "payload": {"card": "8"}}
     )
 
     assert Response.objects.filter(item=item, participant=p).count() == 1
     r = Response.objects.get(item=item, participant=p)
-    assert r.card_value == "8"
     assert r.payload == {"card": "8"}

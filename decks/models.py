@@ -140,7 +140,7 @@ class Deck(TranslatableModel):
 
 class Card(models.Model):
     """A card of a deck (spec §3.3). ``value`` is the language-agnostic canonical
-    value referenced by Vote.card_value / Result.chosen_value (Delegation Poker: "1".."7")."""
+    value referenced by Response.payload["card"] / Result.chosen_value (Delegation Poker: "1".."7")."""
 
     deck = models.ForeignKey(Deck, on_delete=models.CASCADE, related_name="cards")
     value = models.CharField(max_length=32)

@@ -100,3 +100,10 @@ def test_a_round_without_item_leaves_its_responses_untouched(head):
     assert r.item_id is None
     assert r.payload == {}
     assert r.card_value == "7"
+
+    # Nettoyage avant le retour a la tete (fixture `head`) : cette ligne a
+    # `item_id` NULL par construction (le cas impossible que ce test verifie),
+    # et 0016 rend justement `item` NOT NULL - la migration avant refuserait,
+    # a raison, de la transporter plus loin. La laisser trainer ferait echouer
+    # la remontee vers la tete, pas la migration testee ici.
+    Response.objects.all().delete()

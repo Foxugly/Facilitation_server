@@ -17,10 +17,10 @@ from realtime.activities import spec_for
 
 
 def _spread(strategy, card_values):
-    """Reconstruit des Response minimales (seul `card_value` compte pour
+    """Reconstruit des Response minimales (seul `payload["card"]` compte pour
     l'agregateur) et lit `spread` dans le resultat de l'agregateur de la
     strategie — exactement ce que `revealed_payload` fait en production."""
-    responses = [SimpleNamespace(card_value=v) for v in card_values]
+    responses = [SimpleNamespace(payload={"card": v}) for v in card_values]
     return spec_for(strategy).aggregate(responses, card_values)["spread"]
 
 
