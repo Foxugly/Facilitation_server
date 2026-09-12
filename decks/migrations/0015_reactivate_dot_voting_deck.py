@@ -25,7 +25,7 @@ class Migration(migrations.Migration):
     # laisse) le deck pour une raison independante de CETTE migration -- le
     # forcer a redevenir inactif violerait la meme regle que le seed respecte
     # deja (ne jamais revenir sur une reactivation deliberee, voir
-    # test_replaying_the_command_never_reverts_a_deliberate_reactivation dans
+    # test_replaying_the_command_never_reverts_a_deliberate_deactivation dans
     # rooms/tests/test_dot_voting_deck.py). Symetrique au choix deja fait sur
     # 0019_backfill_round_sequence pour la meme raison de fond.
     operations = [

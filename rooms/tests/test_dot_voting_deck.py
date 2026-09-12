@@ -81,9 +81,12 @@ def test_replaying_the_command_never_reverts_a_deliberate_deactivation():
     """Symetrique de l'ancien test (le deck naissait inactif ; il nait
     desormais actif) : un operateur qui DESACTIVE le deck ne doit pas le voir
     redevenir actif au prochain deploiement -- le seed skippe des qu'une ligne
-    existe, il ne la met jamais a jour. C'est la meme garantie que verifie la
-    migration 0015 en sens inverse (elle n'active jamais qu'un deck deja
-    inactif -- voir `test_migration_is_idempotent_and_does_not_touch_an_already_active_deck`)."""
+    existe, il ne la met jamais a jour. La migration 0015 ne rouvre pas cette
+    porte : Django ne rejoue jamais une migration deja appliquee, donc une
+    desactivation posterieure a son passage lui survit. Seule une desactivation
+    faite AVANT le deploiement qui applique 0015 serait ecrasee par elle --
+    c'est l'objet meme de cette migration (faire converger les bases semees
+    avec l'ancien defaut), pas un effet de bord."""
     call_command("seed_dot_voting_deck")
     deck = Deck.objects.get(vote_type__code="dot_voting")
     deck.is_active = False
@@ -121,48 +124,20 @@ def test_migration_reactivates_an_existing_inactive_deck():
 
     vt = VoteType.objects.create(code="dot_voting", resolution_strategy="dot_voting_v1")
     deck = Deck.objects.create(vote_type=vt, is_standard=True, free_tier=False, is_active=False)
-    # Un second deck, actif, d'un AUTRE vote_type : la migration ne doit
-    # toucher que "dot_voting", jamais un deck qui n'a rien demande.
+    # Un second deck INACTIF, d'un AUTRE vote_type -- et inactif justement pour
+    # que l'assertion ait du pouvoir de detection : un deck temoin DEJA actif
+    # serait reste actif quoi que fasse la migration, y compris si elle rallumait
+    # tout le catalogue. Inactif, il epingle reellement le filtre
+    # `vote_type__code="dot_voting"` : le retirer par mutation fait echouer ce test.
     other_vt = VoteType.objects.create(code="roman_vote", resolution_strategy="roman_v1")
-    other_deck = Deck.objects.create(vote_type=other_vt, is_standard=True, free_tier=False, is_active=True)
+    other_deck = Deck.objects.create(vote_type=other_vt, is_standard=True, free_tier=False, is_active=False)
 
     try:
         new = _migrate([("decks", "0015_reactivate_dot_voting_deck")])
         DeckNew = new.get_model("decks", "Deck")
 
         assert DeckNew.objects.get(pk=deck.pk).is_active is True
-        assert DeckNew.objects.get(pk=other_deck.pk).is_active is True
-    finally:
-        executor = MigrationExecutor(connection)
-        executor.loader.build_graph()
-        executor.migrate(executor.loader.graph.leaf_nodes())
-
-
-@pytest.mark.django_db(transaction=True)
-def test_migration_is_idempotent_and_does_not_touch_an_already_active_deck():
-    from django.db import connection
-    from django.db.migrations.executor import MigrationExecutor
-
-    def _migrate(targets):
-        executor = MigrationExecutor(connection)
-        executor.loader.build_graph()
-        executor.migrate(targets)
-        executor.loader.build_graph()
-        return executor.loader.project_state(targets).apps
-
-    old = _migrate([("decks", "0014_background")])
-
-    VoteType = old.get_model("decks", "VoteType")
-    Deck = old.get_model("decks", "Deck")
-
-    vt = VoteType.objects.create(code="dot_voting", resolution_strategy="dot_voting_v1")
-    deck = Deck.objects.create(vote_type=vt, is_standard=True, free_tier=False, is_active=True)
-
-    try:
-        new = _migrate([("decks", "0015_reactivate_dot_voting_deck")])
-        DeckNew = new.get_model("decks", "Deck")
-
-        assert DeckNew.objects.get(pk=deck.pk).is_active is True
+        assert DeckNew.objects.get(pk=other_deck.pk).is_active is False
         assert DeckNew.objects.filter(vote_type__code="dot_voting").count() == 1
     finally:
         executor = MigrationExecutor(connection)

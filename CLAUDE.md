@@ -71,7 +71,7 @@ py -m venv .venv
 ```
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 473 passed
+.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 475 passed
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py # un fichier
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py::test_nom -x
 .\.venv\Scripts\python.exe -m pytest -k "reveal and not deck"
@@ -408,7 +408,7 @@ Weighted Ranking, QCM/Poll, ROTI.
 
 ## Règles de travail
 
-- **`pytest` vert à chaque commit.** Référence actuelle : 473 passed.
+- **`pytest` vert à chaque commit.** Référence actuelle : 475 passed.
 - Le poker existant doit continuer à fonctionner **à chaque étape**. Aucune étape ne livre
   une régression « qu'on corrigera après ».
 - Étapes petites et testables. Pas de réécriture de masse.

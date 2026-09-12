@@ -197,7 +197,7 @@ def create_dot_voting_deck():
 
     is_active=True depuis la tache 7 de la livraison 6a. Ce deck a ete seme
     is_active=False a la tache 1 de la meme livraison, et deliberement : regle
-    du projet, un client ne se voit jamais propose un geste que le serveur
+    du projet, un client ne se voit jamais proposer un geste que le serveur
     refusera -- tant qu'aucune entree de registre (realtime/activities.py) ne
     connaissait "dot_voting", toute reponse aurait ete refusee par la regle par
     defaut "la valeur appartient au deck", un deck sans carte n'en ayant aucune.

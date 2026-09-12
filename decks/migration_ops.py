@@ -19,7 +19,7 @@ def reactivate_dot_voting_deck(apps):
     inactive. Sans cette migration, cette base ne convergerait jamais vers le
     nouveau defaut : le seed s'arrete des qu'une ligne existe, il ne la met
     jamais a jour (regle testee par
-    `test_replaying_the_command_never_reverts_a_deliberate_reactivation`).
+    `test_replaying_the_command_never_reverts_a_deliberate_deactivation`).
 
     Ne touche que le deck du vote_type de code "dot_voting", et seulement s'il
     est encore inactif -- idempotente, sans effet si un operateur l'a deja
