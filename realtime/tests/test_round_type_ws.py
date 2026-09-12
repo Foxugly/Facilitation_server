@@ -78,16 +78,70 @@ async def test_facilitator_configures_a_prepared_round_and_everyone_receives_the
 
 @pytest.mark.django_db(transaction=True)
 async def test_a_voter_cannot_configure_a_round():
-    code, _, voter_token = await database_sync_to_async(_make_room)()
+    """Round DEJA existant (prepare par le facilitateur), pour que le refus
+    porte bien sur l'autorite (`forbidden.not_facilitator`) et non sur
+    l'existence du round (`state.invalid_transition` / "Unknown round") --
+    les deux partagent le meme `rejectedType`, seul `code` les distingue."""
+    code, fac_token, voter_token = await database_sync_to_async(_make_room)()
+    fac, _ = await _join(fac_token, code)
     voter, _ = await _join(voter_token, code)
 
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget ?"}})
+    added = await _drain_until(fac, "item.added")
+    round_id = added["payload"]["roundId"]
+    await _drain_until(voter, "item.added")
+
     await voter.send_json_to({
-        "v": 1, "type": "round.configure", "payload": {"roundId": 1, "config": {}},
+        "v": 1, "type": "round.configure", "payload": {"roundId": round_id, "config": {}},
     })
     err = await _drain_until(voter, "error")
 
+    assert err["payload"]["code"] == "forbidden.not_facilitator"
     assert err["payload"]["rejectedType"] == "round.configure"
 
+    await fac.disconnect()
+    await voter.disconnect()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_configuring_only_the_config_does_not_broadcast_deck_changed():
+    """L'exigence est symetrique : deck.changed diffuse quand le deck change,
+    et SEULEMENT dans ce cas. Prouver une absence exige une vraie barriere --
+    un `ping`/`pong` teste trop tot ferait passer ce test sans rien verifier
+    (piege deja rencontre dans ce depot, CLAUDE.md SSPieges)."""
+    code, fac_token, voter_token = await database_sync_to_async(_make_room)()
+    fac, _ = await _join(fac_token, code)
+    voter, _ = await _join(voter_token, code)
+
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget ?"}})
+    round_id = (await _drain_until(fac, "item.added"))["payload"]["roundId"]
+
+    await fac.send_json_to({
+        "v": 1, "type": "round.configure", "payload": {"roundId": round_id, "config": {}},
+    })
+    # Barriere cote emetteur : confirme que TOUT ce que round.configure devait
+    # diffuser (ici, seulement round.configured) a bien ete envoye avant de
+    # regarder ce que le votant a recu.
+    await fac.send_json_to({"v": 1, "type": "ping", "payload": {}})
+    await _drain_until(fac, "pong")
+
+    # Barriere cote recepteur : le consumer du votant traite sa propre
+    # connexion en serie, donc tout message deja diffuse vers lui est arrive
+    # avant son propre pong.
+    await voter.send_json_to({"v": 1, "type": "ping", "payload": {}})
+    seen_types = []
+    for _ in range(8):
+        msg = await voter.receive_json_from()
+        seen_types.append(msg["type"])
+        if msg["type"] == "pong":
+            break
+    else:
+        raise AssertionError("pong not received")
+
+    assert "round.configured" in seen_types
+    assert "deck.changed" not in seen_types
+
+    await fac.disconnect()
     await voter.disconnect()
 
 
