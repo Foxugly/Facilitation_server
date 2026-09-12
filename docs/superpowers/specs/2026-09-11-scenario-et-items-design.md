@@ -264,8 +264,24 @@ poker jouable de bout en bout, et les e2e front verts quand le contrat bouge.
 | **5a** ✅ fait | `Item` | `Subject` → `Item` sur le round, `Item.author` (inutilisé par le poker, mais le champ existe), migration de données, `Result.item`, `history` repointé, events `item.*` + `round.select`, `state.sync.items[]`, alias hérités. **Back seul** : les alias rendent le front inchangé, il bascule en 5b. | e2e `vote-cycle`, `round-flow`, `team-room` verts **contre le dépôt front non modifié**. |
 | **5b** ✅ fait | `Response` | `Vote` → `Response` + `payload` + `item`, unicité `(item, participant)`, agrégation par item, `response.cast`. Suppression des alias 5a. | Un round poker à 2 items se dépouille item par item. |
 | **5c** ✅ fait | Type par round | `Round.config` (deck figé dès la préparation, sur le round — pas de `vote_type` en FK, voir §3), validation par le registre (`config_schema`), `round.configure`. `items_authored_by` générique **n'a pas été livré** : le poker reste facilitateur-seul via la garde existante (`_require_facilitator`), sans mécanisme par activité — reporté. | Deux rounds de types différents dans une même room, chacun gardant son deck, son dépouillement et son résultat ; `item.add` refusé à un votant sur un round poker. |
-| **5d** | Scénario préparé | `Round.sequence`, file de rounds, `scenario.*`, écran de préparation front. | Un scénario de 3 rounds préparé avant l'ouverture de la room, joué dans l'ordre. |
+| **5d** ✅ fait | Scénario préparé | `Round.sequence` (ordre explicite, plus de trou laissé par un round retiré), `round.reorder` / `round.remove` câblés sur le contrat WS (pas de nouveau message `scenario.*` — écart assumé, voir ci-dessous), agenda enrichi de `state` et `everDecided` pour que le front sache ce qui est réellement retirable, écran de préparation front (réordonnancement, élagage, sans glisser-déposer). | Un scénario de rounds préparé avant l'ouverture de la room, réordonné puis élagué, joué dans l'ordre — vérifié en production le 2026-09-12. |
 | **5e** | Chaînage | `source_round`, `source_rule` (`auto` et `manual`), résolution en copie, `origin_item`, recopie de `author`, garde-fous du registre, écran de sélection manuelle côté front. | Round 1 poker → round 2 alimenté par ses résultats, en auto **et** en manuel. |
+
+**Écarts assumés, tranchés pendant 5d** — à ne pas prendre pour des oublis :
+
+- **`agenda` n'est pas renommé `scenario`.** Le mot décrit exactement la chose
+  qu'il porte et ne contrevient à aucun vocabulaire banni (voir `CLAUDE.md`
+  §Vocabulaire) ; le renommer casserait le contrat WS pour `Facilitation_frontend`
+  et imposerait un déploiement en trois temps (alias, bascule front, retrait de
+  l'alias) pour aucun gain fonctionnel — même arbitrage déjà rendu pour
+  `session.join`. `scenario.add / remove / reorder`, envisagés au §5 de ce
+  document, ne sont donc pas arrivés : la file se manipule par `round.add`
+  (existant depuis 5a), `round.reorder` et `round.remove`.
+- **`DRAFT` et `READY` ne sont pas introduits.** Un round préparé reste un
+  round `idle` qui n'est pas `Room.current_round` — la distinction que ces deux
+  états apporteraient n'a aucun consommateur tant qu'aucune activité ne
+  s'arrête avant la révélation. À rouvrir avec la première activité de ce
+  genre (Brainstorming, Affinity Mapping), pas avant.
 
 Dot Voting (étape 6) vient après 5e et, si le découpage tient sa promesse, ne
 touche que le registre plus deux composants Angular.

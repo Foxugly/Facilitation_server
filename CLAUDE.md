@@ -71,7 +71,7 @@ py -m venv .venv
 ```
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 300 passed
+.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 331 passed
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py # un fichier
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py::test_nom -x
 .\.venv\Scripts\python.exe -m pytest -k "reveal and not deck"
@@ -373,7 +373,13 @@ facilitateur puisse reformuler un sujet sans réécrire l'historique de l'activi
      §3 et l'écart ci-dessous. Appris au passage : un round garde son type (son
      `deck_snapshot`) pour toute sa vie — `vote.reset` ne l'efface plus, et rejouer un round
      acté le recopie avec `config` et les items.
-   **5d et 5e n'ont pas démarré.** **Additif** : le poker garde ses champs actuels.
+   - **5d** : `Round.sequence` (ordre explicite, sans trou quand un round est
+     retiré), `round.reorder` / `round.remove` câblés sur le contrat WS, agenda
+     enrichi de `state` et `everDecided`, écran de préparation front
+     (réordonnancement, élagage). Pas de nouveau message `scenario.*` ni
+     d'états `DRAFT`/`READY` — écarts assumés, voir
+     `docs/superpowers/specs/2026-09-11-scenario-et-items-design.md` §8.
+   **Seule 5e n'a pas démarré.** **Additif** : le poker garde ses champs actuels.
 6. **Dot Voting** — première activité neuve. Choisie avant Weighted Ranking parce qu'elle
    exerce le modèle N-items sans le risque du drag & drop tactile.
 
@@ -382,7 +388,7 @@ Weighted Ranking, QCM/Poll, ROTI.
 
 ## Règles de travail
 
-- **`pytest` vert à chaque commit.** Référence actuelle : 300 passed.
+- **`pytest` vert à chaque commit.** Référence actuelle : 331 passed.
 - Le poker existant doit continuer à fonctionner **à chaque étape**. Aucune étape ne livre
   une régression « qu'on corrigera après ».
 - Étapes petites et testables. Pas de réécriture de masse.
@@ -483,6 +489,24 @@ Weighted Ranking, QCM/Poll, ROTI.
   await comm.send_json_to({"v": 1, "type": "ping", "payload": {}})
   await _drain_until(comm, "pong")
   ```
+
+  **Complément appris pendant 5d (tâche 3) : cette barrière n'ordonne que la
+  connexion qui l'émet.** `_handle_join` rend la main à l'appelant `ping`/`pong`
+  dès que le `state.sync` de CETTE connexion est émis — ses diffusions aux
+  voisins (`participant.joined`, `facilitator.presence`, …) peuvent encore être
+  en vol sur le channel layer. Un `ping` envoyé depuis la connexion A ne prouve
+  donc rien sur ce que la connexion B, encore en train de joindre, a déjà
+  diffusé ou reçu : A et B sont deux boucles `receive_json` indépendantes, et
+  rien n'ordonne le traitement du `ping` de A par rapport à l'achèvement du
+  `_handle_join` de B. Rencontré sur un test flaky qui flushait le bruit de
+  connexion d'une connexion voisine via un ping envoyé par le facilitateur
+  (`realtime/tests/test_scenario_ws.py`, voir
+  `.superpowers/sdd/2026-09-12-5d-scenario-prepare/task-3-report.md`) :
+  intermittent, `facilitator.presence` apparaissant parfois dans la collecte
+  finale au lieu d'avoir été flushé. **Le remède est de faire flusher chaque
+  connexion par elle-même** — un `ping`/`pong` propre à CHAQUE connexion juste
+  après son propre `session.join`, jamais un seul ping partagé pour garantir
+  l'état de plusieurs connexions à la fois.
 
 - **Coordonnées d'infrastructure, relevées sur la box le 2026-09-10.** Port **8009**
   (`8000`–`8008` tous occupés, dont `8006` daphne Poker, `8007` gunicorn billing, `8008` daphne
