@@ -186,6 +186,11 @@ async def test_totals_are_broadcast_to_everyone_and_carry_no_identity_when_the_c
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(fac, "vote.opened")
     await _drain_until(fac, "participation.update")
+    # L'ouverture elle-meme diffuse deja un premier `response.totals`, a
+    # zero (round de correction 3 : voir la section dediee plus bas dans ce
+    # fichier) -- le vider ici pour isoler celui que `response.cast`
+    # declenche juste apres, seul objet de CE test.
+    await _drain_until(fac, "response.totals")
 
     await voter.send_json_to(
         {"v": 1, "type": "response.cast", "payload": {"itemId": item1, "payload": {"points": 2}}}
@@ -288,10 +293,12 @@ async def test_adding_an_item_mid_round_refreshes_totals_and_pending_budgets():
     # depuis sa jointure (le premier `_drain_until` ci-dessus), donc son
     # tampon porte encore le bruit accumule depuis (agenda.updated/
     # subject.updated des deux `item.add` de `_two_items`, `round.configured`,
-    # `vote.opened`, deux `participation.update`, le premier `response.totals`
-    # a 2 items, puis `item.added`/`agenda.updated`/`subject.updated` du
-    # troisieme item) -- 11 messages avant celui vise (piege brief tache
-    # 6a-5 : « le helper abandonne au bout de 8, compte ce que tu diffuses »).
+    # `vote.opened`, le PREMIER `response.totals` -- a zero, diffuse des
+    # l'ouverture depuis la correction 3 -- deux `participation.update`, le
+    # SECOND `response.totals` a 2 items, puis `item.added`/`agenda.updated`/
+    # `subject.updated` du troisieme item) -- 12 messages avant celui vise
+    # (piege brief tache 6a-5 : « le helper abandonne au bout de 8, compte ce
+    # que tu diffuses »).
     totals = await _drain_until(voter, "response.totals", pred=lambda p: len(p["itemResults"]) == 3, limit=15)
     assert len(totals["payload"]["itemResults"]) == 3
 
@@ -325,6 +332,121 @@ async def test_vote_reset_refreshes_pending_budgets_to_the_full_amount():
     await fac.send_json_to({"v": 1, "type": "vote.reset", "payload": {}})
     after = await _drain_until(fac, "response.pending")
     assert after["payload"]["remaining"][voter_public_id] == 4
+
+    await fac.disconnect()
+    await voter.disconnect()
+
+
+# --- vote.open rejoint le club (round de correction 3, brief) : l'ajout d'un
+# item et la reinitialisation rediffusent deja les totaux, l'ouverture ne le
+# faisait pas -- la SEULE transition qui fait basculer `live_totals_payload`
+# de None a un agregat (idle -> open), pourtant celle qui en avait le plus
+# besoin : entre l'ouverture et le premier jeton pose, les participants deja
+# connectes croyaient les totaux masques alors qu'ils sont actives, pendant
+# qu'un retardataire qui recharge (via `state.sync`, meme garde) voyait des
+# zeros -- deux ecrans contradictoires dans la meme salle.
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_opening_a_round_with_live_totals_visible_broadcasts_zero_totals_immediately():
+    code, fac_token, voter_token = await database_sync_to_async(_make_dot_voting_room)()
+    fac, _ = await _join(fac_token, code)
+    voter, _ = await _join(voter_token, code)
+
+    round_id, item1, item2 = await _two_items(fac)
+    await _drain_until(voter, "item.added", pred=lambda p: len(p["items"]) == 2)
+
+    await fac.send_json_to({
+        "v": 1, "type": "round.configure",
+        "payload": {"roundId": round_id, "config": {"liveTotals": True}},
+    })
+    await _drain_until(voter, "round.configured")
+
+    await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
+
+    # A ZERO : personne n'a encore pose de jeton -- verifie sur la connexion
+    # du VOTANT, un tiers a l'action du facilitateur.
+    totals = await _drain_until(voter, "response.totals")
+    blocks = {b["itemId"]: b for b in totals["payload"]["itemResults"]}
+    assert blocks[item1]["totalPoints"] == 0
+    assert blocks[item1]["responseCount"] == 0
+    assert blocks[item2]["totalPoints"] == 0
+    assert blocks[item2]["responseCount"] == 0
+
+    await fac.disconnect()
+    await voter.disconnect()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_opening_a_round_with_live_totals_masked_broadcasts_no_totals():
+    """Le defaut est le secret : sans `round.configure` prealable
+    (`Round.config == {}`), `vote.open` ne diffuse AUCUN `response.totals`.
+
+    `vote.open` declenche TROIS faits (`vote.opened`, `participation.update`,
+    et -- seulement si la config l'autorise -- `response.totals`), pas un
+    seul comme `response.cast` : les deux premiers sont INCONDITIONNELS, on
+    peut donc les attendre DETERMINISTIQUEMENT par `_drain_until` (qui
+    attend reellement leur livraison, sans course) avant de poser la
+    barriere en aller-retour sur ce qui pourrait suivre. Preuve par barriere
+    SUR LA CONNEXION QUI A DECLENCHE L'ACTION -- le facilitateur, qui a emis
+    `vote.open` (voir la docstring de `_ping_pong_types`, deja rencontre
+    pour `response.cast` : cette meme connexion peut recevoir son `pong`
+    AVANT une diffusion que son propre message vient de declencher)."""
+    code, fac_token, voter_token = await database_sync_to_async(_make_dot_voting_room)()
+    fac, _ = await _join(fac_token, code)
+    voter, _ = await _join(voter_token, code)
+
+    await _two_items(fac)
+    await _drain_until(voter, "item.added", pred=lambda p: len(p["items"]) == 2)
+    # `_two_items` ne draine la connexion du facilitateur que jusqu'a chaque
+    # `item.added` (voir son implementation) : `agenda.updated`/
+    # `subject.updated`/`response.pending` du DEUXIEME ajout restent donc en
+    # file cote facilitateur. Les vider ici pour ne pas les confondre avec
+    # ce que `vote.open` diffuse.
+    await _drain_until(fac, "response.pending")
+
+    await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
+    # Deterministe : ces deux faits sont TOUJOURS diffuses, mutation ou pas --
+    # les attendre reellement (pas de course ici, `receive_json_from` bloque
+    # jusqu'a livraison) purge le tampon jusqu'au point exact ou seul
+    # `response.totals` resterait, s'il devait partir.
+    await _drain_until(fac, "vote.opened")
+    await _drain_until(fac, "participation.update")
+
+    seen = await _ping_pong_types(fac)
+    assert "response.totals" not in seen
+
+    await fac.disconnect()
+    await voter.disconnect()
+
+
+# --- item.remove rejoint le club (round de correction 3, brief) : retirer un
+# item change n (donc le budget 2n et la borne par item), exactement comme
+# en ajouter un -- meme classe de defaut que la section precedente
+# (round de correction 2), dernier cas non traite. `remove_item` n'est
+# autorise que sur un round encore IDLE (`realtime/services.py::remove_item`)
+# : `response.totals` (qui exige un round `open`) reste donc None des deux
+# cotes de ce test -- seul `response.pending` bouge, que le contrat §8.7
+# range deja sous le meme intitule (« Totaux en direct et reste a placer »).
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_removing_an_item_refreshes_the_pending_budget():
+    code, fac_token, voter_token = await database_sync_to_async(_make_dot_voting_room)()
+    fac, _ = await _join(fac_token, code)
+    voter, voter_sync = await _join(voter_token, code)
+    voter_public_id = voter_sync["payload"]["myParticipantId"]
+
+    _round_id, _item1, item2 = await _two_items(fac)  # n=2 -> budget 4
+    before = await _drain_until(fac, "response.pending", pred=lambda p: p["remaining"][voter_public_id] == 4)
+
+    await fac.send_json_to({"v": 1, "type": "item.remove", "payload": {"itemId": item2}})
+    after = await _drain_until(fac, "response.pending", pred=lambda p: p["remaining"][voter_public_id] == 2)
+    assert after["payload"]["remaining"][voter_public_id] == 2  # n=1 -> budget 2
+
+    # Sanity sur `before`, pour ne pas laisser croire que le test passerait
+    # meme sans la diffusion apres `item.remove`.
+    assert before["payload"]["remaining"][voter_public_id] == 4
 
     await fac.disconnect()
     await voter.disconnect()

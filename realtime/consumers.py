@@ -93,6 +93,17 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             item_id = await database_sync_to_async(services.remove_item)(room, participant, payload.get("itemId"))
             await self._broadcast_items(room, "item.removed", item_id)
             await self._broadcast_agenda(room)
+            # Meme classe de defaut que `item.add` plus haut (round de
+            # correction 2) -- retirer un item change `n` exactement comme en
+            # ajouter un, et `remove_item` n'invalidait pas l'affichage.
+            # `response.totals` reste None ici en pratique (`remove_item`
+            # n'est autorise que sur un round encore IDLE, voir sa docstring
+            # dans `realtime/services.py`), mais `response.pending` ne depend
+            # pas de l'etat du round et se corrige bel et bien -- §8.7 range
+            # les deux faits sous le meme intitule ("Totaux en direct et
+            # reste a placer").
+            await self._broadcast_live_totals(room)
+            await self._broadcast_pending_budgets(room)
         elif mtype == "item.reorder":
             await database_sync_to_async(services.reorder_items)(room, participant, payload.get("itemIds") or [])
             await self._broadcast_items(room, "item.reordered", None)
@@ -214,6 +225,16 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             deadline_iso = await database_sync_to_async(services.deadline_iso)(room)
             await self._broadcast("vote.opened", {"deadline": deadline_iso})
             await self._broadcast_participation(room)
+            # `response.totals` (contrat §8.7, tache 6a corr. 3) : l'ouverture
+            # est le SEUL moment ou `live_totals_payload` bascule de `None` a
+            # un agregat -- le round passe idle -> open, sa seule garde d'etat.
+            # Sans cette diffusion, deux ecrans contradictoires cohabitent dans
+            # la meme salle jusqu'au premier jeton pose : ceux deja connectes
+            # affichent encore "totaux masques", ceux qui rechargent (via
+            # `state.sync`, qui applique la meme garde) voient des zeros. Meme
+            # fonction, memes conditions que partout ailleurs -- rien construit
+            # quand la config du round ne rend pas les totaux visibles.
+            await self._broadcast_live_totals(room)
             self._schedule_timeout(room.code, deadline)
         elif mtype == "response.cast":
             # Ouvert a tous les participants (pas une intention de controle : pas

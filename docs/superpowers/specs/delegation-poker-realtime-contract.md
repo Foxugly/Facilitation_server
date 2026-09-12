@@ -151,6 +151,7 @@ Envoyé à un seul client (au `join` initial, à la reconnexion, à l'arrivée d
   "agenda": [ { "id": 12, "text": "Qui décide du budget outillage ?", "status": "current", "state": "open", "result": null, "everDecided": false, "canRank": false, "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ] } ],
   "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ],
   "round": { "id": 12, "state": "open" },
+  "config": { "liveTotals": true },
   "deadline": null,
   "timer": { "enabled": false, "seconds": 10 },
   "reveal": { "anonymous": false, "canAnonymise": false }
@@ -163,6 +164,7 @@ Champ par champ (`realtime/services.py::build_state_sync`) :
 - Si `roundState === "revealed"` **ou `"acted"`**, `state.sync` inclut aussi `itemResults` (§8.2.a) — un retardataire qui arrive après la révélation **voit les résultats** (le client traite `revealed` et `acted` comme un seul état d'affichage), et votera au tour suivant. Comme `vote.revealed`, il s'agit d'un décompte qui respecte l'anonymat : jamais de lien participant → carte sur un round anonyme.
 - `state.sync` porte aussi `chainingCandidates` (§8.5.a), **uniquement si le destinataire est le facilitateur** et que le round courant est lié en mode `manual`, pas encore résolu — même forme que le `candidates` de `round.candidates`. Un facilitateur qui (re)connecte sur un tel round revoit ainsi ses candidats sans avoir à re-sélectionner le round ; la clé est absente (pas vide) pour tout autre destinataire ou toute autre situation — réservée au facilitateur, la garde se fait avant le calcul, jamais par un masquage après coup.
 - **Depuis 5a** (§8.1), `state.sync` porte aussi `items` — la liste des items du round courant, même forme que dans les faits `item.*` (`[{id, text, sequence}]`) — et `round` — `{id, state}` du round courant (`id: null` si aucun round actif). `subject` reste émis en doublon (le texte du premier item) : aucune date n'est fixée pour son retrait — c'est une clé de `state.sync`, distincte des anciennes intentions entrantes `subject.set`/`subject.add`/`subject.select` (§8.1.b), retirées en 5b.
+- **Depuis 6a (tâche « correction 3 »), `state.sync` porte aussi `config`** — la config du round courant (`Round.config`, §8.3), **à la racine du snapshot** (`{}` si aucun round actif ou si le round n'a jamais été configuré, même défaut que le modèle). Ce n'est **pas** un secret, contrairement aux totaux que cette config gouverne (§8.7) : c'est un réglage du round, connu de tous, au même titre que son état ou ses items — aucune garde à l'émission, aucun filtrage par destinataire. La présence de cette clé **n'ouvre rien par elle-même** ; elle dit seulement quel réglage est en vigueur (`{"liveTotals": true}` signifie « les totaux sont visibles pendant ce round », pas « voici les totaux »). Avant cet ajout, un facilitateur qui rechargeait sa page en composant un round voyait son interrupteur revenir à la valeur par défaut de l'écran alors que le serveur avait gardé le réglage posé — une fausse assurance sur un réglage de confidentialité, le sens de l'erreur le plus dangereux de cette famille (`state.sync` ne rejoue aucun événement, règle constante du dépôt).
 - `room.isTeam` (`room.team_id is not None`) pilote le gating client de certaines options (le timer, notamment, est réservé aux salles d'équipe) ; le serveur reste de toute façon autoritaire côté validation.
 - `myRole` et `myParticipantId` sont le rôle et l'identifiant **du destinataire**, renvoyés par le serveur — jamais déduits d'un état client persisté : une promotion facilitateur doit se voir immédiatement chez le facilitateur lui-même, pas seulement chez les autres.
 - `resultLayout` fige la mise en page du dépouillement pour la salle (choisie par l'équipe à la création) : le client y adapte l'affichage dès la révélation.
@@ -591,6 +593,20 @@ Après un `vote.reset` qui remet le round à `idle`, `response.totals` ne repart
 comme l'invalidation de tout affichage du tour précédent. `response.pending`, lui, repart
 toujours après un reset : `remaining_budgets` ne dépend pas de l'état du round et rend alors le
 budget plein, une valeur fraîche.
+
+**Ré-émission (round de correction 3) : `vote.open` et `item.remove` rejoignent le club.**
+`vote.open` est la **seule** transition qui fait basculer `live_totals_payload` de `None` à un
+agrégat (`idle → open`, sa seule garde d'état) — pourtant elle ne rediffusait rien jusqu'ici :
+entre l'ouverture et le premier jeton posé, les participants déjà connectés croyaient les totaux
+masqués alors que la config du round les rend visibles, pendant qu'un retardataire qui recharge
+(`state.sync`, même garde que `response.totals`) voyait des zéros — deux écrans contradictoires
+dans la même salle. `vote.open` diffuse donc désormais `response.totals` après `vote.opened`/
+`participation.update`, **à zéro** si la config l'autorise (mêmes conditions, même fonction que
+partout ailleurs). `item.remove` change `n` (donc le budget `2n` et la borne par item) exactement
+comme `item.add` — même classe de défaut que ci-dessus, dernier cas non traité. `remove_item`
+n'étant autorisé que sur un round encore `idle` (`realtime/services.py::remove_item`),
+`response.totals` y reste `None` en pratique ; c'est `response.pending` qui se corrige, `§8.7`
+rangeant déjà les deux faits sous le même intitulé.
 
 ---
 

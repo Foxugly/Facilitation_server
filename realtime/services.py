@@ -1866,6 +1866,21 @@ def build_state_sync(participant):
         # alias meurent en 5b, pas avant.
         "items": items_payload(rnd),
         "round": {"id": rnd.id if rnd else None, "state": round_state},
+        # `config` du round courant (dot voting design §5, tache 6a corr. 3),
+        # A LA RACINE du snapshot (contrat -- Facilitation_frontend la lit en
+        # `s.config`) -- PAS un secret -- c'est un reglage du round, connu de
+        # tous, au meme titre que son etat ou ses items. `state.sync` ne
+        # rejoue aucun evenement (regle du depot), donc un facilitateur qui
+        # recharge sa page PENDANT qu'il compose un round doit retrouver son
+        # interrupteur `liveTotals` tel qu'il l'a pose, pas la valeur par
+        # defaut de son ecran -- sans quoi il croit les totaux secrets alors
+        # que le serveur, lui, les a gardes visibles : une fausse assurance
+        # sur un reglage de confidentialite, pas un simple affichage perime.
+        # `{}` quand aucun round n'est courant, meme defaut que `Round.config`.
+        # NE PAS CONFONDRE avec `liveTotals` plus bas : cette cle dit quel
+        # REGLAGE est en vigueur, elle n'ouvre RIEN par elle-meme -- les
+        # totaux eux-memes restent sous la garde de `live_totals_payload`.
+        "config": rnd.config if rnd else {},
         "deadline": deadline_iso(room),
         "timer": {"enabled": room.timer_enabled, "seconds": room.timer_seconds},
         # Announced to everyone, not just the facilitator: a voter must know whether
