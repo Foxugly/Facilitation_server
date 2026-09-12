@@ -217,6 +217,22 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 room, participant, payload.get("itemId"), payload.get("payload") or {}
             )
             await self._broadcast_participation(room)
+            # Deux diffusions neuves (design dot voting §4-§5, brief tache
+            # 6a-5, contrat §8.7), de portee DIFFERENTE -- a ne pas confondre :
+            # - `response.totals` : A TOUS, mais seulement si `live_totals_payload`
+            #   rend quelque chose -- round `open` ET config du round
+            #   `liveTotals: true` (defaut : secret, `None` sinon). Jamais de
+            #   lien participant -> jetons : un AGREGAT, rien d'autre.
+            # - `response.pending` : au FACILITATEUR SEUL, `audience="facilitator"`
+            #   -- filtre A L'EMISSION dans `facilitation_event` ci-dessous,
+            #   jamais un masquage cote client. `None` pour le poker (aucune
+            #   notion de budget), rien n'est alors diffuse.
+            totals = await database_sync_to_async(services.live_totals_payload)(room)
+            if totals is not None:
+                await self._broadcast("response.totals", totals)
+            remaining = await database_sync_to_async(services.remaining_budgets)(room)
+            if remaining is not None:
+                await self._broadcast("response.pending", {"remaining": remaining}, audience="facilitator")
         elif mtype == "vote.reveal":
             await database_sync_to_async(services.reveal)(room, participant)
             self._cancel_timeout(room.code)
@@ -319,10 +335,18 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             message["cid"] = cid
         await self.send_json(message)
 
-    async def _broadcast(self, mtype, payload):
-        await self.channel_layer.group_send(
-            self.group, {"type": "facilitation.event", "mtype": mtype, "payload": payload}
-        )
+    async def _broadcast(self, mtype, payload, audience=None):
+        """`audience="facilitator"` (brief tache 6a-5, contrat §8.7) : le
+        message part quand meme vers TOUT le groupe (`group_send` ne sait pas
+        cibler un seul membre), mais `facilitation_event` ci-dessous ne
+        l'ECRIT sur la socket que des connexions dont le participant resolu
+        est bien le facilitateur du round -- le filtrage se fait donc A
+        L'EMISSION, sur chaque connexion, jamais par un masquage cote client
+        qui recevrait quand meme la trame."""
+        message = {"type": "facilitation.event", "mtype": mtype, "payload": payload}
+        if audience:
+            message["audience"] = audience
+        await self.channel_layer.group_send(self.group, message)
 
     async def _error(self, code, message, rejected_type, cid):
         await self._emit("error", {
@@ -330,6 +354,13 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         }, cid)
 
     async def facilitation_event(self, event):
+        if event.get("audience") == "facilitator":
+            participant = await self._resolve()
+            is_facilitator = participant is not None and await database_sync_to_async(
+                services.is_facilitator
+            )(participant.room, participant)
+            if not is_facilitator:
+                return
         await self._emit(event["mtype"], event["payload"])
 
     def _schedule_timeout(self, code, deadline):

@@ -23,6 +23,11 @@ dans le domaine : la FORME d'une reponse dans le depouillement nominatif
 regle qui juge la valeur retenue a l'acte (`validate_chosen_value`). Les trois
 defauts reproduisent a l'identique le code en dur qu'ils remplacent, pour que
 le poker ne voie rien changer.
+
+Depuis la tache 6a-5, il porte aussi `remaining_budget` : ce qu'il reste a
+placer, PAR PARTICIPANT, reserve au facilitateur seul et filtre a l'emission
+(`realtime/consumers.py`, jamais un masquage cote client). Defaut `None` (le
+poker n'a aucune notion de budget) -- inchange pour lui.
 """
 from collections import Counter
 from collections.abc import Callable
@@ -291,6 +296,26 @@ class ActivitySpec:
     #: future activite de type Dot Voting / Weighted Ranking, pas du code ici.
     rank_value: Callable[[object], object] | None = field(default=None)
 
+    #: Ce qu'il reste a placer, pour UN participant sur CE round -- diffuse
+    #: au FACILITATEUR SEUL, filtre a l'emission (jamais un masquage cote
+    #: client) : design dot voting §4, brief tache 6a-5. Les jetons n'etant
+    #: pas obligatoires, "a fini" cesse d'etre deductible du seul nombre de
+    #: reponses -- le facilitateur a besoin de cette quantite pour savoir qui
+    #: reflechit encore.
+    #:
+    #: Signature : (existing, item_count) -> objet JSON-serialisable (un
+    #: entier pour dot_voting_v1). `existing` : les reponses [(item_id,
+    #: payload), ...] DEJA ECRITES par CE participant sur ce round -- MEME
+    #: forme que `validate_responses` juste au-dessus (memes tuples, pas de
+    #: second format a maintenir).
+    #:
+    #: `None` (defaut, le poker) : cette activite n'a aucune notion de budget
+    #: -- `services.remaining_budgets` renvoie `None` et rien n'est diffuse.
+    #: Ne PAS confondre avec `validate_responses`, qui juge un BOOLEEN (la
+    #: tentative passe-t-elle) ; celle-ci rend le RESTE, une quantite a
+    #: afficher, pas une decision a appliquer.
+    remaining_budget: Callable[[list, int], object] | None = field(default=None)
+
     def __post_init__(self):
         if self.aggregate is None:
             object.__setattr__(self, "aggregate", _default_aggregate(self.ordinal))
@@ -529,6 +554,21 @@ def _dot_voting_history_entry(result, label_for):
     }
 
 
+def _dot_voting_remaining_budget(existing, item_count):
+    """Ce qu'il reste a placer (design §1, §4 ; brief tache 6a-5) : le
+    budget total 2n moins ce que CE participant a DEJA pose, tous items du
+    round confondus -- pas un booleen comme `_dot_voting_validate_responses`
+    (qui juge une somme CONTRE 2n), juste sa moitie utile ici : le reste, une
+    quantite a afficher au facilitateur, pas une decision a appliquer.
+
+    `existing` porte deja l'etat COURANT (post-remplacement, cf.
+    `cast_response`) au moment ou `services.remaining_budgets` lit la table --
+    aucun piege de double-compte a reproduire ici, contrairement a
+    `_dot_voting_validate_responses` qui doit lui-meme ECRASER l'entree de la
+    tentative EN COURS avant de sommer."""
+    return 2 * item_count - sum(p.get("points", 0) for _, p in existing)
+
+
 def _dot_voting_rank_value(result):
     """Classement (design §6) : le total de l'item, PLUS GRAND = PLUS
     prioritaire -- donc le total lui-meme, aucune transformation.
@@ -588,6 +628,15 @@ ACTIVITY_REGISTRY: dict[str, ActivitySpec] = {
     # (design §6) dans `Result.chosen_value` + `Result.payload`
     # (migration `0022_result_payload`), et `result.act` ne fait plus alors
     # que conclure le round.
+    #
+    # Tache 6a-5 : `remaining_budget` alimente `services.remaining_budgets`,
+    # diffuse au FACILITATEUR SEUL (design §4) par
+    # `realtime/consumers.py::_dispatch` apres chaque `response.cast` --
+    # jamais au votant, filtre a l'emission, jamais un masquage cote client.
+    # `liveTotals` (config_schema ci-dessus) alimente desormais
+    # `services.live_totals_payload`, diffuse A TOUS mais seulement si le
+    # round est `open` ET que sa config l'autorise (design §5) -- toujours un
+    # AGREGAT, jamais un lien participant -> jetons (contrat §8.7).
     "dot_voting_v1": ActivitySpec(
         payload_schema={"points": int},
         config_schema={"liveTotals": bool},
@@ -599,6 +648,7 @@ ACTIVITY_REGISTRY: dict[str, ActivitySpec] = {
         validate_chosen_value=_dot_voting_validate_chosen_value,
         history_entry=_dot_voting_history_entry,
         rank_value=_dot_voting_rank_value,
+        remaining_budget=_dot_voting_remaining_budget,
         consumes="items",
         produces="results",
     ),

@@ -5,7 +5,8 @@ wraps these with ``database_sync_to_async``. Server is the source of truth: ever
 mutation validates the state machine and raises ``RoomError`` on an illegal move
 (contract §0.1, §6.b) rather than applying it.
 """
-from collections import Counter
+import threading
+from collections import Counter, defaultdict
 
 from django.conf import settings
 from django.db import transaction
@@ -127,6 +128,59 @@ def _is_facilitator(room, participant):
 def _require_facilitator(room, participant, rejected_type):
     if not _is_facilitator(room, participant):
         raise RoomError("forbidden.not_facilitator", "Not the facilitator", rejected_type)
+
+
+def is_facilitator(room, participant):
+    """Enrobage PUBLIC de `_is_facilitator` -- celui-ci reste prive parce que
+    les gardes du domaine LEVENT une `RoomError` (`_require_facilitator`) sur
+    un refus, alors que cet appelant-ci n'a besoin que du booleen : le
+    consumer, pour filtrer A L'EMISSION un fait reserve au facilitateur
+    (design dot voting §4 ; brief tache 6a-5 : « ce qu'il reste a placer par
+    participant, au facilitateur seul, filtre a l'emission »). Le filtrage se
+    fait ici, cote serveur, avant l'ecriture sur LA socket du destinataire --
+    jamais un masquage cote client, qui recevrait quand meme la trame."""
+    return _is_facilitator(room, participant)
+
+
+# Protection contre le double-onglet (piege releve tache 6a-3, brief tache
+# 6a-5) : lire le budget d'un participant PUIS l'ecrire n'etait pas
+# serialise -- deux onglets du MEME participant, chacun declenchant son
+# propre `cast_response()` (execute par `database_sync_to_async` dans le pool
+# de threads de Channels), pouvaient tous deux lire le meme etat AVANT que
+# l'un des deux n'ecrive, et depasser ensemble le budget de 2n jetons.
+#
+# Un verrou APPLICATIF, et non `select_for_update()` : SQLite -- le moteur du
+# developpement local et de cette suite de tests par defaut -- IGNORE
+# SILENCIEUSEMENT `select_for_update()` (`DatabaseFeatures.has_select_for_update
+# = False`, verifie dans `django.db.backends.sqlite3.base` ; aucune erreur,
+# mais aucun verrou non plus). Un `select_for_update()` aurait donc laisse ce
+# correctif sans aucun effet sur ce moteur, et un test de concurrence n'aurait
+# rien pu prouver dessus. Un `threading.Lock` par participant, lui, serialise
+# REELLEMENT deux threads du MEME PROCESSUS quel que soit le moteur -- et ce
+# depot ne fait tourner qu'UN SEUL processus daphne en production
+# (`deploy/systemd/facilitation-asgi.service` : aucun flag de workers), donc
+# cette protection intra-processus suffit aujourd'hui. Meme motif que
+# `_timer_tasks` dans `realtime/consumers.py` : un dict au niveau du MODULE,
+# pas de l'instance, pour survivre a toute connexion/deconnexion individuelle.
+_response_locks: dict[int, threading.Lock] = {}
+_response_locks_guard = threading.Lock()
+
+
+def _lock_for(participant_id):
+    """Le verrou de CE participant, cree au premier besoin.
+
+    La creation elle-meme est protegee par un second verrou, tenu tres
+    brievement : un `defaultdict(threading.Lock)` nu n'aurait pas suffi ici --
+    deux threads accedant SIMULTANEMENT a une cle absente peuvent chacun
+    construire un `Lock` different et n'en laisser qu'un dans le dict, l'autre
+    thread utilisant alors un verrou que personne d'autre ne tient (aucune
+    exclusion mutuelle, le defaut serait passe inapercu)."""
+    with _response_locks_guard:
+        lock = _response_locks.get(participant_id)
+        if lock is None:
+            lock = threading.Lock()
+            _response_locks[participant_id] = lock
+        return lock
 
 
 def _require_item_author(room, participant, item, rejected_type):
@@ -1168,18 +1222,91 @@ def cast_response(room, participant, item_id, payload):
     # l'ancienne valeur de CET item et la nouvelle. Appele avant d'ecrire :
     # un refus ne laisse donc rien derriere lui, la seule ecriture de cette
     # fonction etant l'`update_or_create` plus bas.
-    existing = list(
-        Response.objects.filter(round=rnd, participant=participant).values_list("item_id", "payload")
-    )
-    if not spec.validate_responses(existing, item_id, payload, item_count):
-        raise RoomError("state.invalid_transition", "Round budget exceeded", "response.cast")
-    Response.objects.update_or_create(
-        item=item,
-        participant=participant,
-        defaults={"round": rnd, "payload": payload},
-    )
+    #
+    # `_lock_for(participant.id)` (brief tache 6a-5) : ce bloc, de la LECTURE
+    # du budget a son ECRITURE, doit s'executer comme un tout pour CE
+    # participant -- sans quoi deux onglets ouverts par la meme personne
+    # peuvent chacun lire l'etat AVANT que l'un des deux n'ecrive, et
+    # depasser ensemble le budget de 2n. Inoffensif pour le poker (et toute
+    # activite sans notion de budget) : `validate_responses` y accepte
+    # toujours, le verrou ne fait alors que serialiser deux ecritures qui
+    # n'entraient de toute facon pas en conflit.
+    with _lock_for(participant.id):
+        existing = list(
+            Response.objects.filter(round=rnd, participant=participant).values_list("item_id", "payload")
+        )
+        if not spec.validate_responses(existing, item_id, payload, item_count):
+            raise RoomError("state.invalid_transition", "Round budget exceeded", "response.cast")
+        Response.objects.update_or_create(
+            item=item,
+            participant=participant,
+            defaults={"round": rnd, "payload": payload},
+        )
     room.touch()
     return payload
+
+
+def live_totals_payload(room):
+    """Totaux par item, DIFFUSABLES A TOUS PENDANT LE VOTE -- mais seulement
+    si la config du round courant l'autorise explicitement (design dot voting
+    §5, brief tache 6a-5). Renvoie `None` si le round n'est pas `open`, ou si
+    sa config ne porte pas `liveTotals: true` -- LE DEFAUT EST LE SECRET :
+    une config absente (`Round.config == {}`, valeur par defaut du modele) ou
+    l'option a `False` valent toutes deux un refus, jamais un oubli de
+    configuration traite comme un "oui" (design §5, derniere phrase).
+
+    Ce que cette fonction rend ne construit JAMAIS de lien participant ->
+    jetons : elle relit `spec.aggregate`, la MEME fonction que
+    `revealed_payload` utilise pour le decompte post-revelation, qui ne
+    recoit et ne renvoie QUE des agregats (avertissement deja pose sur
+    `ActivitySpec.aggregate`, tache 6a-4). L'invariant du secret tient donc
+    ici PAR CONSTRUCTION -- le serveur ne calcule jamais qu'un total, jamais
+    une reponse individuelle -- exactement ce que le design §5 demande :
+    "ce qui devient visible, ce sont les totaux par item, jamais le lien
+    participant -> jetons".
+    """
+    rnd = current_round(room)
+    if rnd is None or rnd.state != RoundState.OPEN:
+        return None
+    if not (rnd.config or {}).get("liveTotals", False):
+        return None
+    spec = spec_for(_round_resolution_strategy(rnd, room))
+    card_values = _card_values(room)
+    items_out = [
+        {**spec.aggregate(responses_of(rnd, item), card_values), "itemId": item.id}
+        for item in rnd.items.all()
+    ]
+    return {"itemResults": items_out}
+
+
+def remaining_budgets(room):
+    """Ce qu'il reste a placer, PAR PARTICIPANT, sur le round courant --
+    reserve au FACILITATEUR SEUL (design dot voting §4, brief tache 6a-5) :
+    les jetons ne sont pas obligatoires, donc "a fini" n'est plus deductible
+    (le compteur public de `participation()` garde son sens actuel, inchange
+    -- design §4) et le facilitateur a besoin de ce detail pour savoir qui
+    reflechit encore.
+
+    Renvoie `None` si l'activite active ne declare pas de notion de budget
+    (le poker : `spec.remaining_budget is None`) -- rien a diffuser alors.
+    Sinon, `{participantPublicId: valeur}` pour CHAQUE participant de la
+    salle, y compris ceux qui n'ont encore rien pose (budget entier restant).
+    """
+    rnd = current_round(room)
+    if rnd is None:
+        return None
+    spec = spec_for(_round_resolution_strategy(rnd, room))
+    if spec.remaining_budget is None:
+        return None
+    item_count = rnd.items.count()
+    by_participant = defaultdict(list)
+    rows = Response.objects.filter(round=rnd).values_list("participant_id", "item_id", "payload")
+    for participant_id, item_id, payload in rows:
+        by_participant[participant_id].append((item_id, payload))
+    return {
+        str(p.public_id): spec.remaining_budget(by_participant.get(p.id, []), item_count)
+        for p in room.participants.all()
+    }
 
 
 def _freeze_results(room, rnd):

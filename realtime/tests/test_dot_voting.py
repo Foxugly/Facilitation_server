@@ -12,12 +12,18 @@ par `services.cast_response`, avec une vraie DB (`create_dot_voting_deck` +
 le fait pour le poker) : c'est le seul moyen de verifier a la fois « rien
 n'est ecrit sur un refus » et le piege du remplacement (design §3,
 point 3 ; brief tache 6a-3).
+
+Tache 6a-5 ajoute trois sections : `remaining_budget` (registre, sans DB),
+`services.live_totals_payload`/`remaining_budgets` (domaine, avec DB mais
+sans WebSocket -- la preuve par barriere reseau vit dans
+`test_dot_voting_live.py`), et le test de concurrence du double-onglet
+(deux vrais threads, voir sa docstring).
 """
 from types import SimpleNamespace
 
 import pytest
 
-from decks.seed import create_dot_voting_deck
+from decks.seed import create_dot_voting_deck, create_standard_deck
 from realtime import services
 from realtime.activities import RoomError, spec_for, validate_config, validate_payload
 from rooms.codes import generate_token, generate_unique_code
@@ -364,3 +370,231 @@ def test_a_correction_can_still_be_refused_if_it_truly_overspends():
 
     assert Response.objects.get(item=items[0], participant=voter).payload == {"points": 3}
     assert Response.objects.get(item=items[1], participant=voter).payload == {"points": 4}
+
+
+# --- Ce qu'il reste a placer : remaining_budget (design §4, tache 6a-5) ---
+
+
+def test_remaining_budget_is_the_full_budget_when_nothing_was_placed_yet():
+    # n=3 -> budget 6, rien pose encore.
+    assert _spec().remaining_budget([], item_count=3) == 6
+
+
+def test_remaining_budget_subtracts_what_was_already_placed_across_all_items():
+    # n=3 -> budget 6. 2 (item 1) + 1 (item 2) deja poses -> reste 3.
+    existing = [(1, {"points": 2}), (2, {"points": 1})]
+    assert _spec().remaining_budget(existing, item_count=3) == 3
+
+
+def test_remaining_budget_can_reach_zero_but_not_negative_by_construction():
+    # n=2 -> budget 4, pile epuise.
+    existing = [(1, {"points": 4})]
+    assert _spec().remaining_budget(existing, item_count=2) == 0
+
+
+def test_poker_declares_no_budget_notion():
+    """Le poker (et toute activite sans hook propre) n'a aucune notion de
+    budget -- `remaining_budget` reste `None`, `services.remaining_budgets`
+    (teste plus bas) doit alors renvoyer `None` et ne rien diffuser."""
+    assert spec_for("delegation_v1").remaining_budget is None
+    assert spec_for("fist_of_five_v1").remaining_budget is None
+
+
+# --- services.live_totals_payload : totaux en direct, gates sur la config --
+#
+# La regle du design §5 -- "le defaut est le secret" -- se verifie ici a
+# l'echelle du DOMAINE (sans WebSocket). La preuve par barriere en
+# aller-retour, seule valable pour prouver une ABSENCE cote reseau, est dans
+# `test_dot_voting_live.py` (brief tache 6a-5, piege : "ce depot a deja vu un
+# test d'absence passer sans rien verifier").
+
+
+@pytest.mark.django_db
+def test_live_totals_is_none_when_the_round_is_not_open():
+    room, fac, voter, rnd, items = _dot_voting_room(2)
+    # Round encore idle : meme si la config portait liveTotals, rien a
+    # diffuser tant que personne ne peut voter.
+    rnd.config = {"liveTotals": True}
+    rnd.save(update_fields=["config"])
+    assert services.live_totals_payload(room) is None
+
+
+@pytest.mark.django_db
+def test_live_totals_is_none_by_default_secret_config():
+    """LE DEFAUT EST LE SECRET (design §5, derniere phrase) : une config
+    absente (`Round.config == {}`, valeur par defaut du modele) n'est PAS un
+    oubli traite comme un "oui" -- `cast_response` n'exige jamais que le
+    facilitateur configure quoi que ce soit avant d'ouvrir le vote."""
+    room, fac, voter, rnd, items = _dot_voting_room(2)
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 2})
+    assert rnd.config == {}
+    assert services.live_totals_payload(room) is None
+
+
+@pytest.mark.django_db
+def test_live_totals_is_none_when_the_config_explicitly_turns_it_off():
+    room, fac, voter, rnd, items = _dot_voting_room(2)
+    rnd.config = {"liveTotals": False}
+    rnd.save(update_fields=["config"])
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 2})
+    assert services.live_totals_payload(room) is None
+
+
+@pytest.mark.django_db
+def test_live_totals_carries_only_aggregates_when_the_config_allows_it():
+    """Mode visible : le total EST diffusable, mais reste un AGREGAT --
+    aucune cle nominative (`votes`, `participantId`) n'apparait jamais dans
+    ce bloc, contrairement a `revealed_payload` (qui, lui, en porte une sur
+    un round non anonyme apres reveal)."""
+    room, fac, voter, rnd, items = _dot_voting_room(2)  # n=2 -> au plus 2 points par item
+    rnd.config = {"liveTotals": True}
+    rnd.save(update_fields=["config"])
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 2})
+
+    totals = services.live_totals_payload(room)
+
+    assert totals is not None
+    blocks = {b["itemId"]: b for b in totals["itemResults"]}
+    assert blocks[items[0].id]["totalPoints"] == 2
+    assert blocks[items[0].id]["responseCount"] == 1
+    assert blocks[items[1].id]["totalPoints"] == 0
+    assert set(blocks[items[0].id].keys()) == {"itemId", "totalPoints", "responseCount"}
+
+
+# --- services.remaining_budgets : au facilitateur seul, jamais au votant --
+
+
+@pytest.mark.django_db
+def test_remaining_budgets_is_none_for_an_activity_without_a_budget_notion():
+    """Meme garde que `live_totals_payload`, mais pour le poker : aucune
+    notion de budget declaree -- rien a diffuser (brief tache 6a-5)."""
+    deck = create_standard_deck()
+    code = generate_unique_code(lambda c: Room.objects.filter(code=c).exists())
+    room = Room(code=code, vote_type=deck.vote_type, deck_snapshot=build_deck_snapshot(deck))
+    room.touch(save=False)
+    room.save()
+    fac = Participant.objects.create(room=room, token=generate_token(), display_name="Sam", role=Role.FACILITATOR)
+    rnd = Round.objects.create(room=room, facilitator=fac)
+    Item.objects.create(round=rnd, text="Subject", sequence=1)
+    room.current_round = rnd
+    room.save(update_fields=["current_round"])
+    assert services.remaining_budgets(room) is None
+
+
+@pytest.mark.django_db
+def test_remaining_budgets_covers_every_participant_including_those_who_placed_nothing():
+    room, fac, voter, rnd, items = _dot_voting_room(3)  # budget 6
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 2})
+
+    budgets = services.remaining_budgets(room)
+
+    assert budgets[str(voter.public_id)] == 4  # 6 - 2
+    assert budgets[str(fac.public_id)] == 6  # rien pose : budget entier restant
+
+
+# --- Le piege de la tache 3, corrige ici : le double-onglet -------------
+
+
+@pytest.mark.django_db(transaction=True)
+def test_cast_response_serializes_two_concurrent_tabs_of_the_same_participant():
+    """Piege releve tache 6a-3, corrige tache 6a-5 (brief) : lire le budget
+    d'un participant PUIS l'ecrire n'etait pas serialise -- deux onglets du
+    MEME participant, chacun declenchant son propre `cast_response()`,
+    pouvaient tous deux lire le meme etat AVANT que l'un des deux n'ecrive,
+    et depasser ensemble le budget de 2n.
+
+    Reproduit une VRAIE concurrence : deux threads systeme reels (pas un
+    mock d'horloge), synchronises par des `threading.Event` autour du point
+    exact ou `services._lock_for` est acquis. Le premier thread a l'atteindre
+    le TIENT (il est mis en pause A L'INTERIEUR du verrou) le temps que le
+    second, demarre APRES coup, tente lui aussi de l'acquerir -- ce qui
+    prouve qu'il en est bien BLOQUE, pas seulement qu'il s'execute apres.
+    Sans le verrou (mutation : `_lock_for` neutralise), le second thread ne
+    serait jamais bloque : les deux liraient `existing` avant que l'un des
+    deux n'ecrive, et la seconde reponse serait acceptee a tort.
+
+    Mise en scene (n=3 -> budget 6, au plus 3 jetons par item -- deux items
+    seuls, chacun a son maximum, ne peuvent jamais depasser 2*3=6 : la borne
+    par item interdit mathematiquement de depasser le budget avec SEULEMENT
+    deux ecritures concurrentes). Le voter pose D'ABORD, sequentiellement,
+    3 points sur l'item 0 (moitie du budget, hors course) ; LA RACE porte sur
+    les 3 points restants, chaque thread visant un item DIFFERENT (1 et 2)
+    a 3 points chacun -- combines, 3 + 3 + 3 = 9 > 6."""
+    import contextlib
+    import threading
+
+    room, fac, voter, rnd, items = _dot_voting_room(3)  # n=3 -> budget 6
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 3})  # hors course : moitie du budget
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_lock_for = services._lock_for
+
+    @contextlib.contextmanager
+    def instrumented_lock_for(participant_id):
+        with real_lock_for(participant_id):
+            if not entered.is_set():
+                # Le PREMIER thread a entrer tient le vrai verrou et se met
+                # en pause ici, DEDANS -- tant qu'il ne l'a pas relache, le
+                # second thread (ci-dessous) reste bloque sur
+                # `real_lock_for(...).acquire()`, pas sur cet `Event`.
+                entered.set()
+                release.wait(timeout=2)
+            yield
+
+    services._lock_for = instrumented_lock_for
+    try:
+        results = {}
+
+        def cast_first():
+            try:
+                services.cast_response(room, voter, items[1].id, {"points": 3})
+                results["first"] = "ok"
+            except Exception as exc:  # noqa: BLE001 -- capture pour assertion, pas pour avaler
+                results["first"] = exc
+
+        def cast_second():
+            # Attend que le premier thread tienne deja le verrou avant de
+            # tenter le sien -- sans cette attente, le second pourrait
+            # s'executer avant meme que le premier ne l'ait pris, et le test
+            # ne prouverait rien sur le verrou lui-meme.
+            entered.wait(timeout=2)
+            try:
+                services.cast_response(room, voter, items[2].id, {"points": 3})
+                results["second"] = "ok"
+            except Exception as exc:  # noqa: BLE001
+                results["second"] = exc
+
+        t1 = threading.Thread(target=cast_first)
+        t2 = threading.Thread(target=cast_second)
+        t1.start()
+        t2.start()
+        # Laisse au second thread le temps d'atteindre `real_lock_for(...).acquire()`
+        # et de s'y bloquer reellement avant de liberer le premier -- une
+        # poignee de lectures locales le separent de ce point, tres largement
+        # sous ce delai.
+        import time
+
+        time.sleep(0.2)
+        release.set()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+    finally:
+        services._lock_for = real_lock_for
+
+    assert results.get("first") == "ok"
+    assert isinstance(results.get("second"), RoomError)
+    assert results["second"].rejected_type == "response.cast"
+
+    # Rien du second n'a ete ecrit sur son refus : la reponse hors-course
+    # (item 0) et celle du premier thread (item 1) existent, exactement --
+    # l'item 2, vise par le thread refuse, n'a RIEN.
+    assert Response.objects.filter(round=rnd, participant=voter).count() == 2
+    assert Response.objects.get(item=items[0], participant=voter).payload == {"points": 3}
+    assert Response.objects.get(item=items[1], participant=voter).payload == {"points": 3}
+    assert not Response.objects.filter(item=items[2], participant=voter).exists()

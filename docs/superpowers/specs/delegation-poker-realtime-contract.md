@@ -520,6 +520,48 @@ chaînage « top N » (§8.5) reprend.
 
 ---
 
+## 8.7 Totaux en direct et reste à placer (6a, tâche 5)
+
+> Ajouté 2026-09-12, livraison 6a tâche 5 (`.superpowers/sdd/2026-09-12-6a-dot-voting/`).
+> Deux faits nouveaux après `response.cast`, de **portées différentes** — à ne pas confondre.
+
+**`response.totals`** — à **tous**, mais **seulement si** la config du round courant
+l'autorise (`Round.config.liveTotals`, §8.3, déclaré par `dot_voting_v1`). Le défaut est le
+**secret** : une config absente (`{}`, valeur par défaut du modèle) ou `liveTotals: false`
+valent toutes deux un refus — jamais un oubli de configuration traité comme un « oui ». Émis
+uniquement pendant que le round est `open` (`realtime/services.py::live_totals_payload`).
+
+```json
+{ "itemResults": [ { "itemId": 42, "totalPoints": 5, "responseCount": 2 } ] }
+```
+
+Ce que ce bloc porte est **toujours un agrégat** — le même `ActivitySpec.aggregate` que
+`vote.revealed`/`itemResults` (§8.6) — **jamais** de clé `votes` ni de lien participant →
+jetons, quel que soit le mode d'anonymat du round : l'invariant du secret tient ici **par
+construction** (le serveur ne construit qu'un total, jamais une réponse individuelle), pas par
+un filtrage a posteriori.
+
+**`response.pending`** — au **facilitateur seul**, filtré **à l'émission** (jamais un masquage
+côté client) :
+
+```json
+{ "remaining": { "p-1": 2, "p-2": 4 } }
+```
+
+`remaining` porte, pour **chaque** participant de la salle (y compris ceux n'ayant encore rien
+posé), ce qu'il lui reste à placer — `ActivitySpec.remaining_budget`, `None` pour le poker (rien
+n'est alors diffusé). Les jetons n'étant pas obligatoires (design §4), « a fini » cesse d'être
+déductible du seul nombre de réponses ; c'est ce que ce fait donne au facilitateur, lui seul.
+
+Le filtrage facilitateur-seul est **générique** : `_broadcast(mtype, payload, audience=
+"facilitator")` diffuse quand même au groupe entier (le channel layer ne cible pas un membre
+seul), mais `facilitation_event` — exécuté **par chaque connexion** — ne l'écrit sur SA socket
+que si le participant qu'elle résout est bien le facilitateur du round courant
+(`services.is_facilitator`). Un participant ordinaire ne reçoit donc **jamais** l'octet de ce
+fait, pas seulement une trame qu'il ignorerait.
+
+---
+
 ## 9. Hors périmètre (Phase 1)
 
 - ~~❌ `facilitator.transfer` **volontaire** (Phase 2)~~ — **implémenté** : l'intention WS
