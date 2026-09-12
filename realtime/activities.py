@@ -86,13 +86,38 @@ class ActivitySpec:
     aggregate: Callable[[list, list[str]], dict] = field(default=None)
 
     #: Une reponse deja conforme au `payload_schema` porte-t-elle une valeur
-    #: JOUABLE ? Signature : (payload, card_values) -> bool. Vit dans le
-    #: registre pour la meme raison que `aggregate` : une activite au payload
-    #: different de `{"card": ...}` (ex. `{"dots": 3}`) ne doit pas heriter
-    #: d'une regle « la carte appartient au deck » qui ne la concerne pas.
-    #: Laisse a None : `__post_init__` branche le defaut poker (appartenance
-    #: au deck actif) si l'entree du registre n'en fournit pas.
-    validate_value: Callable[[dict, list[str]], bool] = field(default=None)
+    #: JOUABLE ? Signature : (payload, card_values, item_count=0) -> bool. Vit
+    #: dans le registre pour la meme raison que `aggregate` : une activite au
+    #: payload different de `{"card": ...}` (ex. `{"points": 3}`) ne doit pas
+    #: heriter d'une regle « la carte appartient au deck » qui ne la concerne
+    #: pas. Laisse a None : `__post_init__` branche le defaut poker
+    #: (appartenance au deck actif) si l'entree du registre n'en fournit pas.
+    #:
+    #: `item_count` (tache 6a-2, dot voting) : la borne d'une valeur peut
+    #: dependre du nombre d'items du round (0 <= points <= n), une donnee que
+    #: le registre ne possede pas — elle vit dans `Round`/`Item`, cote
+    #: domaine. Deux formes etaient possibles : que la validation recoive ce
+    #: dont elle a besoin en parametre, ou que le registre expose une
+    #: fonction que le domaine appelle avec un objet de contexte. Choix
+    #: retenu : la PREMIERE — un parametre positionnel de plus, exactement
+    #: comme `card_values` deja aujourd'hui (une donnee que le registre ne
+    #: possede pas plus, deja passee de cette facon). C'est aussi la forme de
+    #: `aggregate` et `rank_value` juste a cote : des primitives passees
+    #: directement, jamais un objet de contexte generique. Garder cette
+    #: symetrie plutot qu'inventer un second canal pour cette seule donnee.
+    #: Toute activite future qui aura besoin d'une autre donnee de contexte
+    #: l'ajoutera de la meme facon, en parametre supplementaire.
+    #:
+    #: Defaut PRUDENT (`item_count=0`, meme esprit que `consumes`/`produces`
+    #: plus bas) : le seul appel existant (`cast_response`,
+    #: `realtime/services.py`) ne fournit encore que 2 arguments positionnels
+    #: — le brancher sur `item_count` est l'ouverture de domaine que la
+    #: tache SUIVANTE (validation a l'echelle du round, design section 3)
+    #: fera. Tant qu'elle n'est pas faite, une strategie qui a besoin de
+    #: `item_count` sans le recevoir doit se comporter de facon SURE plutot
+    #: que de laisser passer une valeur arbitraire : ici, une borne haute a 0
+    #: plutot qu'une borne ignoree.
+    validate_value: Callable[[dict, list[str], int], bool] = field(default=None)
 
     #: Qui a le droit de CREER un item sur un round de cette activite :
     #: "facilitator" (le facilitateur seul, comportement du poker) ou
@@ -144,8 +169,13 @@ class ActivitySpec:
             object.__setattr__(self, "validate_value", _default_validate_value)
 
 
-def _default_validate_value(payload, card_values):
-    """La regle du poker : la carte jouee doit appartenir au deck actif."""
+def _default_validate_value(payload, card_values, item_count=0):
+    """La regle du poker : la carte jouee doit appartenir au deck actif.
+
+    `item_count` est accepte et ignore : le poker n'en a jamais besoin, le
+    parametre n'existe que pour les strategies (dot_voting_v1 et ce qui
+    suivra) qui bornent leur valeur par le nombre d'items du round plutot
+    que par un deck."""
     return payload.get("card") in card_values
 
 
@@ -171,6 +201,82 @@ def _default_aggregate(ordinal):
     return aggregate
 
 
+def _dot_voting_validate_value(payload, card_values, item_count=0):
+    """Remplace la regle par defaut (« la valeur appartient au deck »),
+    inapplicable ici : dot_voting_v1 n'a pas de cartes, `card_values` est
+    donc toujours vide (design §7 -- un deck sans carte fige un snapshot a
+    `cards: []`) et la regle par defaut refuserait TOUT. Preuve, comme
+    l'annonce le design, que l'architecture du registre (5c) tenait : il
+    suffit de fournir un autre `validate_value`, rien d'autre ne bouge.
+
+    La borne vient du ROUND, pas du deck : chaque participant recoit 2n
+    jetons de poids 1 (n = nombre d'items du round) et peut en poser au plus
+    n sur un meme item -- d'ou 0 <= points <= n (design section 2-3, brief
+    tache 6a-2). La contrainte GLOBALE (la somme d'un participant sur tout
+    le round <= 2n) n'est PAS verifiee ici : elle porte sur l'ensemble des
+    reponses d'un participant, pas sur une reponse a la fois, et c'est
+    precisement l'ouverture de domaine que la tache suivante ajoute (design
+    section 3, point 3).
+    """
+    points = payload.get("points")
+    if isinstance(points, bool) or not isinstance(points, int):
+        return False
+    return 0 <= points <= item_count
+
+
+def _dot_voting_aggregate(responses, card_values):
+    """Somme des points de CET item, tous participants confondus (design
+    section 1 et 6) -- la meme fonction que reutilisera weighted_dot_voting
+    (tache 6b), les deux activites partageant le depouillement (design
+    section 1 : « elles partagent l'agregation, le classement et le
+    rendu »).
+
+    Forme volontairement differente du defaut poker (`{"tally": [...],
+    "spread": {...}}`) : il n'y a ici ni carte a denombrer ni ecart ordinal,
+    seulement un total. `card_values` est accepte pour respecter la
+    signature commune a tout `aggregate` du registre, mais reste inutilise
+    -- toujours vide pour cette strategie (design §7).
+
+    Ouverture NON faite par cette tache, a signaler : `revealed_payload`
+    (`realtime/services.py`) suppose encore la forme poker (`counted["tally"]`,
+    `counted["spread"]`) et lit `payload.get("card")` pour le detail
+    nominatif -- la generaliser pour consommer cette forme differente est
+    un travail de domaine qui reste a faire (voir rapport de tache).
+    """
+    total = sum(r.payload.get("points", 0) for r in responses)
+    return {"totalPoints": total, "responseCount": len(responses)}
+
+
+def _dot_voting_rank_value(result):
+    """Classement (design section 6) : le total de l'item, PLUS GRAND = PLUS
+    prioritaire -- donc le total lui-meme, aucune transformation.
+
+    Lit `Result.chosen_value` (CharField) comme une chaine d'entier : c'est
+    le SEUL champ que `Result` porte aujourd'hui. Le design l'a deja
+    identifie comme une dette (section 6 : « Result ne porte qu'une valeur
+    de carte. Il lui faut un payload, additif »). Cette tache ne leve pas
+    cette dette -- « Aucune migration » est une contrainte explicite de la
+    tache 6a-2 -- et ne cable pas non plus `act_result`
+    (`realtime/services.py`) pour y ecrire un total : ce `rank_value` est
+    donc EXERCABLE des aujourd'hui (tests directs, et par
+    `_chaining_candidate_items` si un `Result.chosen_value` porte deja un
+    total ecrit par un autre moyen), mais rien ne l'alimente encore en
+    production. A signaler comme ouverture de domaine restante, pas a faire
+    ici.
+
+    Departage des ex aequo : NE se fait PAS dans cette fonction, une cle de
+    tri seule ne peut pas etre "stable" par elle-meme. Il se fait par
+    construction, en amont : `sorted(..., key=rank_value, reverse=True)`
+    est un tri STABLE en Python (garanti par le langage), et l'appelant
+    (`_chaining_candidate_items`, `realtime/services.py`) trie deja sa liste
+    source par `(sequence, id)` avant de reclasser par `rank_value`. Deux
+    items a egalite de points ressortent donc toujours dans l'ordre de
+    sequence de leur round source, jamais dans un ordre arbitraire —
+    verifie par test (une valeur d'ordre incoherente casserait l'historique
+    du chainage, brief tache 6a-2)."""
+    return int(result.chosen_value)
+
+
 #: Strategie -> specification. Une strategie absente retombe sur le defaut, qui
 #: est volontairement NON ordinal : mieux vaut ne pas afficher d'ecart que d'en
 #: afficher un faux sur une echelle dont on ignore l'ordre.
@@ -180,6 +286,29 @@ ACTIVITY_REGISTRY: dict[str, ActivitySpec] = {
     # des "items" (design §7).
     "delegation_v1": ActivitySpec(ordinal=True, consumes="items", produces="results"),
     "fist_of_five_v1": ActivitySpec(ordinal=True, consumes="items", produces="results"),
+    # Dot Voting (design 2026-09-12, tache 6a-2) : chaque participant recoit 2n
+    # jetons de poids 1 (n = nombre d'items du round) et en pose au plus n sur
+    # un meme item -- {"points": <entier>}, valide item par item par
+    # `_dot_voting_validate_value` (0 <= points <= n). `consumes="items"` :
+    # l'activite distribue des jetons sur des items existants, saisis ou
+    # copies d'une source chainee. `produces="results"` + `rank_value` :
+    # chainable, et c'est elle qui allume le "top N" du chainage (design
+    # section 6), reste inutilisable depuis 5e faute d'une activite sachant
+    # classer. `config_schema` : {"liveTotals": bool} -- le facilitateur
+    # choisit si les TOTAUX (jamais le lien participant -> jetons) sont
+    # visibles pendant le vote (design section 5). Absente de `Round.config`
+    # (valeur par defaut du modele : {}) tant que le facilitateur n'a rien
+    # choisi -- a lire cote domaine avec `.get("liveTotals", False)`, secret
+    # par defaut, jamais un oubli de configuration.
+    "dot_voting_v1": ActivitySpec(
+        payload_schema={"points": int},
+        config_schema={"liveTotals": bool},
+        validate_value=_dot_voting_validate_value,
+        aggregate=_dot_voting_aggregate,
+        rank_value=_dot_voting_rank_value,
+        consumes="items",
+        produces="results",
+    ),
 }
 
 DEFAULT_SPEC = ActivitySpec()
