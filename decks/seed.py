@@ -169,3 +169,44 @@ def create_roman_vote_deck():
         },
         ROMAN_VOTE_CARDS,
     )
+
+
+DOT_VOTING_CODE = "dot_voting"
+DOT_VOTING_RESOLUTION_STRATEGY = "dot_voting_v1"
+
+DOT_VOTING_NAMES = {
+    "en": "Dot Voting",
+    "fr": "Vote par gommettes",
+    "nl": "Stickerstemming",
+    "it": "Voto con adesivi",
+    "es": "Votación con pegatinas",
+}
+
+
+def create_dot_voting_deck():
+    """Deck de l'activite Dot Voting : porte le type de vote, AUCUNE carte active.
+
+    Design doc §7 : tout le runtime tire voteType/resolutionStrategy/cards du
+    snapshot de deck fige sur le round, jamais des tables du referentiel. Un
+    deck sans carte produit donc un snapshot a cards: [] qui porte quand meme
+    le bon type -- pas de carte a inventer, l'activite se joue avec des jetons
+    geres par le registre (realtime/activities.py), hors perimetre de ce seed.
+
+    free_tier=False comme les decks icones : reserve aux equipes payantes tant
+    que ce n'est pas offert par defaut aux salles sans compte.
+    """
+    vt, _ = VoteType.objects.get_or_create(
+        code=DOT_VOTING_CODE, defaults={"resolution_strategy": DOT_VOTING_RESOLUTION_STRATEGY}
+    )
+    vt.set_current_language("en")
+    vt.name = DOT_VOTING_NAMES["en"]
+    vt.save()
+
+    deck = Deck.objects.create(
+        vote_type=vt, is_standard=True, free_tier=False, card_back_image=_standard_card_back()
+    )
+    for lang, name in DOT_VOTING_NAMES.items():
+        deck.set_current_language(lang)
+        deck.name = name
+        deck.save()
+    return deck
