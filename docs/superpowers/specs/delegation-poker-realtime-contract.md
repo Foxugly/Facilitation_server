@@ -524,7 +524,8 @@ chaînage « top N » (§8.5) reprend.
 ## 8.7 Totaux en direct et reste à placer (6a, tâche 5)
 
 > Ajouté 2026-09-12, livraison 6a tâche 5 (`.superpowers/sdd/2026-09-12-6a-dot-voting/`).
-> Deux faits nouveaux après `response.cast`, de **portées différentes** — à ne pas confondre.
+> Deux faits nouveaux après `response.cast` (et, depuis le round de correction 2, après
+> `item.add` et `vote.reset` — voir plus bas), de **portées différentes** — à ne pas confondre.
 
 **`response.totals`** — à **tous**, mais **seulement si** la config du round courant
 l'autorise (`Round.config.liveTotals`, §8.3, déclaré par `dot_voting_v1`). Le défaut est le
@@ -540,7 +541,13 @@ Ce que ce bloc porte est **toujours un agrégat** — le même `ActivitySpec.agg
 `vote.revealed`/`itemResults` (§8.6) — **jamais** de clé `votes` ni de lien participant →
 jetons, quel que soit le mode d'anonymat du round : l'invariant du secret tient ici **par
 construction** (le serveur ne construit qu'un total, jamais une réponse individuelle), pas par
-un filtrage a posteriori.
+un filtrage a posteriori. **Nuance (round de correction 2) : cela ne dit rien du canal par
+delta.** En mode visible, un observateur voit le total d'UN item bouger juste après qu'un
+participant y a posé un jeton — une attribution *faible* (quel item, approximativement quand),
+jamais un jeton individuel ni son auteur. Ce n'est pas un défaut : le mode visible est un choix
+**explicite** du facilitateur (§8.3), qui accepte cette fuite d'information résiduelle en
+l'activant — mais la promesse « par construction » ne porte que sur le *payload*, pas sur ce
+qu'un observateur attentif peut inférer de la *cadence* des messages.
 
 **`response.pending`** — au **facilitateur seul**, filtré **à l'émission** (jamais un masquage
 côté client) :
@@ -555,11 +562,35 @@ n'est alors diffusé). Les jetons n'étant pas obligatoires (design §4), « a f
 déductible du seul nombre de réponses ; c'est ce que ce fait donne au facilitateur, lui seul.
 
 Le filtrage facilitateur-seul est **générique** : `_broadcast(mtype, payload, audience=
-"facilitator")` diffuse quand même au groupe entier (le channel layer ne cible pas un membre
-seul), mais `facilitation_event` — exécuté **par chaque connexion** — ne l'écrit sur SA socket
-que si le participant qu'elle résout est bien le facilitateur du round courant
-(`services.is_facilitator`). Un participant ordinaire ne reçoit donc **jamais** l'octet de ce
-fait, pas seulement une trame qu'il ignorerait.
+"facilitator", audience_id=...)` diffuse quand même au groupe entier (le channel layer ne cible
+pas un membre seul) — le message **transite** par le canal jusqu'à la file de **chaque**
+connexion de la salle, il n'atteint simplement jamais leur socket s'il ne leur est pas destiné.
+`facilitation_event` — exécuté **par chaque connexion** — ne l'écrit sur SA socket que si
+`audienceId` correspond à l'identifiant public que CETTE connexion connaît déjà d'elle-même
+(`self.public_id`, fixé à la jointure). Un participant ordinaire ne l'écrit donc **jamais** sur
+sa propre socket.
+
+**Optimisation (round de correction 2) : l'identité du facilitateur est résolue UNE SEULE
+fois, à l'émission** (`services.facilitator_public_id`, une requête), plutôt que par chaque
+connexion à la livraison (`_resolve()` + `is_facilitator()`, deux requêtes — dans une salle
+pleine, une trentaine de requêtes pour un seul jeton posé). Conséquence à connaître :
+**l'autorité n'est plus relue au moment de la livraison, elle est figée au moment de
+l'émission.** La fenêtre entre les deux est infime, et le destinataire ainsi figé est bien celui
+qui facilitait quand le fait s'est produit — mais un transfert de main (`facilitator.transfer`,
+`facilitator.claim`) survenant *pile* dans cette fenêtre serait honoré avec un message de
+retard : l'ancien facilitateur recevrait ce dernier `response.pending`, pas le nouveau.
+Acceptable — sans conséquence au-delà d'un affichage en retard d'un seul message.
+
+**Ré-émission (round de correction 2) : `item.add` et `vote.reset` invalident silencieusement
+un affichage déjà envoyé, sans qu'aucun jeton ne soit reposé** — ajouter un item change `n`
+(donc le budget `2n` et la borne par item), réinitialiser vide les réponses. Les deux
+ré-émettent donc `response.totals`/`response.pending` (mêmes conditions, mêmes fonctions) après
+leurs faits propres (`item.added`/`agenda.updated`/`subject.updated`, ou `vote.wasReset`).
+Après un `vote.reset` qui remet le round à `idle`, `response.totals` ne repart généralement
+**pas** (le round n'est plus `open` — rien à recalculer) : le client traite déjà `vote.wasReset`
+comme l'invalidation de tout affichage du tour précédent. `response.pending`, lui, repart
+toujours après un reset : `remaining_budgets` ne dépend pas de l'état du round et rend alors le
+budget plein, une valeur fraîche.
 
 ---
 

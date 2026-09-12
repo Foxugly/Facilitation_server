@@ -312,14 +312,21 @@ def add_item(room, participant, text):
     propre post-it, `Item.author` le porte ; quand c'est le facilitateur qui
     pose un sujet au nom de la room, `author` reste `None`, comme aujourd'hui.
     """
-    is_facilitator = _is_facilitator(room, participant)
+    # `caller_is_facilitator`, et non `is_facilitator` : ce dernier nom est
+    # depuis la tache 6a-5 celui d'une fonction PUBLIQUE du module
+    # (`is_facilitator(room, participant)`, plus bas). Une variable locale du
+    # meme nom la masquerait pour tout le reste de CETTE fonction -- inoffensif
+    # tant que rien ici n'appelle la fonction publique, mais un appel ajoute
+    # plus tard casserait avec un `TypeError` obscur (« bool n'est pas
+    # appelable ») plutot qu'un import manquant, bien plus dur a diagnostiquer.
+    caller_is_facilitator = _is_facilitator(room, participant)
     strategy = _resolution_strategy(room)
-    if spec_for(strategy).items_authored_by != "participants" and not is_facilitator:
+    if spec_for(strategy).items_authored_by != "participants" and not caller_is_facilitator:
         raise RoomError("forbidden.not_facilitator", "Not the facilitator", "item.add")
     text = (text or "").strip()
     if not text:
         raise RoomError("state.invalid_transition", "Empty item", "item.add")
-    author = None if is_facilitator else participant
+    author = None if caller_is_facilitator else participant
     rnd = current_round(room)
     if rnd is None:
         # Aucun round courant : seul le facilitateur peut en ouvrir un
@@ -328,7 +335,7 @@ def add_item(room, participant, text):
         # aucun round ou ecrire son post-it tant que le facilitateur n'a pas
         # prepare le round — pas de round fantome dont il deviendrait
         # facilitateur.
-        if not is_facilitator:
+        if not caller_is_facilitator:
             raise RoomError("state.invalid_transition", "No active round", "item.add")
         rnd = _new_round(room, participant, text)
         room.current_round = rnd
@@ -1281,8 +1288,20 @@ def live_totals_payload(room):
         return None
     spec = spec_for(_round_resolution_strategy(rnd, room))
     card_values = _card_values(room)
+    # UNE requete groupee pour TOUT le round, et non une par item
+    # (`responses_of` en aurait fait autant que d'items -- round de
+    # correction 2 : ce chemin s'execute a CHAQUE jeton pose, sur une
+    # machine qui heberge dix applications Django et a deja sature une
+    # fois cette annee). Regroupement en Python plutot qu'en base : le
+    # nombre d'items d'un round reste petit (design §1 : n gommettes par
+    # participant, pas de round a des centaines d'items), le cout d'un
+    # `defaultdict` sur ce volume est negligeable a cote d'une requete SQL
+    # de plus par item.
+    responses_by_item = defaultdict(list)
+    for r in Response.objects.filter(round=rnd):
+        responses_by_item[r.item_id].append(r)
     items_out = [
-        {**spec.aggregate(responses_of(rnd, item), card_values), "itemId": item.id}
+        {**spec.aggregate(responses_by_item.get(item.id, []), card_values), "itemId": item.id}
         for item in rnd.items.all()
     ]
     return {"itemResults": items_out}
@@ -1666,6 +1685,24 @@ def _facilitator_participant(room):
 def facilitator_present(room):
     fac = _facilitator_participant(room)
     return bool(fac and fac.is_connected)
+
+
+def facilitator_public_id(room):
+    """L'identifiant public (`str(public_id)`) du facilitateur AUTORITAIRE du
+    round courant, ou `None` si la salle n'en a aucun.
+
+    Round de correction 2 (brief tache 6a-5) : point d'accroche pour diffuser
+    un fait reserve au facilitateur SANS que chaque connexion de la salle
+    n'ait a se re-resoudre elle-meme pour savoir si ELLE l'est. Voir le
+    commentaire de `realtime/consumers.py::facilitation_event`, qui compare
+    cet identifiant a celui que chaque connexion connait deja d'elle-meme
+    (`self.public_id`, fixe a la jointure) -- zero requete par destinataire,
+    contre deux avant (`_resolve()` + l'acces a `rnd` que fait
+    `is_facilitator`). Une SEULE requete ici, a l'emission
+    (`_facilitator_participant`), au lieu d'une par connexion a la livraison.
+    """
+    fac = _facilitator_participant(room)
+    return str(fac.public_id) if fac else None
 
 
 def can_claim(room):

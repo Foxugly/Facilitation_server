@@ -705,3 +705,40 @@ def test_state_sync_has_no_pending_budgets_for_the_poker_facilitator():
     payload = services.build_state_sync(fac)
 
     assert "pendingBudgets" not in payload
+
+
+# --- Performance du chemin chaud (round de correction 2, brief) ----------
+#
+# Chaque gommette posee declenche `live_totals_payload` : une requete PAR
+# ITEM (`responses_of` appelee en boucle) aurait ete couteuse sur une salle
+# a plusieurs items, sur une machine qui heberge dix applications Django et
+# a deja sature une fois cette annee. Le nombre de requetes doit rester LE
+# MEME, que le round porte 2 items ou 6 -- la preuve qu'aucune boucle
+# n'interroge plus la base par item.
+
+
+@pytest.mark.django_db
+def test_live_totals_payload_does_not_query_once_per_item(django_assert_num_queries):
+    room, fac, voter, rnd, items = _dot_voting_room(2)
+    rnd.config = {"liveTotals": True}
+    rnd.save(update_fields=["config"])
+    services.open_vote(room, fac)
+    services.cast_response(room, voter, items[0].id, {"points": 1})
+    services.cast_response(room, voter, items[1].id, {"points": 1})
+
+    with django_assert_num_queries(2):
+        # 1 requete pour les items du round, 1 requete GROUPEE pour toutes
+        # les reponses -- jamais une par item.
+        services.live_totals_payload(room)
+
+    room6, fac6, voter6, rnd6, items6 = _dot_voting_room(6)
+    rnd6.config = {"liveTotals": True}
+    rnd6.save(update_fields=["config"])
+    services.open_vote(room6, fac6)
+    for item in items6:
+        services.cast_response(room6, voter6, item.id, {"points": 1})
+
+    with django_assert_num_queries(2):
+        # MEME nombre de requetes qu'avec 2 items : la preuve que le cout ne
+        # grandit pas avec le nombre d'items du round.
+        services.live_totals_payload(room6)

@@ -25,6 +25,7 @@ import pytest
 from channels.db import database_sync_to_async
 
 from decks.seed import create_dot_voting_deck
+from realtime.consumers import RoomConsumer
 from realtime.tests.test_consumer import _drain_until, _join
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Participant, Role, Room
@@ -237,3 +238,154 @@ async def test_remaining_budget_reaches_the_facilitator_but_never_the_voter():
 
     await fac.disconnect()
     await voter.disconnect()
+
+
+# --- Ce qui invalide silencieusement l'affichage sans nouveau jeton (round
+# de correction 2, brief) : ajouter un item change n (donc le budget) et
+# reinitialiser vide les reponses. Les deux doivent rafraichir les faits
+# ci-dessus, sans attendre le prochain `response.cast`.
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_adding_an_item_mid_round_refreshes_totals_and_pending_budgets():
+    code, fac_token, voter_token = await database_sync_to_async(_make_dot_voting_room)()
+    fac, _ = await _join(fac_token, code)
+    voter, voter_sync = await _join(voter_token, code)
+    voter_public_id = voter_sync["payload"]["myParticipantId"]
+
+    round_id, item1, _item2 = await _two_items(fac)  # n=2 -> budget 4
+    await _drain_until(voter, "item.added", pred=lambda p: len(p["items"]) == 2)
+
+    await fac.send_json_to({
+        "v": 1, "type": "round.configure",
+        "payload": {"roundId": round_id, "config": {"liveTotals": True}},
+    })
+    await _drain_until(fac, "round.configured")
+
+    await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
+    await _drain_until(fac, "vote.opened")
+    await _drain_until(fac, "participation.update")
+
+    # n=2 -> budget 4. Le votant en pose 2 : il en reste 2.
+    await voter.send_json_to(
+        {"v": 1, "type": "response.cast", "payload": {"itemId": item1, "payload": {"points": 2}}}
+    )
+    before = await _drain_until(fac, "response.pending")
+    assert before["payload"]["remaining"][voter_public_id] == 2
+
+    # Le facilitateur ajoute un TROISIEME item : n passe a 3, budget a 6.
+    # Les 2 jetons deja poses laissent maintenant 4, pas 2 -- la preuve que
+    # la valeur a bien ete RECALCULEE, pas simplement rejouee.
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Item 3"}})
+    after = await _drain_until(fac, "response.pending")
+    assert after["payload"]["remaining"][voter_public_id] == 4
+
+    # Les totaux en direct, eux, sont publics : verifies sur la connexion du
+    # VOTANT (tiers a ce geste du facilitateur) -- ils portent desormais
+    # trois blocs, le troisieme a zero.
+    #
+    # `limit` releve : la connexion du votant n'a ete draine QU'UNE fois
+    # depuis sa jointure (le premier `_drain_until` ci-dessus), donc son
+    # tampon porte encore le bruit accumule depuis (agenda.updated/
+    # subject.updated des deux `item.add` de `_two_items`, `round.configured`,
+    # `vote.opened`, deux `participation.update`, le premier `response.totals`
+    # a 2 items, puis `item.added`/`agenda.updated`/`subject.updated` du
+    # troisieme item) -- 11 messages avant celui vise (piege brief tache
+    # 6a-5 : « le helper abandonne au bout de 8, compte ce que tu diffuses »).
+    totals = await _drain_until(voter, "response.totals", pred=lambda p: len(p["itemResults"]) == 3, limit=15)
+    assert len(totals["payload"]["itemResults"]) == 3
+
+    await fac.disconnect()
+    await voter.disconnect()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_vote_reset_refreshes_pending_budgets_to_the_full_amount():
+    code, fac_token, voter_token = await database_sync_to_async(_make_dot_voting_room)()
+    fac, _ = await _join(fac_token, code)
+    voter, voter_sync = await _join(voter_token, code)
+    voter_public_id = voter_sync["payload"]["myParticipantId"]
+
+    _, item1, _item2 = await _two_items(fac)  # n=2 -> budget 4
+    await _drain_until(voter, "item.added", pred=lambda p: len(p["items"]) == 2)
+
+    await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
+    await _drain_until(fac, "vote.opened")
+    await _drain_until(fac, "participation.update")
+
+    await voter.send_json_to(
+        {"v": 1, "type": "response.cast", "payload": {"itemId": item1, "payload": {"points": 2}}}
+    )
+    before = await _drain_until(fac, "response.pending")
+    assert before["payload"]["remaining"][voter_public_id] == 2
+
+    # Reinitialiser vide les reponses : le reste a placer doit refleter le
+    # budget PLEIN aussitot, pas rester bloque sur l'ancienne valeur jusqu'au
+    # prochain jeton pose sur le round suivant.
+    await fac.send_json_to({"v": 1, "type": "vote.reset", "payload": {}})
+    after = await _drain_until(fac, "response.pending")
+    assert after["payload"]["remaining"][voter_public_id] == 4
+
+    await fac.disconnect()
+    await voter.disconnect()
+
+
+# --- Echec ferme du filtre facilitateur-seul (relecture round de
+# correction 2) -----------------------------------------------------------
+#
+# Sous l'ANCIEN mecanisme (chaque connexion se re-resolvait elle-meme via
+# `is_facilitator()`), une information manquante dans l'evenement n'avait
+# aucune consequence. Avec la comparaison d'identifiants (round de
+# correction 2, optimisation), ce n'est plus vrai : si `audienceId` est
+# absent de l'evenement, le comparer nu a `self.public_id` peut reussir PAR
+# ACCIDENT pour une connexion dont l'identifiant public n'est pas encore
+# etabli (`None == None`) -- livrant alors le fait a TOUT LE MONDE, l'inverse
+# exact de ce que ce filtre existe pour garantir. Teste directement au
+# niveau de `facilitation_event` (pas via le cycle WS complet) : c'est le
+# point d'accroche exact du defaut, et ce test survit a tout remaniement de
+# ce qui l'entoure.
+
+
+async def test_a_facilitator_only_event_without_an_audience_id_reaches_nobody():
+    """Meme un destinataire dont l'identifiant public serait deja etabli ne
+    doit RIEN recevoir si l'evenement lui-meme ne porte pas `audienceId` --
+    l'absence cote emetteur doit fermer le filtre, jamais l'ouvrir."""
+    consumer = RoomConsumer()
+    consumer.public_id = "p-1"
+    emitted = []
+
+    async def _record_emit(mtype, payload, cid=None):
+        emitted.append((mtype, payload))
+
+    consumer._emit = _record_emit
+
+    await consumer.facilitation_event(
+        {"mtype": "response.pending", "payload": {"remaining": {}}, "audience": "facilitator"}
+    )
+
+    assert emitted == []
+
+
+async def test_a_facilitator_only_event_without_an_audience_id_reaches_a_connection_with_no_public_id_either():
+    """Le cas precis qui motive ce test (brief) : une connexion dont
+    l'identifiant public n'est PAS ENCORE etabli (pas de jointure
+    `session.join` complete -- `self.public_id` n'existe pas du tout comme
+    attribut) ne doit pas recevoir un fait reserve juste parce que
+    `getattr(self, "public_id", None)` et `event.get("audienceId")` valent
+    tous deux `None` : la coincidence qui livrerait le fait a tout le
+    monde si le garde-fou `audience_id is None` n'existait pas."""
+    consumer = RoomConsumer()
+    # PAS de consumer.public_id : simule une connexion avant sa jointure.
+    assert not hasattr(consumer, "public_id")
+    emitted = []
+
+    async def _record_emit(mtype, payload, cid=None):
+        emitted.append((mtype, payload))
+
+    consumer._emit = _record_emit
+
+    await consumer.facilitation_event(
+        {"mtype": "response.pending", "payload": {"remaining": {}}, "audience": "facilitator"}
+    )
+
+    assert emitted == []
