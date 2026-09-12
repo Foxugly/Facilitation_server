@@ -606,7 +606,10 @@ def _chaining_candidate_items(room, rnd):
     """
     source = rnd.source_round
     rule = rnd.source_rule or {}
-    items = list(source.items.all().order_by("sequence", "id"))
+    # `select_related("author")` : ces items sont ensuite serialises avec
+    # l'UUID public de leur auteur (authorId) -- sans lui, une liste de N
+    # items ferait une requete par item pour resoudre chaque auteur.
+    items = list(source.items.all().select_related("author").order_by("sequence", "id"))
     if rule.get("take") == "results":
         # Seuls les items DECIDES sont candidats : un item sans Result n'a ni
         # valeur a reprendre, ni cle de classement a calculer.
@@ -649,9 +652,24 @@ def chaining_candidates(room, round_id):
     if rnd.source_round_id is None:
         raise RoomError("state.invalid_transition", "No source bound", "round.candidates")
     return [
-        {"sourceItemId": item.id, "text": item.text, "authorId": item.author_id}
+        {"sourceItemId": item.id, "text": item.text, "authorId": _author_public_id(item)}
         for item in _chaining_candidate_items(room, rnd)
     ]
+
+
+def _author_public_id(item):
+    """L'UUID public (`Participant.public_id`) de l'auteur d'un item, jamais
+    sa PK interne (`item.author_id`) : la PK est sequentielle et laisse
+    deviner l'ordre de creation et le volume, en plus d'etre inutile au
+    front, qui ne connait ses participants que par leur UUID public. `None`
+    quand l'item n'a pas d'auteur -- facilitateur ayant pose l'item au nom de
+    la room, ou auteur parti (`Item.author` est `SET_NULL`) : dans les deux
+    cas `item.author_id` est `None` et il ne faut pas lever dessus.
+
+    Suppose l'auteur deja charge (`select_related("author")`) par l'appelant
+    -- une liste d'items ne doit jamais resoudre son auteur item par item.
+    """
+    return str(item.author.public_id) if item.author_id else None
 
 
 def _chained_items_payload(items):
@@ -668,7 +686,7 @@ def _chained_items_payload(items):
             "sequence": item.sequence,
             "originItemId": item.origin_item_id,
             "sourceItemId": item.source_item_id,
-            "authorId": item.author_id,
+            "authorId": _author_public_id(item),
         }
         for item in items
     ]
@@ -707,7 +725,11 @@ def resolve_source(room, participant, round_id, item_ids=None):
         raise RoomError("state.invalid_transition", "No source bound", "round.resolve")
 
     if rnd.source_resolved_at is not None:
-        already = list(rnd.items.filter(source_item__isnull=False).order_by("sequence", "id"))
+        already = list(
+            rnd.items.filter(source_item__isnull=False)
+            .select_related("author")
+            .order_by("sequence", "id")
+        )
         return _chained_items_payload(already)
 
     rule = rnd.source_rule or {}

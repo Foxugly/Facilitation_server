@@ -330,6 +330,106 @@ def test_copied_item_keeps_its_original_author(room_with_facilitator):
     assert copy.author_id == voter.id
 
 
+def test_chaining_candidates_report_the_authors_public_id_not_the_internal_pk(
+    room_with_facilitator,
+):
+    """L'`authorId` diffuse est l'UUID public du participant (meme convention
+    que `participants_list`/`revealed_payload`), jamais sa PK interne
+    sequentielle : elle laisserait deviner l'ordre de creation et le volume,
+    et le front ne peut de toute facon la relier a rien."""
+    room, fac = room_with_facilitator
+    voter = Participant.objects.create(room=room, token=generate_token(), display_name="Lou")
+    source = Round.objects.create(room=room, facilitator=fac, sequence=1)
+    Item.objects.create(round=source, text="Idee de Lou", sequence=1, author=voter)
+    consumer = Round.objects.create(room=room, facilitator=fac, sequence=2)
+    bind_round(room, fac, consumer.id, source.id, _manual_rule())
+
+    candidates = chaining_candidates(room, consumer.id)
+
+    assert candidates[0]["authorId"] == str(voter.public_id)
+    assert candidates[0]["authorId"] != voter.id
+    assert candidates[0]["authorId"] != str(voter.id)
+
+
+def test_chaining_candidates_report_null_when_the_item_has_no_author(room_with_facilitator):
+    """Un item pose par le facilitateur au nom de la room n'a pas d'auteur :
+    `authorId` doit porter `null`, pas lever sur un `author_id` absent."""
+    room, fac = room_with_facilitator
+    source = Round.objects.create(room=room, facilitator=fac, sequence=1)
+    Item.objects.create(round=source, text="Pose par le facilitateur", sequence=1)
+    consumer = Round.objects.create(room=room, facilitator=fac, sequence=2)
+    bind_round(room, fac, consumer.id, source.id, _manual_rule())
+
+    candidates = chaining_candidates(room, consumer.id)
+
+    assert candidates[0]["authorId"] is None
+
+
+def test_chaining_candidates_report_null_when_the_author_has_left_the_room(
+    room_with_facilitator,
+):
+    """`Item.author` est `SET_NULL` : un auteur qui quitte la salle (son
+    `Participant` supprime) ne doit pas faire lever la resolution de l'UUID
+    public, juste laisser `authorId` a `null`."""
+    room, fac = room_with_facilitator
+    voter = Participant.objects.create(room=room, token=generate_token(), display_name="Lou")
+    source = Round.objects.create(room=room, facilitator=fac, sequence=1)
+    Item.objects.create(round=source, text="Idee de Lou", sequence=1, author=voter)
+    consumer = Round.objects.create(room=room, facilitator=fac, sequence=2)
+    bind_round(room, fac, consumer.id, source.id, _manual_rule())
+    voter.delete()
+
+    candidates = chaining_candidates(room, consumer.id)
+
+    assert candidates[0]["authorId"] is None
+
+
+def test_chaining_candidates_do_not_query_the_author_once_per_item(room_with_facilitator):
+    """Regression : resoudre l'UUID public de l'auteur ITEM PAR ITEM ferait
+    une requete par ligne sur une liste de candidats -- `select_related`
+    doit le charger dans la meme requete que les items eux-memes. Verifie en
+    comparant le nombre de requetes entre une liste a 1 item et une liste a
+    5 : une fuite en O(n) ferait diverger les deux, jamais un total fixe."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    room, fac = room_with_facilitator
+    voter = Participant.objects.create(room=room, token=generate_token(), display_name="Lou")
+
+    def _candidate_query_count(n_items):
+        source = Round.objects.create(room=room, facilitator=fac, sequence=10 + n_items)
+        for n in range(1, n_items + 1):
+            Item.objects.create(round=source, text=f"Item {n}", sequence=n, author=voter)
+        consumer = Round.objects.create(room=room, facilitator=fac, sequence=20 + n_items)
+        bind_round(room, fac, consumer.id, source.id, _manual_rule())
+        with CaptureQueriesContext(connection) as ctx:
+            candidates = chaining_candidates(room, consumer.id)
+        assert len(candidates) == n_items
+        return len(ctx.captured_queries)
+
+    assert _candidate_query_count(1) == _candidate_query_count(5)
+
+
+def test_resolve_source_reports_the_authors_public_id(room_with_facilitator):
+    """Meme convention sur le payload de copie que sur les candidats :
+    `_chained_items_payload` doit lui aussi porter l'UUID public."""
+    room, fac = room_with_facilitator
+    voter = Participant.objects.create(room=room, token=generate_token(), display_name="Lou")
+    source = Round.objects.create(room=room, facilitator=fac, sequence=1)
+    Item.objects.create(round=source, text="Idee de Lou", sequence=1, author=voter)
+    consumer = Round.objects.create(room=room, facilitator=fac, sequence=2)
+    bind_round(room, fac, consumer.id, source.id, _auto_rule())
+
+    copied = resolve_source(room, fac, consumer.id)
+
+    assert copied[0]["authorId"] == str(voter.public_id)
+
+    # Rappel idempotent (round deja resolu) : meme convention sur le chemin
+    # qui relit les copies existantes au lieu d'en recreer.
+    replayed = resolve_source(room, fac, consumer.id)
+    assert replayed[0]["authorId"] == str(voter.public_id)
+
+
 def test_resolving_the_same_binding_twice_does_not_duplicate_items(room_with_facilitator):
     """Comportement 7 : le round consommateur redevient courant (reouvert
     puis re-selectionne) sans jamais dupliquer sa copie."""

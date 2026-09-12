@@ -422,7 +422,7 @@ Sortant (tous, sauf `round.candidates`) :
 | `type` | `payload` | Émis après |
 |--------|-----------|------------|
 | `round.bound` | `{ roundId, sourceRoundId, rule }` | `round.bind`, toujours — aucun autre fait n'est nécessaire, la liaison ne change ni les items ni l'état d'aucun round. |
-| `round.resolved` | `{ roundId, items: [{itemId, text, sequence, originItemId, sourceItemId, authorId}] }` | `round.resolve`, toujours — même forme que `_chained_items_payload` (`realtime/services.py`). |
+| `round.resolved` | `{ roundId, items: [{itemId, text, sequence, originItemId, sourceItemId, authorId}] }` | `round.resolve`, toujours — même forme que `_chained_items_payload` (`realtime/services.py`). `authorId`, comme `participantId` (§5), est l'UUID public du participant (`Participant.public_id`), jamais sa PK interne — `null` si l'item n'a pas d'auteur (posé par le facilitateur, ou auteur ayant quitté la salle, `Item.author` étant `SET_NULL`). |
 | `agenda.updated` (§5) | `{ agenda }` | `round.resolve` (les items du round consommateur viennent de changer). |
 | `subject.updated` (§5) | `{ text }` | `round.resolve` (le premier item peut avoir changé). |
 
@@ -451,7 +451,7 @@ courant via `round.select`, le serveur émet lui-même :
 
 | `type` | Cible | `payload` | Émis après |
 |--------|-------|-----------|------------|
-| `round.candidates` | **1 client, le facilitateur** | `{ roundId, candidates: [{sourceItemId, text, authorId}] }` | `round.select`, quand le round devenu courant est lié en mode `manual` et pas encore résolu. |
+| `round.candidates` | **1 client, le facilitateur** | `{ roundId, candidates: [{sourceItemId, text, authorId}] }` | `round.select`, quand le round devenu courant est lié en mode `manual` et pas encore résolu. `authorId` suit la même convention que ci-dessus (`round.resolved`) : UUID public, `null` sans auteur. |
 
 **Réservé au facilitateur, filtré à l'émission** — jamais une diffusion de
 groupe suivie d'un masquage côté client. `round.select` exige déjà le
