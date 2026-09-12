@@ -69,6 +69,13 @@ class ActivitySpec:
     #: fichier, jamais `services.cast_response`.
     payload_schema: dict = field(default_factory=lambda: {"card": str})
 
+    #: Les cles attendues dans `Round.config`, et leur type — meme role que
+    #: `payload_schema`, mais pour la configuration du round plutot que pour
+    #: chaque reponse. Vide par defaut : le poker n'a aucune option propre
+    #: aujourd'hui, donc toute cle qu'un client tenterait d'y poser est une
+    #: erreur cote client, pas une donnee a stocker (tache 2, design 5c).
+    config_schema: dict = field(default_factory=dict)
+
     #: Responses d'un item -> decompte. Vit ici et non dans `services` pour que
     #: l'objectif tienne : ajouter une activite ne doit toucher que ce fichier.
     #: Signature : (responses, card_values) -> {"tally": [...], "spread": {...}}.
@@ -137,18 +144,33 @@ def spec_for(strategy: str | None) -> ActivitySpec:
     return ACTIVITY_REGISTRY.get(strategy or "", DEFAULT_SPEC)
 
 
-def validate_payload(strategy, payload):
-    """Verifie que `payload` porte exactement les cles du `payload_schema` de la
-    strategie, avec le bon type — ni cle manquante, ni cle en trop, ni type
-    errone. Leve `RoomError` plutot que de laisser `cast_response` ecrire un
-    payload que l'activite ne sait pas relire."""
-    schema = spec_for(strategy).payload_schema
-    if not isinstance(payload, dict) or set(payload.keys()) != set(schema.keys()):
+def _validate_against_schema(schema, data, rejected_type):
+    """Coeur commun a `validate_payload` et `validate_config` : `data` doit
+    porter EXACTEMENT les cles de `schema`, avec le bon type — ni cle
+    manquante, ni cle en trop, ni type errone. Factorise pour que la regle ne
+    puisse pas diverger entre payload et config comme l'a deja fait la regle
+    ordinale avant le registre (voir l'en-tete du module)."""
+    if not isinstance(data, dict) or set(data.keys()) != set(schema.keys()):
         raise RoomError(
-            "state.invalid_transition", "Payload does not match schema", "response.cast"
+            "state.invalid_transition", "Does not match schema", rejected_type
         )
     for key, expected_type in schema.items():
-        if not isinstance(payload.get(key), expected_type):
+        if not isinstance(data.get(key), expected_type):
             raise RoomError(
-                "state.invalid_transition", "Payload does not match schema", "response.cast"
+                "state.invalid_transition", "Does not match schema", rejected_type
             )
+
+
+def validate_payload(strategy, payload):
+    """Verifie que `payload` porte exactement les cles du `payload_schema` de la
+    strategie, avec le bon type. Leve `RoomError` plutot que de laisser
+    `cast_response` ecrire un payload que l'activite ne sait pas relire."""
+    _validate_against_schema(spec_for(strategy).payload_schema, payload, "response.cast")
+
+
+def validate_config(strategy, config):
+    """Meme regle que `validate_payload`, appliquee a `Round.config` plutot
+    qu'a `Response.payload` : seul le `rejected_type` differe. Leve `RoomError`
+    plutot que de laisser `configure_round` ecrire une configuration que
+    l'activite ne sait pas relire."""
+    _validate_against_schema(spec_for(strategy).config_schema, config, "round.configure")

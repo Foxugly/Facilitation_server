@@ -10,7 +10,7 @@ from collections import Counter
 from django.conf import settings
 from django.utils import timezone
 
-from realtime.activities import RoomError, spec_for, validate_payload
+from realtime.activities import RoomError, spec_for, validate_config, validate_payload
 
 from rooms.models import (
     Item,
@@ -429,6 +429,41 @@ def prepare_round(
         "anonymous": bool(rnd.is_anonymous),
         "timerEnabled": room.timer_enabled,
         "timerSeconds": room.timer_seconds,
+    }
+
+
+def configure_round(room, participant, round_id, *, deck_id=None, config=None):
+    """Fige la config d'un round (et, en option, son deck) AVANT ouverture —
+    meme raison que pour le mode d'anonymat (`set_reveal_mode`) : les
+    participants doivent savoir a quoi ils jouent avant de jouer.
+
+    Le deck est fige via le MEME chemin que `prepare_round` (task 1) plutot
+    que reecrit ici : `select_deck` change le deck ACTIF de la room, puis on
+    reporte ce choix sur le round pour qu'un changement ulterieur du deck actif
+    ne le lui reecrive pas sous les pieds.
+    """
+    _require_facilitator(room, participant, "round.configure")
+    rnd = room.rounds.filter(id=round_id).first()
+    if rnd is None:
+        raise RoomError("state.invalid_transition", "Unknown round", "round.configure")
+    if rnd.state != RoundState.IDLE:
+        raise RoomError("state.invalid_transition", "Round already started", "round.configure")
+    if deck_id is not None:
+        select_deck(room, participant, deck_id)
+        room.refresh_from_db(fields=["deck_snapshot"])
+        rnd.deck_snapshot = room.deck_snapshot
+        rnd.save(update_fields=["deck_snapshot"])
+    if config is not None:
+        snapshot = rnd.deck_snapshot if rnd.deck_snapshot else room.deck_snapshot
+        strategy = (snapshot or {}).get("resolutionStrategy", "")
+        validate_config(strategy, config)
+        rnd.config = config
+        rnd.save(update_fields=["config"])
+    room.touch()
+    return {
+        "roundId": rnd.id,
+        "deckSnapshot": rnd.deck_snapshot if rnd.deck_snapshot else room.deck_snapshot,
+        "config": rnd.config,
     }
 
 

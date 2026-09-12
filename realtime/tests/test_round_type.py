@@ -7,7 +7,9 @@ import pytest
 
 from decks.models import Deck
 from decks.seed import create_standard_deck
-from realtime import services
+from realtime import activities, services
+from realtime.activities import ActivitySpec
+from realtime.services import RoomError
 from realtime.tests.helpers import cast_first_item
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Participant, Role, Room, Round
@@ -158,3 +160,71 @@ def test_round_config_defaults_to_empty_dict_and_round_trips(room_with_two_decks
 
     reloaded = Round.objects.get(id=rnd_id)
     assert reloaded.config == {"anonymity": "off"}
+
+
+@pytest.fixture
+def delegation_v1_with_note_option(monkeypatch):
+    """Le poker (`delegation_v1`) n'a par defaut aucune option propre : pour
+    verifier la validation d'une cle CONNUE (bon et mauvais type), on lui
+    prete temporairement un `config_schema` non vide. Restaure automatiquement
+    par `monkeypatch` en fin de test."""
+    monkeypatch.setitem(
+        activities.ACTIVITY_REGISTRY,
+        "delegation_v1",
+        ActivitySpec(ordinal=True, config_schema={"note": str}),
+    )
+
+
+def test_configure_round_accepts_and_persists_a_conforming_config(
+    room_with_two_decks, delegation_v1_with_note_option
+):
+    room, fac, standard, _ = room_with_two_decks
+    services.prepare_round(room, fac, subject_text="A", deck_id=standard.pk)
+    rnd_id = services.current_round(room).id
+
+    out = services.configure_round(room, fac, rnd_id, config={"note": "post-mortem"})
+
+    assert out["roundId"] == rnd_id
+    assert out["config"] == {"note": "post-mortem"}
+    assert Round.objects.get(id=rnd_id).config == {"note": "post-mortem"}
+
+
+def test_configure_round_refuses_an_unknown_config_key(room_with_two_decks):
+    """Le poker n'a aucune option propre aujourd'hui : son `config_schema` est
+    vide, donc toute cle est une erreur cote client, pas une donnee a
+    stocker."""
+    room, fac, standard, _ = room_with_two_decks
+    services.prepare_round(room, fac, subject_text="A", deck_id=standard.pk)
+    rnd_id = services.current_round(room).id
+
+    with pytest.raises(RoomError) as exc:
+        services.configure_round(room, fac, rnd_id, config={"timer": 30})
+    assert exc.value.rejected_type == "round.configure"
+    assert Round.objects.get(id=rnd_id).config == {}
+
+
+def test_configure_round_refuses_a_wrong_value_type(
+    room_with_two_decks, delegation_v1_with_note_option
+):
+    room, fac, standard, _ = room_with_two_decks
+    services.prepare_round(room, fac, subject_text="A", deck_id=standard.pk)
+    rnd_id = services.current_round(room).id
+
+    with pytest.raises(RoomError) as exc:
+        services.configure_round(room, fac, rnd_id, config={"note": 42})
+    assert exc.value.rejected_type == "round.configure"
+    assert Round.objects.get(id=rnd_id).config == {}
+
+
+def test_configure_round_refuses_a_round_already_open(room_with_two_decks):
+    """La configuration se fige avant l'ouverture, comme le mode de
+    revelation : les participants doivent savoir a quoi ils jouent avant de
+    voter."""
+    room, fac, standard, _ = room_with_two_decks
+    services.prepare_round(room, fac, subject_text="A", deck_id=standard.pk)
+    rnd_id = services.current_round(room).id
+    services.open_vote(room, fac)
+
+    with pytest.raises(RoomError) as exc:
+        services.configure_round(room, fac, rnd_id, config={})
+    assert exc.value.rejected_type == "round.configure"
