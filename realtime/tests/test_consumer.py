@@ -241,15 +241,15 @@ async def test_agenda_add_and_select():
     code, fac_token, _ = await database_sync_to_async(_make_room)()
     fac, _ = await _join(fac_token, code)
 
-    await fac.send_json_to({"v": 1, "type": "subject.add", "payload": {"text": "Q1"}})
+    await fac.send_json_to({"v": 1, "type": "round.add", "payload": {"text": "Q1"}})
     await _drain_until(fac, "agenda.updated")
-    await fac.send_json_to({"v": 1, "type": "subject.add", "payload": {"text": "Q2"}})
+    await fac.send_json_to({"v": 1, "type": "round.add", "payload": {"text": "Q2"}})
     a2 = await _drain_until(fac, "agenda.updated", pred=lambda p: len(p["agenda"]) == 2)
     agenda = a2["payload"]["agenda"]
     assert [x["text"] for x in agenda] == ["Q1", "Q2"]
     assert agenda[0]["status"] == "current" and agenda[1]["status"] == "pending"
 
-    await fac.send_json_to({"v": 1, "type": "subject.select", "payload": {"subjectId": agenda[1]["id"]}})
+    await fac.send_json_to({"v": 1, "type": "round.select", "payload": {"roundId": agenda[1]["id"]}})
     a3 = await _drain_until(fac, "agenda.updated", pred=lambda p: p["agenda"][1]["status"] == "current")
     assert a3["payload"]["agenda"][1]["status"] == "current" and a3["payload"]["agenda"][0]["status"] == "pending"
 
@@ -354,14 +354,14 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
         _fire_timeout (the original bug) -- a *cancelled* task's cleanup evicts
         whatever task now occupies its room-code slot, even if that's a brand new
         one scheduled after it;
-    (2) dropping the `self._cancel_timeout(room.code)` call from the subject.select
+    (2) dropping the `self._cancel_timeout(room.code)` call from the round.select
         branch of _dispatch -- a pending task then survives untouched instead of
-        being cancelled the moment the facilitator switches subjects.
+        being cancelled the moment the facilitator switches rounds.
 
     TIMER_MIN_SECONDS is patched to 0 (as test_scheduled_timeout_reveals_without_reconnect
     does) only to allow a small, comfortably-nonzero `seconds` below the normal 10s
     floor. The delay is never waited out for real: every cancellation below is
-    explicit (vote.open / subject.select / vote.reset), asyncio.sleep(delay) is
+    explicit (vote.open / round.select / vote.reset), asyncio.sleep(delay) is
     aborted instantly by .cancel(), and _settle() gives the loop a few bare ticks
     (no real time) to actually deliver the CancelledError into each task's `finally`.
     """
@@ -373,8 +373,8 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
 
     await fac.send_json_to({"v": 1, "type": "timer.set", "payload": {"enabled": True, "seconds": 5}})
     await _drain_until(voter, "timer.changed")
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "Budget?"}})
-    await _drain_until(voter, "subject.updated")
+    await fac.send_json_to({"v": 1, "type": "item.add", "payload": {"text": "Budget?"}})
+    await _drain_until(voter, "item.added")
 
     # 1) Open the vote: task A is registered for the room under its code.
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
@@ -383,23 +383,20 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     task_a = consumers._timer_tasks.get(code)
     assert task_a is not None and not task_a.done()
 
-    # 2) subject.set while OPEN creates a brand new IDLE round (services.set_current_item
-    # always takes the "create a new subject+round" branch when the current one
-    # isn't idle) -- but the subject.set branch of _dispatch never touches
-    # _timer_tasks. Task A is left exactly as it was: still tracked, still alive.
-    # (Harmless if it ever fired: reveal_on_timeout() guards on round state, and the
-    # round is idle again.)
-    await fac.send_json_to({"v": 1, "type": "subject.set", "payload": {"text": "New topic?"}})
-    await _drain_until(voter, "subject.updated")
-    await _settle()
-    assert consumers._timer_tasks.get(code) is task_a
-    assert not task_a.done()
+    # 2) vote.reset explicitly cancels A and pops it from the dict SYNCHRONOUSLY --
+    # task_a.cancel() is called, but the event loop has not yet delivered its
+    # CancelledError (that only happens on a later await -- see _settle() below).
+    await fac.send_json_to({"v": 1, "type": "vote.reset", "payload": {}})
+    await _drain_until(voter, "participation.update")
+    assert code not in consumers._timer_tasks
 
-    # 3) Open the (new) vote again: _schedule_timeout cancels A synchronously and
-    # installs task B under the same room-code key. The critical assertion: once the
-    # loop has actually delivered A's CancelledError (and run its finally clause), B
-    # must still be the tracked task -- the original bug's unconditional pop() would
-    # have evicted B here, because A's finally ran *after* B already replaced it.
+    # 3) Open the (new) vote again: _schedule_timeout's own _cancel_timeout call is
+    # now a no-op (A is already gone from the dict), and installs task B under the
+    # same room-code key -- while A's cancellation is still in flight. The critical
+    # assertion below: once the loop has actually delivered A's CancelledError (and
+    # run its finally clause), B must still be the tracked task -- the original
+    # bug's unconditional pop() would have evicted B here, because A's finally ran
+    # *after* B already replaced it.
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "participation.update")
     await _settle()
@@ -417,20 +414,20 @@ async def test_timer_task_dict_survives_cancellation_races(monkeypatch):
     )
     assert not task_b.done()
 
-    # 4) subject.select on the very subject/round currently open must cancel B
-    # immediately (the _cancel_timeout() call in the subject.select branch). Without
+    # 4) round.select on the very round currently open must cancel B
+    # immediately (the _cancel_timeout() call in the round.select branch). Without
     # it, B would survive untouched here.
-    subject_id = await database_sync_to_async(_current_round_id)(code)
-    await fac.send_json_to({"v": 1, "type": "subject.select", "payload": {"subjectId": subject_id}})
+    round_id = await database_sync_to_async(_current_round_id)(code)
+    await fac.send_json_to({"v": 1, "type": "round.select", "payload": {"roundId": round_id}})
     await _drain_until(voter, "agenda.updated")
     assert code not in consumers._timer_tasks, (
-        "task B was not cancelled by subject.select -- the "
+        "task B was not cancelled by round.select -- the "
         "'self._cancel_timeout(room.code)' call is missing from that branch"
     )
     await _settle()
     assert task_b.done()
 
-    # 5) Open once more (the reselected subject is idle again, same non-empty text):
+    # 5) Open once more (the reselected round is idle again, same non-empty text):
     # task C is registered.
     await fac.send_json_to({"v": 1, "type": "vote.open", "payload": {}})
     await _drain_until(voter, "participation.update")

@@ -15,7 +15,7 @@
 | # | Principe | Décision |
 |---|----------|----------|
 | 1 | **Serveur = source de vérité** | Le client émet des *intentions* ; le serveur décide et **rediffuse le fait** à tous. Pas d'affichage optimiste : le client attend l'écho serveur. |
-| 2 | **Autorité facilitateur** | Les événements de contrôle (`vote.open/reveal/reset`, `result.act`, `item.*`, `round.*`, et les alias hérités `subject.*`) ne sont acceptés **que** du facilitateur. Le serveur **rejette** sinon (le masquage front n'est qu'un confort). |
+| 2 | **Autorité facilitateur** | Les événements de contrôle (`vote.open/reveal/reset`, `result.act`, `item.*`, `round.*`) ne sont acceptés **que** du facilitateur. Le serveur **rejette** sinon (le masquage front n'est qu'un confort). |
 | 3 | **Rôle porté par le token, pas par la connexion** | À la reconnexion, token → participant → rôle + vote restaurés. Une coupure ne perd pas le rôle. |
 | 4 | **Secret réel des votes** | Aucune valeur de vote n'est diffusée avant `reveal`. Avant : seulement « a voté / pas voté ». |
 | 5 | **HTTP crée/résout la salle ; WS gère la vie dans la salle** | Le socket ne s'ouvre qu'une fois *dans* la salle. |
@@ -81,12 +81,9 @@ Tous les messages (deux sens) partagent une enveloppe **versionnée** :
 | `facilitator.claim` | tout participant présent | `{ }` | **Uniquement** si le garde-fou est actif (§6.f). Premier arrivé = nouveau facilitateur. |
 
 > Cette table date de la Phase 1 (2026-07-07) et décrivait aussi `subject.set` et
-> `vote.cast`. Le second est remplacé par `response.cast` (§8.2.a) et **retiré**
-> — `Facilitation_frontend` n'en a plus besoin, vérifié en prod (§8.2.b). Le
-> premier, en revanche, **reste un alias hérité actif** vers
-> `item.add`/`item.update`/`round.select` (§8.1.a, §8.1.b) : le front de
-> production l'émet encore, la bascule n'a pas eu lieu. Ne pas le retirer avant
-> qu'elle ne soit vérifiée.
+> `vote.cast`. Les deux sont remplacés — le premier par `item.add`/`item.update`/
+> `round.select` (§8.1.a), le second par `response.cast` (§8.2.a) — et **retirés** :
+> `Facilitation_frontend` n'en a plus besoin, vérifié en prod (§8.1.b, §8.2.b).
 
 Toute intention **incohérente avec l'état courant** (ex. `response.cast` hors `open`) est
 **rejetée** par `error`, pas appliquée (§6.b).
@@ -132,7 +129,7 @@ Envoyé à un seul client (au `join` initial, à la reconnexion, à l'arrivée d
 
 - `myResponses` = **les réponses du seul client destinataire**, indexées par id d'item (les autres restent secrètes tant que `roundState !== "revealed"`). L'ancienne clé `myVote` (le vote du premier item seul) est retirée en fin de 5b (§8.2.b) — voir §8.2.a.
 - Si `roundState === "revealed"`, `state.sync` inclut aussi `itemResults` (§8.2.a) — un retardataire qui arrive en `revealed` **voit les résultats**, et votera au tour suivant. Comme `vote.revealed`, il s'agit d'un décompte qui respecte l'anonymat : jamais de lien participant → carte sur un round anonyme.
-- **Depuis 5a** (§8.1), `state.sync` porte aussi `items` — la liste des items du round courant, même forme que dans les faits `item.*` (`[{id, text, sequence}]`) — et `round` — `{id, state}` du round courant (`id: null` si aucun round actif). `subject` reste émis en doublon (le texte du premier item) : aucune date n'est fixée pour son retrait — c'est une clé de `state.sync`, distincte des intentions entrantes `subject.set`/`subject.add`/`subject.select` (§8.1.b), elles-mêmes toujours actives en attendant la bascule front.
+- **Depuis 5a** (§8.1), `state.sync` porte aussi `items` — la liste des items du round courant, même forme que dans les faits `item.*` (`[{id, text, sequence}]`) — et `round` — `{id, state}` du round courant (`id: null` si aucun round actif). `subject` reste émis en doublon (le texte du premier item) : aucune date n'est fixée pour son retrait — c'est une clé de `state.sync`, distincte des anciennes intentions entrantes `subject.set`/`subject.add`/`subject.select` (§8.1.b), retirées en 5b.
 
 ---
 
@@ -177,10 +174,10 @@ Codes attendus (liste extensible) : `protocol.version`, `forbidden.not_facilitat
 > Le round porte désormais **N items séquentiels** (`Round.items`, migrations 0010-0012),
 > et non plus un sujet unique. Le WS gagne six nouvelles intentions et cinq nouveaux
 > faits ; les anciens messages entrants `subject.set`/`subject.add`/`subject.select`
-> restent en service comme **alias hérités**, le temps que `Facilitation_frontend`
-> bascule sur `item.*`/`round.select`/`round.add` — voir 8.1.b. **Ce basculement
-> n'a pas eu lieu à ce jour** (contrairement à celui de 5b, §8.2.b) : le front de
-> production émet toujours `subject.set`/`subject.add`/`subject.select`.
+> ont d'abord été conservés comme **alias hérités**, le temps que
+> `Facilitation_frontend` bascule sur `item.*`/`round.select`/`round.add` — puis
+> **retirés en 5b** (2026-09-12), une relecture exhaustive du front déployé ayant
+> confirmé la bascule effective — voir 8.1.b.
 
 ### 8.1.a Nouveaux événements
 
@@ -220,29 +217,26 @@ n'y en a aucun), `items` la liste complète et à jour des items de ce round
 plus `text` (le texte du premier item du round sélectionné, pour compatibilité avec les
 clients qui n'affichent qu'un sujet) et `nextState`, toujours `"idle"`.
 
-### 8.1.b Alias hérités — en attente de la bascule front
+### 8.1.b Alias hérités — retirés en 5b
 
-> Note datée 2026-09-11, mise à jour lors de la tentative de retrait en fin de
-> 5b (2026-09-12) : `subject.set`, `subject.add`, `subject.select` (entrants)
-> sont des **alias hérités** vers `item.add`/`item.update`/`round.select`/
-> `round.add`, conservés le temps que `Facilitation_frontend` bascule. **Ce
-> basculement n'a pas eu lieu** : le front de production émet toujours ces
-> trois types (`room-socket.service.ts`), constaté lors d'une tentative de
-> retrait qui aurait cassé la pose d'un sujet, l'ajout à la file et la
-> sélection dans l'agenda en production. Forme de payload et comportement
-> **inchangés** — aucune intention n'a été retirée. `subject.select` délègue
-> intégralement à `round.select` et hérite donc aussi de ses diffusions
-> (`vote.wasReset`, `round.selected`), en plus de `subject.updated`/
-> `agenda.updated`. **Ne pas les retirer avant que la bascule front soit
-> vérifiée en production** (même exigence que pour 5b, §8.2.b) ; ne pas leur
-> ajouter de nouveau comportement, ne construire aucune fonctionnalité neuve
-> dessus — `round.add` est le point d'entrée neuf, pas `subject.add`.
+> Note datée 2026-09-11, mise à jour au retrait effectif en fin de 5b
+> (2026-09-12) : `subject.set`, `subject.add`, `subject.select` (entrants)
+> étaient des **alias hérités** vers `item.add`/`item.update`/`round.select`/
+> `round.add`, conservés le temps que `Facilitation_frontend` bascule. Une
+> relecture exhaustive du front déployé a confirmé la bascule effective — il
+> n'émet plus que `item.add`/`item.update`/`round.add`/`round.select`/
+> `round.prepare` — et les trois alias ont été **retirés du consumer et de
+> `services`** (plus de branches `subject.set`/`subject.add`/`subject.select`
+> dans `_dispatch`, `add_scenario_item` a perdu son paramètre `rejected_type`
+> devenu sans objet). `round.add` est le seul point d'entrée pour ajouter une
+> entrée au scénario, `round.select` le seul pour en reprendre une.
 >
 > `subject.updated` et `agenda.updated` (sortants) ne sont **pas** des alias à
 > proprement parler : ce sont les faits que `item.add`/`item.update`/
 > `round.select`/`round.add` diffusent eux-mêmes (voir la table 8.1.a). Une
 > note antérieure les annonçait à tort comme voués à être retirés avec les
-> entrants — corrigé ici : ils restent le contrat courant, alias ou non.
+> entrants — corrigé ici : ils restent le contrat courant, et ce retrait ne
+> les a pas touchés.
 
 ---
 

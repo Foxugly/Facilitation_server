@@ -235,7 +235,7 @@ def reorder_items(room, participant, item_ids):
 def build_agenda(room):
     """Le scenario : chaque ROUND de la salle avec son etat et, s'il a ete acte, la
     valeur retenue. L'`id` est desormais un id de round — le front le renvoie tel
-    quel, donc l'alias `subject.select` reste juste sans rien savoir du changement.
+    quel.
     """
     current_id = room.current_round_id
     out = []
@@ -309,19 +309,14 @@ def select_round(room, participant, round_id):
     return {"roundId": rnd.id, "items": items_payload(rnd), "text": first.text if first else ""}
 
 
-def add_scenario_item(room, participant, text, *, rejected_type="round.add"):
+def add_scenario_item(room, participant, text):
     """Ex-`add_subject` : ajoute une entree au scenario, donc un ROUND de plus.
     Retourne l'id du round cree — c'est lui que l'agenda designe.
-
-    `rejected_type` distingue les deux entrants WS qui appellent cette meme
-    fonction : l'intention moderne `round.add` et l'alias herite `subject.add`
-    (contrat §8.1.a/§8.1.b) — chacun doit refuser sous son PROPRE nom, pas
-    sous un intitule fige heritant de l'ancien nom interne `item.add`.
     """
-    _require_facilitator(room, participant, rejected_type)
+    _require_facilitator(room, participant, "round.add")
     text = (text or "").strip()
     if not text:
-        raise RoomError("state.invalid_transition", "Empty item", rejected_type)
+        raise RoomError("state.invalid_transition", "Empty item", "round.add")
     rnd = _new_round(room, participant, text)
     if room.current_round_id is None:
         room.current_round = rnd
