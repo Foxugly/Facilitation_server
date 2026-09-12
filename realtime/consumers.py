@@ -117,7 +117,15 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self._broadcast("subject.updated", {"text": text})
             await self._broadcast_agenda(room)
         elif mtype == "subject.add":
-            return await self._dispatch("round.add", payload, cid)
+            # Meme fonction que round.add, mais refuse sous SON PROPRE nom
+            # (rejected_type="subject.add") : pas de delegation par self._dispatch
+            # ici, contrairement a subject.select/round.select, precisement pour
+            # que le rejet ne se fasse pas passer pour l'intention moderne.
+            await database_sync_to_async(services.add_scenario_item)(
+                room, participant, payload.get("text", ""), rejected_type="subject.add"
+            )
+            await self._broadcast_agenda(room)
+            await self._broadcast_current_item(room)
         elif mtype == "subject.select":
             return await self._dispatch("round.select", {"roundId": payload.get("subjectId")}, cid)
         elif mtype == "round.prepare":
