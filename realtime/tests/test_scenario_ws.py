@@ -1,5 +1,5 @@
 """round.reorder / round.remove sur le contrat WebSocket (design 2026-09-12 5d,
-contrat SS8.4). `realtime/services.py::reorder_rounds`/`remove_round` portent la
+contrat §8.4). `realtime/services.py::reorder_rounds`/`remove_round` portent la
 logique de domaine (tache 2, voir task-2-report.md) ; ces tests ne verifient que
 le cablage consumer <-> contrat.
 

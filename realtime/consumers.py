@@ -133,7 +133,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             )
             await self._broadcast_participation(room)
         elif mtype == "round.reorder":
-            # Refixe Round.sequence sur l'ordre donne (contrat SS8.4). Ne
+            # Refixe Round.sequence sur l'ordre donne (contrat §8.4). Ne
             # diffuse que l'agenda rediffuse : il porte deja l'id du round
             # courant (`status: "current"`), que cette intention ne change
             # jamais -- aucun fait de plus n'est donc necessaire.
@@ -142,7 +142,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             )
             await self._broadcast_agenda(room)
         elif mtype == "round.remove":
-            # Elague un round du scenario (contrat SS8.4). Refuse par
+            # Elague un round du scenario (contrat §8.4). Refuse par
             # `remove_round` si le round courant est vise (voir son docstring) :
             # l'agenda rediffuse continue donc de designer le meme round
             # courant, d'ou l'absence de fait dedie ici aussi.
@@ -160,7 +160,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 "round.configured",
                 {"roundId": out["roundId"], "deckSnapshot": out["deckSnapshot"], "config": out["config"]},
             )
-            # deck.changed (contrat SS8.3) n'est diffuse que si un deckId a ete
+            # deck.changed (contrat §8.3) n'est diffuse que si un deckId a ete
             # fourni : les clients actuels savent deja traiter ce fait, l'omettre
             # laisserait leur affichage de deck perime.
             if payload.get("deckId") is not None:

@@ -1,4 +1,4 @@
-"""round.configure sur le contrat WebSocket (design 5c, contrat SS8.3).
+"""round.configure sur le contrat WebSocket (design 5c, contrat §8.3).
 
 Etend round.prepare/deck.select : round.configure fige la config (et, en
 option, le deck) d'un round encore idle, sans repasser par tout round.prepare
