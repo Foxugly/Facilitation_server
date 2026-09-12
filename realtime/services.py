@@ -1064,8 +1064,12 @@ def cast_response(room, participant, item_id, payload):
     """Ecrit la reponse d'un participant a UN item (design section 3).
 
     Gardes : round ouvert, echeance non depassee, l'item doit appartenir au
-    round courant, et le payload doit passer le schema que declare le
-    registre pour la strategie active. Chemin unique d'ecriture.
+    round courant, le payload doit passer le schema que declare le registre
+    pour la strategie active, la valeur doit etre jouable (`validate_value`),
+    et l'ENSEMBLE des reponses de ce participant sur ce round -- celle-ci
+    comprise -- doit rester coherent (`validate_responses`, tache 6a-3 :
+    inerte par defaut, c'est le budget de 2n jetons pour dot_voting_v1).
+    Chemin unique d'ecriture.
     """
     rnd = current_round(room)
     if rnd is None or rnd.state != RoundState.OPEN:
@@ -1079,11 +1083,32 @@ def cast_response(room, participant, item_id, payload):
         raise RoomError("state.invalid_transition", "Unknown item", "response.cast")
     strategy = _resolution_strategy(room)
     validate_payload(strategy, payload)
+    spec = spec_for(strategy)
+    # Nombre d'items du round : la borne par item de dot_voting_v1 (0 <= points
+    # <= n) en depend, et ce branchement manquait jusqu'ici (tache 6a-2 l'avait
+    # explicitement laisse a la tache suivante -- retombait sur le defaut
+    # prudent item_count=0). Brancher ici, avant la validation a l'echelle du
+    # round qui en a elle aussi besoin (2n).
+    item_count = rnd.items.count()
     # La regle "la valeur est jouable" vit dans le registre (`validate_value`),
     # pas ici : une activite au payload different de {"card": ...} ne doit pas
     # heriter de la regle "la carte appartient au deck", qui ne la concerne pas.
-    if not spec_for(strategy).validate_value(payload, _card_values(room)):
+    if not spec.validate_value(payload, _card_values(room), item_count):
         raise RoomError("state.invalid_transition", "Unknown card value", "response.cast")
+    # Validation a l'echelle du round (design section 3, point 3 ; tache
+    # 6a-3) -- la SEULE ouverture de domaine que cette etape demande au
+    # registre. `existing` porte les reponses QUE CE PARTICIPANT A DEJA
+    # ECRITES sur ce round, AVANT cette tentative : `validate_responses` doit
+    # juger l'etat APRES remplacement (cast_response REMPLACE via
+    # `update_or_create` ci-dessous, jamais n'ajoute), jamais additionner
+    # l'ancienne valeur de CET item et la nouvelle. Appele avant d'ecrire :
+    # un refus ne laisse donc rien derriere lui, la seule ecriture de cette
+    # fonction etant l'`update_or_create` plus bas.
+    existing = list(
+        Response.objects.filter(round=rnd, participant=participant).values_list("item_id", "payload")
+    )
+    if not spec.validate_responses(existing, item_id, payload, item_count):
+        raise RoomError("state.invalid_transition", "Round budget exceeded", "response.cast")
     Response.objects.update_or_create(
         item=item,
         participant=participant,

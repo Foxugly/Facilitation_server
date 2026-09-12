@@ -119,6 +119,42 @@ class ActivitySpec:
     #: plutot qu'une borne ignoree.
     validate_value: Callable[[dict, list[str], int], bool] = field(default=None)
 
+    #: La troisieme portee de validation (design section 3, point 3 ; brief
+    #: tache 6a-3) : `validate_value` juge UNE reponse, celle-ci juge
+    #: l'ENSEMBLE des reponses qu'UN participant a deja posees sur LE ROUND,
+    #: plus la tentative en cours -- la seule echelle ou "la somme des jetons
+    #: d'un participant <= 2n" ou "chaque poids utilise au plus une fois" (la
+    #: future contrainte de weighted_dot_voting, tache 6b) ont un sens.
+    #: Cette portee n'existait pas avant cette tache : `cast_response`
+    #: validait une reponse a la fois.
+    #:
+    #: Signature : (existing, item_id, payload, item_count=0) -> bool.
+    #: `existing` est la liste `[(item_id, payload), ...]` des reponses QUE CE
+    #: PARTICIPANT A DEJA ECRITES sur ce round -- AVANT l'ecriture tentee,
+    #: item_id/payload compris si une reponse existe deja pour cet item.
+    #: `item_id`/`payload` portent la tentative en cours.
+    #:
+    #: PIEGE (brief tache 6a-3, c'est lui qui fait cette tache) : une reponse
+    #: REMPLACE la precedente sur le meme item (`cast_response` ecrit via
+    #: `update_or_create(item=..., participant=...)`) -- le budget se juge
+    #: donc sur l'etat APRES remplacement, jamais en additionnant l'ancienne
+    #: valeur ET la nouvelle. Une implementation doit donc ECRASER, dans
+    #: `existing`, l'entree dont l'item_id correspond a celui de la tentative,
+    #: avant de sommer/verifier quoi que ce soit -- jamais sommer `existing`
+    #: tel quel puis ajouter `payload` a cote, ce qui compterait l'ancienne
+    #: valeur deux fois.
+    #:
+    #: Defaut PRUDENT mais NON CONTRAIGNANT : `None` (le defaut du champ) est
+    #: remplace par `_default_validate_responses` dans `__post_init__`, qui
+    #: accepte TOUJOURS. Le poker n'a aucune regle de ce genre (design §8 :
+    #: « pas de changement du poker ») -- une activite qui ne fournit pas ce
+    #: hook ne doit RIEN voir changer, contrairement a `validate_value` dont
+    #: le defaut REFUSE (appartenance au deck). Les deux defauts sont prudents
+    #: chacun dans son sens : refuser par defaut une regle qu'on ignore
+    #: (valeur par item), ne RIEN imposer par defaut a une echelle que
+    #: personne avant dot_voting_v1 n'utilisait (ensemble du round).
+    validate_responses: Callable[[list, int, dict, int], bool] = field(default=None)
+
     #: Qui a le droit de CREER un item sur un round de cette activite :
     #: "facilitator" (le facilitateur seul, comportement du poker) ou
     #: "participants" (tout participant -- un brainstorming, ou chacun ecrit
@@ -167,6 +203,8 @@ class ActivitySpec:
             object.__setattr__(self, "aggregate", _default_aggregate(self.ordinal))
         if self.validate_value is None:
             object.__setattr__(self, "validate_value", _default_validate_value)
+        if self.validate_responses is None:
+            object.__setattr__(self, "validate_responses", _default_validate_responses)
 
 
 def _default_validate_value(payload, card_values, item_count=0):
@@ -177,6 +215,14 @@ def _default_validate_value(payload, card_values, item_count=0):
     suivra) qui bornent leur valeur par le nombre d'items du round plutot
     que par un deck."""
     return payload.get("card") in card_values
+
+
+def _default_validate_responses(existing, item_id, payload, item_count=0):
+    """Aucune contrainte a l'echelle du round par defaut : le poker (et toute
+    activite qui ne fournit pas ce hook) n'a rien de ce genre a verifier
+    (design §8). Les arguments sont acceptes et ignores -- signature commune
+    a tout `validate_responses` du registre."""
+    return True
 
 
 def _default_aggregate(ordinal):
@@ -222,6 +268,28 @@ def _dot_voting_validate_value(payload, card_values, item_count=0):
     if isinstance(points, bool) or not isinstance(points, int):
         return False
     return 0 <= points <= item_count
+
+
+def _dot_voting_validate_responses(existing, item_id, payload, item_count=0):
+    """La contrainte GLOBALE que `_dot_voting_validate_value` annoncait ne
+    PAS verifier (design section 3, point 3 ; tache 6a-3) : la somme des
+    jetons qu'UN participant pose sur TOUT le round ne doit pas depasser son
+    budget de 2n jetons (n = item_count, design section 1).
+
+    PIEGE (brief 6a-3) : `existing` porte ce que ce participant a DEJA
+    ecrit sur ce round, item_id compris si une reponse y existe deja --
+    `cast_response` REMPLACE (`update_or_create`), donc l'entree de
+    `existing` dont l'item_id correspond a la tentative en cours doit etre
+    ECRASEE par `payload`, jamais additionnee a cote de lui. D'ou le dict
+    (une seule valeur par item_id, la derniere ecrite gagne) plutot qu'une
+    simple somme de la liste : `sum(p for _, p in existing) +
+    payload.get("points", 0)` compterait deux fois l'ancienne valeur d'une
+    correction sur le MEME item -- exactement le defaut que le brief demande
+    d'epingler par un test, puis de verifier par mutation.
+    """
+    by_item = {i: p.get("points", 0) for i, p in existing}
+    by_item[item_id] = payload.get("points", 0)
+    return sum(by_item.values()) <= 2 * item_count
 
 
 def _dot_voting_aggregate(responses, card_values):
@@ -289,7 +357,10 @@ ACTIVITY_REGISTRY: dict[str, ActivitySpec] = {
     # Dot Voting (design 2026-09-12, tache 6a-2) : chaque participant recoit 2n
     # jetons de poids 1 (n = nombre d'items du round) et en pose au plus n sur
     # un meme item -- {"points": <entier>}, valide item par item par
-    # `_dot_voting_validate_value` (0 <= points <= n). `consumes="items"` :
+    # `_dot_voting_validate_value` (0 <= points <= n) ET, depuis la tache
+    # 6a-3, a l'echelle du round entier par `_dot_voting_validate_responses`
+    # (somme <= 2n, remplacement compris -- design section 3, point 3).
+    # `consumes="items"` :
     # l'activite distribue des jetons sur des items existants, saisis ou
     # copies d'une source chainee. `produces="results"` + `rank_value` :
     # chainable, et c'est elle qui allume le "top N" du chainage (design
@@ -304,6 +375,7 @@ ACTIVITY_REGISTRY: dict[str, ActivitySpec] = {
         payload_schema={"points": int},
         config_schema={"liveTotals": bool},
         validate_value=_dot_voting_validate_value,
+        validate_responses=_dot_voting_validate_responses,
         aggregate=_dot_voting_aggregate,
         rank_value=_dot_voting_rank_value,
         consumes="items",
