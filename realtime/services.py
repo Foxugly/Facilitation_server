@@ -55,7 +55,16 @@ def _card_values(room):
 def _resolution_strategy(room):
     """La strategie du deck actif — le round en cours s'il porte un snapshot, sinon
     celui de la salle. Meme regle de priorite que ``_card_values``."""
-    rnd = room.current_round
+    return _round_resolution_strategy(room.current_round, room)
+
+
+def _round_resolution_strategy(rnd, room):
+    """Meme regle que ``_resolution_strategy``, mais pour UN round donne plutot
+    que pour le round courant de la room. Necessaire pour `update_item` et
+    `remove_item` : l'item vise n'est pas forcement dans le round courant (5c a
+    appris que chaque round fige son propre type pour toute sa vie), donc la
+    politique `items_authored_by` a verifier est celle du round qui PORTE
+    l'item, pas celle du round actif."""
     snapshot = (rnd.deck_snapshot if rnd and rnd.deck_snapshot else room.deck_snapshot)
     return (snapshot or {}).get("resolutionStrategy", "")
 
@@ -93,15 +102,61 @@ def current_round(room):
     return room.current_round
 
 
-def _require_facilitator(room, participant, rejected_type):
+def _is_facilitator(room, participant):
+    # Compare par PK (`participant.id`), donc suppose `participant` persistant
+    # (un PK non-None). Vrai de tout `Participant` recu du consumer (resolu par
+    # `resolve_participant`, toujours charge depuis la DB) -- mais un futur
+    # appelant qui passerait une instance non sauvegardee casserait la garde en
+    # silence (`None == None`). `ValueError` et non `assert` : un `assert`
+    # disparait en mode optimise (`python -O` / `PYTHONOPTIMIZE`), ce qui
+    # ferait disparaitre ce filet sans qu'aucun test (qui ne tourne pas en
+    # mode optimise) puisse jamais le detecter. `ValueError`, et non
+    # `RoomError`, parce que c'est un bug d'appelant a corriger avant merge,
+    # pas une entree utilisateur a refuser proprement.
+    if participant.id is None:
+        raise ValueError("_is_facilitator: participant non persistant (id is None)")
     rnd = current_round(room)
     # Authority is the round facilitator; before any round exists, the room's
     # sole facilitator participant holds it (contract §2).
     if rnd and rnd.facilitator_id:
-        if participant.id != rnd.facilitator_id:
-            raise RoomError("forbidden.not_facilitator", "Not the facilitator", rejected_type)
-    elif participant.role != Role.FACILITATOR:
+        return participant.id == rnd.facilitator_id
+    return participant.role == Role.FACILITATOR
+
+
+def _require_facilitator(room, participant, rejected_type):
+    if not _is_facilitator(room, participant):
         raise RoomError("forbidden.not_facilitator", "Not the facilitator", rejected_type)
+
+
+def _require_item_author(room, participant, item, rejected_type):
+    """Garde de `update_item`/`remove_item` quand l'activite du round PORTEUR
+    de l'item declare `items_authored_by = "participants"` : le facilitateur
+    peut toujours agir, quel que soit l'auteur (design §5) ; un autre
+    participant ne peut agir que sur SON PROPRE item.
+
+    `item.author_id` est `None` quand l'auteur a quitte la salle (`Item.author`
+    est `SET_NULL`) ou quand le facilitateur a pose l'item au nom de la room :
+    dans les deux cas `participant.id != None` est toujours vrai, donc un item
+    sans auteur ne redevient modifiable par AUCUN participant ordinaire — une
+    regle deliberee, pas un hasard du SET_NULL : un depart de salle ne doit pas
+    se traduire par une ouverture de l'ecriture a tous.
+
+    Deux refus distincts, deux codes distincts (correction ronde 1) : sous une
+    activite facilitateur-seul, un participant ordinaire n'a jamais pretendu
+    faciliter -- `forbidden.not_facilitator` reste exact. Sous une activite
+    "participants", il EST autorise a creer/editer/supprimer, juste pas CET
+    item -- le confondre avec un refus d'autorite (`forbidden.not_facilitator`,
+    message « Not the facilitator ») serait factuellement faux et
+    indistinguable, cote front, d'un vrai refus de role.
+    """
+    if _is_facilitator(room, participant):
+        return
+    strategy = _round_resolution_strategy(item.round, room)
+    if spec_for(strategy).items_authored_by == "participants":
+        if item.author_id == participant.id:
+            return
+        raise RoomError("forbidden.not_item_author", "Not this item's author", rejected_type)
+    raise RoomError("forbidden.not_facilitator", "Not the facilitator", rejected_type)
 
 
 def touch(room):
@@ -151,20 +206,39 @@ def current_item_text(room):
 
 
 def add_item(room, participant, text):
-    """Ajoute un item AU ROUND COURANT — le N-items du design §3."""
-    _require_facilitator(room, participant, "item.add")
+    """Ajoute un item AU ROUND COURANT — le N-items du design §3.
+
+    Qui a le droit n'est plus code en dur ici : c'est `items_authored_by` du
+    registre (design §6) qui le dit — facilitateur seul (poker, defaut), ou
+    tout participant (brainstorming). Quand un participant ordinaire pose son
+    propre post-it, `Item.author` le porte ; quand c'est le facilitateur qui
+    pose un sujet au nom de la room, `author` reste `None`, comme aujourd'hui.
+    """
+    is_facilitator = _is_facilitator(room, participant)
+    strategy = _resolution_strategy(room)
+    if spec_for(strategy).items_authored_by != "participants" and not is_facilitator:
+        raise RoomError("forbidden.not_facilitator", "Not the facilitator", "item.add")
     text = (text or "").strip()
     if not text:
         raise RoomError("state.invalid_transition", "Empty item", "item.add")
+    author = None if is_facilitator else participant
     rnd = current_round(room)
     if rnd is None:
+        # Aucun round courant : seul le facilitateur peut en ouvrir un
+        # (`_new_round` lui assigne la facilitation du round neuf). Un
+        # participant ordinaire sous la politique "participants" n'a, lui,
+        # aucun round ou ecrire son post-it tant que le facilitateur n'a pas
+        # prepare le round — pas de round fantome dont il deviendrait
+        # facilitateur.
+        if not is_facilitator:
+            raise RoomError("state.invalid_transition", "No active round", "item.add")
         rnd = _new_round(room, participant, text)
         room.current_round = rnd
         room.save(update_fields=["current_round"])
         item = _first_item(rnd)
     else:
         seq = rnd.items.count() + 1
-        item = Item.objects.create(round=rnd, text=text, sequence=seq)
+        item = Item.objects.create(round=rnd, text=text, sequence=seq, author=author)
     room.touch()
     return {"id": item.id, "text": item.text, "sequence": item.sequence}
 
@@ -177,11 +251,11 @@ def _item_of_room(room, item_id, rejected_type):
 
 
 def update_item(room, participant, item_id, text):
-    _require_facilitator(room, participant, "item.update")
     text = (text or "").strip()
     if not text:
         raise RoomError("state.invalid_transition", "Empty item", "item.update")
     item = _item_of_room(room, item_id, "item.update")
+    _require_item_author(room, participant, item, "item.update")
     # Meme garde que remove_item, et pour la meme raison : `history` affiche
     # `Result.item.text` (history/api_views.py), donc reformuler un item deja acte
     # reecrirait retroactivement le rapport deja envoye aux managers.
@@ -194,8 +268,8 @@ def update_item(room, participant, item_id, text):
 
 
 def remove_item(room, participant, item_id):
-    _require_facilitator(room, participant, "item.remove")
     item = _item_of_room(room, item_id, "item.remove")
+    _require_item_author(room, participant, item, "item.remove")
     # Un round en vol (open/revealed/acted) ne perd pas ses items : les votes deja
     # emis les designent, et `act_result` se retrouverait sans item ou accrocher son
     # resultat — `Result.item` est NOT NULL, l'IntegrityError qui s'ensuivait
@@ -218,6 +292,16 @@ def remove_item(room, participant, item_id):
 
 
 def reorder_items(room, participant, item_ids):
+    # Arbitrage ronde 1 : `reorder_items` reste FACILITATEUR SEUL, meme sous
+    # `items_authored_by = "participants"` -- volontairement non couvert par
+    # `_require_item_author`. Creer/editer/supprimer portent sur la
+    # contribution PROPRE d'un participant ; reordonner porte sur la LISTE
+    # ENTIERE du round, items des autres compris -- c'est un geste de
+    # facilitation (ranger un tableau), pas un droit d'auteur. Laisser un
+    # participant reordonner lui permettrait de faire remonter son propre
+    # post-it en deplacant ceux des autres, ce que l'activite ne doit pas
+    # autoriser. Voir le test
+    # `test_a_voter_cannot_reorder_items_even_when_they_may_add_their_own`.
     _require_facilitator(room, participant, "item.reorder")
     rnd = current_round(room)
     known = {i.id: i for i in (rnd.items.all() if rnd else [])}

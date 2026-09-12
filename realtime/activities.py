@@ -94,6 +94,20 @@ class ActivitySpec:
     #: au deck actif) si l'entree du registre n'en fournit pas.
     validate_value: Callable[[dict, list[str]], bool] = field(default=None)
 
+    #: Qui a le droit de CREER un item sur un round de cette activite :
+    #: "facilitator" (le facilitateur seul, comportement du poker) ou
+    #: "participants" (tout participant -- un brainstorming, ou chacun ecrit
+    #: son propre post-it). Defaut prudent : une activite dont la politique
+    #: n'est pas connue ne doit pas ouvrir l'ecriture a tous (design §6).
+    #: C'est ce champ, lu par `services.add_item`, qui autorise `item.add` a
+    #: un participant ordinaire -- sans lui, ajouter le brainstorming aurait
+    #: du toucher `services.py`, ce que le registre existe pour eviter.
+    #: Quand elle vaut "participants", `services.update_item`/`remove_item`
+    #: restreignent en plus un participant ordinaire a SES PROPRES items
+    #: (`Item.author`) ; le facilitateur, lui, peut toujours agir sur n'importe
+    #: lequel (design §5).
+    items_authored_by: str = "facilitator"
+
     def __post_init__(self):
         if self.aggregate is None:
             object.__setattr__(self, "aggregate", _default_aggregate(self.ordinal))
