@@ -71,7 +71,7 @@ py -m venv .venv
 ```
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 284 passed
+.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 300 passed
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py # un fichier
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py::test_nom -x
 .\.venv\Scripts\python.exe -m pytest -k "reveal and not deck"
@@ -364,7 +364,16 @@ facilitateur puisse reformuler un sujet sans réécrire l'historique de l'activi
      `realtime/activities.py` (registre d'activités). Les alias hérités (`subject.*`,
      `vote.cast`, `myVote`, clés plates `tally`/`spread`/`votes`) ont tous été retirés une fois
      la bascule de `Facilitation_frontend` vérifiée en production (contrat §8.1.b/§8.2.b).
-   **5c, 5d et 5e n'ont pas démarré.** **Additif** : le poker garde ses champs actuels.
+   - **5c** : `Round.config` (JSONField, défaut `{}`), deck figé **sur le round** dès
+     `round.prepare` (et non plus seulement à l'ouverture, ce qui évite qu'un second round
+     préparé avec un autre deck réécrive celui du premier), validation de la configuration
+     par le registre (`activities.validate_config` / `config_schema`), intention
+     `round.configure` (contrat §8.3). **Pas de `Round.vote_type`** — décision actée en
+     cours de livraison, voir `docs/superpowers/specs/2026-09-11-scenario-et-items-design.md`
+     §3 et l'écart ci-dessous. Appris au passage : un round garde son type (son
+     `deck_snapshot`) pour toute sa vie — `vote.reset` ne l'efface plus, et rejouer un round
+     acté le recopie avec `config` et les items.
+   **5d et 5e n'ont pas démarré.** **Additif** : le poker garde ses champs actuels.
 6. **Dot Voting** — première activité neuve. Choisie avant Weighted Ranking parce qu'elle
    exerce le modèle N-items sans le risque du drag & drop tactile.
 
@@ -373,7 +382,7 @@ Weighted Ranking, QCM/Poll, ROTI.
 
 ## Règles de travail
 
-- **`pytest` vert à chaque commit.** Référence actuelle : 284 passed.
+- **`pytest` vert à chaque commit.** Référence actuelle : 300 passed.
 - Le poker existant doit continuer à fonctionner **à chaque étape**. Aucune étape ne livre
   une régression « qu'on corrigera après ».
 - Étapes petites et testables. Pas de réécriture de masse.
@@ -402,6 +411,12 @@ Weighted Ranking, QCM/Poll, ROTI.
   n'existe pas encore.
 - **`reveal_on_timeout` révèle automatiquement**, alors que la cible veut un reveal manuel.
 - **CLOSED n'existe pas** dans `RoundState`.
+- **`Round.vote_type` n'existe pas — et n'existera pas.** Ce n'est pas la même chose qu'un
+  champ qui manque encore (comme `Room.owner` ci-dessus) : c'est une décision actée en 5c,
+  pas un oubli. Le type d'un round vit dans `Round.deck_snapshot` (`voteType` +
+  `resolutionStrategy`), déjà figé sur le round ; une FK aurait dupliqué cette information
+  dans les tables `decks`, que la couche temps réel n'a pas le droit de lire (règle
+  d'immuabilité). Voir `docs/superpowers/specs/2026-09-11-scenario-et-items-design.md` §3.
 
 ## Pièges
 
