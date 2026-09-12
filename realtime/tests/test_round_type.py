@@ -216,6 +216,29 @@ def test_configure_round_refuses_a_wrong_value_type(
     assert Round.objects.get(id=rnd_id).config == {}
 
 
+def test_configure_round_rejects_atomically_leaving_deck_unchanged(room_with_two_decks):
+    """Un appel qui change de deck ET porte une config refusee ne doit RIEN
+    laisser ecrit, deck compris : avant le correctif, `select_deck` puis le
+    report sur le round etaient deja en base au moment ou `validate_config`
+    levait — un coup refuse etait quand meme applique pour moitie.
+
+    Verifie par mutation : retirer `@transaction.atomic` sur `configure_round`
+    fait echouer ce test (le deck du round ET celui de la room passent a
+    `other` malgre le refus). Voir le rapport de tache pour la trace."""
+    room, fac, standard, other = room_with_two_decks
+    services.prepare_round(room, fac, subject_text="A", deck_id=standard.pk)
+    rnd_id = services.current_round(room).id
+
+    with pytest.raises(RoomError) as exc:
+        services.configure_round(room, fac, rnd_id, deck_id=other.pk, config={"timer": 30})
+    assert exc.value.rejected_type == "round.configure"
+
+    rnd = Round.objects.get(id=rnd_id)
+    assert rnd.deck_snapshot["deckId"] == standard.pk
+    room.refresh_from_db(fields=["deck_snapshot"])
+    assert room.deck_snapshot["deckId"] == standard.pk
+
+
 def test_configure_round_refuses_a_round_already_open(room_with_two_decks):
     """La configuration se fige avant l'ouverture, comme le mode de
     revelation : les participants doivent savoir a quoi ils jouent avant de

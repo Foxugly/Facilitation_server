@@ -8,6 +8,7 @@ mutation validates the state machine and raises ``RoomError`` on an illegal move
 from collections import Counter
 
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
 from realtime.activities import RoomError, spec_for, validate_config, validate_payload
@@ -365,6 +366,7 @@ def set_timer(room, participant, enabled, seconds):
     return {"enabled": room.timer_enabled, "seconds": room.timer_seconds}
 
 
+@transaction.atomic
 def prepare_round(
     room,
     participant,
@@ -377,14 +379,18 @@ def prepare_round(
     timer_seconds=None,
 ):
     """Step 1 of the two-step round flow: compose and announce the next round in one
-    atomic call — pick/set the subject, the deck, the reveal mode and the timer — but
-    leave it IDLE (not open). Opening is a separate step (``open_vote``).
+    call — pick/set the subject, the deck, the reveal mode and the timer — but leave
+    it IDLE (not open). Opening is a separate step (``open_vote``).
 
-    Doing it atomically is what lets the facilitator manipulate the panel as a *form*
-    (subject + details) and commit it in one go: every setting is applied while the
-    round provably exists and is idle, so none of them can race or reject (that's
-    what used to make toggling the reveal mode before any subject existed pop an
-    error). Reuses the single-setting services so the rules stay in one place.
+    This lets the facilitator manipulate the panel as a *form* (subject + details)
+    and commit it in one go: every setting is applied while the round provably
+    exists and is idle, so none of them can race (that's what used to make toggling
+    the reveal mode before any subject existed pop an error). Wrapped in
+    ``transaction.atomic`` so this is genuinely atomic: if a later setting is
+    rejected (e.g. an anonymous reveal without a subscription), whatever this same
+    call already wrote — the deck included — rolls back with it, instead of leaving
+    the round half-configured. Reuses the single-setting services so the rules stay
+    in one place.
     """
     _require_facilitator(room, participant, "round.prepare")
     # 1) Make the chosen round current (creating/resetting it). `subject_id` designe
@@ -432,6 +438,7 @@ def prepare_round(
     }
 
 
+@transaction.atomic
 def configure_round(room, participant, round_id, *, deck_id=None, config=None):
     """Fige la config d'un round (et, en option, son deck) AVANT ouverture —
     meme raison que pour le mode d'anonymat (`set_reveal_mode`) : les
@@ -441,6 +448,11 @@ def configure_round(room, participant, round_id, *, deck_id=None, config=None):
     que reecrit ici : `select_deck` change le deck ACTIF de la room, puis on
     reporte ce choix sur le round pour qu'un changement ulterieur du deck actif
     ne le lui reecrive pas sous les pieds.
+
+    Enveloppe dans `transaction.atomic` : une configuration refusee par
+    `validate_config` ne doit laisser AUCUNE ecriture derriere elle, y compris
+    le deck deja applique plus haut dans ce meme appel — sans quoi un coup
+    refuse serait quand meme applique pour moitie.
     """
     _require_facilitator(room, participant, "round.configure")
     rnd = room.rounds.filter(id=round_id).first()
