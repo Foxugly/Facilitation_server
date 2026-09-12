@@ -141,6 +141,13 @@ class Item(models.Model):
 
 class Round(models.Model):
     room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="rounds")
+    # Position explicite dans le scenario de la salle (tache 1, design
+    # 2026-09-12). Avant ce champ, l'agenda suivait `created_at` : un
+    # facilitateur ne pouvait pas reordonner sa file de rounds avant de la
+    # jouer. Pas unique ni contigu : un round retire laisse un trou, et
+    # `build_agenda` trie par (sequence, id), le `id` tranchant les ex-aequo
+    # sans jamais casser l'ordre.
+    sequence = models.PositiveSmallIntegerField(default=1)
     state = models.CharField(max_length=10, choices=RoundState.choices, default=RoundState.IDLE)
     facilitator = models.ForeignKey(
         Participant, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"

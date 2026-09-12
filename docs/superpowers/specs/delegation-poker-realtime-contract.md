@@ -148,7 +148,7 @@ Envoyé à un seul client (au `join` initial, à la reconnexion, à l'arrivée d
   "myResponses": { "42": { "card": "consult" } },
   "result": null,
   "facilitatorPresent": true,
-  "agenda": [ { "id": 12, "text": "Qui décide du budget outillage ?", "status": "current", "result": null, "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ] } ],
+  "agenda": [ { "id": 12, "text": "Qui décide du budget outillage ?", "status": "current", "state": "open", "result": null, "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ] } ],
   "items": [ { "id": 42, "text": "Qui décide du budget outillage ?", "sequence": 1 } ],
   "round": { "id": 12, "state": "open" },
   "deadline": null,
@@ -166,7 +166,7 @@ Champ par champ (`realtime/services.py::build_state_sync`) :
 - `myRole` et `myParticipantId` sont le rôle et l'identifiant **du destinataire**, renvoyés par le serveur — jamais déduits d'un état client persisté : une promotion facilitateur doit se voir immédiatement chez le facilitateur lui-même, pas seulement chez les autres.
 - `resultLayout` fige la mise en page du dépouillement pour la salle (choisie par l'équipe à la création) : le client y adapte l'affichage dès la révélation.
 - `availableDecks` liste le catalogue de decks jouables par cette salle (léger : pas les cartes), pour un sélecteur de deck côté facilitateur.
-- `agenda` porte le scénario — chaque round de la salle, son état et, s'il a été acté, la valeur retenue et ses items.
+- `agenda` porte le scénario — chaque round de la salle, son état et, s'il a été acté, la valeur retenue et ses items. Chaque entrée porte `status` (`current`/`done`/`pending`, où on en est dans la séance) **et** `state` — le `RoundState` brut du round (`idle`/`open`/`revealed`/`acted`, même forme que le `round` de `state.sync`). Les deux coexistent parce qu'elles répondent à des questions différentes : un round ouvert puis abandonné pour un autre reste `status: "pending"` (rien n'a été acté) mais `state: "open"` — donc non retirable (`round.remove`, §8.4) — alors qu'un round jamais ouvert est aussi `status: "pending"` mais `state: "idle"`, lui retirable. `status` seul ne distingue pas ces deux cas.
 - `deadline` est l'échéance ISO du round `open` courant (`null` sinon) ; `timer` porte le réglage courant de la salle (`enabled`, `seconds`).
 - `reveal.anonymous` annonce le mode de révélation du round courant **avant que les votants ne répondent** ; `reveal.canAnonymise` dit si la salle (équipe payante) a le droit de basculer en anonyme.
 
@@ -362,6 +362,39 @@ Sortant (tous) :
 
 `round.configure` ne touche pas au sujet ni aux items : contrairement a `round.prepare`,
 il ne cree ni ne selectionne aucun round — `roundId` doit deja exister et etre `idle`.
+
+---
+
+## 8.4 `round.reorder` / `round.remove` — le scenario (5d)
+
+> Ajoute 2026-09-12, livraison 5d (`.superpowers/sdd/2026-09-12-5d-scenario-prepare/`).
+> `Round.sequence` (tache 1) donne a la file de rounds un ordre explicite ; ces
+> deux intentions sont les gestes qui en font un scenario compose en amont --
+> reordonner et elaguer. `realtime/services.py::reorder_rounds`/`remove_round`
+> portent la logique de domaine (tache 2) ; ce paragraphe ne couvre que leur
+> cablage sur le contrat WS (tache 3).
+
+Entrant (facilitateur seul, comme les autres intentions de controle) :
+
+| `type` | `payload` | Effet |
+|--------|-----------|-------|
+| `round.reorder` | `{ roundIds: [] }` | Refixe `Round.sequence` sur l'ordre donne. Refuse si l'ensemble d'ids ne correspond pas exactement aux rounds existants de la salle (`error` `state.invalid_transition`, `rejectedType: "round.reorder"`). Deplacer un round deja `ACTED` est autorise : la sequence ne pilote que l'affichage de l'agenda, jamais l'historique (`history/`, trie sur `decided_at`). |
+| `round.remove` | `{ roundId }` | Retire un round du scenario. Refuse (meme `error`, `rejectedType: "round.remove"`) si le round n'existe pas, s'il porte deja un `Result`, s'il n'est pas `idle`, ou s'il est le round courant de la salle — voir `realtime/services.py::remove_round` pour le detail des trois gardes. Le facilitateur doit d'abord designer un autre round courant via `round.select` avant de pouvoir retirer l'ancien. |
+
+Sortant (tous) :
+
+| `type` | `payload` | Emis apres |
+|--------|-----------|------------|
+| `agenda.updated` (§5) | `{ agenda }` | `round.reorder`, `round.remove` |
+
+`round.reorder` et `round.remove` sont deux intentions de plus a ne declencher
+**aucun** fait propre : l'agenda rediffuse porte deja l'id du round courant
+(`status: "current"`), que ni l'une ni l'autre ne peut jamais changer --
+`round.remove` le refuse explicitement (troisieme garde ci-dessus) et
+`round.reorder` ne touche qu'a `Round.sequence`. Verifie par lecture de
+`room-socket.service.ts::applyEvent` (cas `agenda.updated`) : le front en tire
+deja `currentRoundId` de l'entree marquee `'current'`, sans lecteur dedie a
+ajouter.
 
 ---
 

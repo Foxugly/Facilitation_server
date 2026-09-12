@@ -9,6 +9,7 @@ from collections import Counter
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Max
 from django.utils import timezone
 
 from realtime.activities import RoomError, spec_for, validate_config, validate_payload
@@ -170,10 +171,27 @@ def items_payload(rnd):
     return [{"id": i.id, "text": i.text, "sequence": i.sequence} for i in rnd.items.all()]
 
 
+def _next_round_sequence(room):
+    """Sequence a attribuer au PROCHAIN round de la salle : le maximum existant
+    + 1, plus jamais `room.rounds.count() + 1` (tache 2). Le compte retombe
+    quand un round est retire (3 rounds -> 2), donc `count() + 1` pouvait
+    REDONNER une sequence deja portee par un round restant -- c'est exactement
+    le piege documente par
+    `test_removing_a_round_leaves_a_gap_but_next_round_does_not_collide`
+    (`rooms/tests/test_round_sequence.py`). Le maximum, lui, ne redescend
+    jamais apres un retrait : aucune sequence future ne peut retomber sur une
+    sequence existante."""
+    maximum = room.rounds.aggregate(Max("sequence"))["sequence__max"]
+    return (maximum or 0) + 1
+
+
 def _new_round(room, participant, text):
     """Un round neuf portant un premier item. Le scenario est une file de rounds :
-    poser un nouveau sujet, c'est ouvrir un round de plus."""
-    rnd = Round.objects.create(room=room, state=RoundState.IDLE, facilitator=participant)
+    poser un nouveau sujet, c'est ouvrir un round de plus, a la suite de la file
+    existante (tache 1) -- jamais a la place d'un round present."""
+    rnd = Round.objects.create(
+        room=room, state=RoundState.IDLE, facilitator=participant, sequence=_next_round_sequence(room)
+    )
     Item.objects.create(round=rnd, text=text, sequence=1)
     return rnd
 
@@ -321,10 +339,20 @@ def build_agenda(room):
     """Le scenario : chaque ROUND de la salle avec son etat et, s'il a ete acte, la
     valeur retenue. L'`id` est desormais un id de round — le front le renvoie tel
     quel.
+
+    `status` et `state` repondent a deux questions distinctes. `status`
+    ("current"/"done"/"pending") dit ou on en est dans la seance. `state` est
+    tel quel le `RoundState` du modele (contrat §5, meme forme que le `round`
+    de `state.sync`) : il dit si ce round a deja vecu. Les deux ne se
+    deduisent pas l'un de l'autre -- un round ouvert puis abandonne pour un
+    autre reste `status: "pending"` (rien n'a ete acte) mais `state: "open"`
+    (pas retirable, cf `remove_round`). Sans cette deuxieme cle, le front ne
+    peut pas distinguer ce cas d'un round jamais ouvert (`state: "idle"`,
+    retirable) et proposerait un geste que le serveur refuserait.
     """
     current_id = room.current_round_id
     out = []
-    for rnd in room.rounds.all().order_by("created_at", "id").prefetch_related("items", "results"):
+    for rnd in room.rounds.all().order_by("sequence", "id").prefetch_related("items", "results"):
         first = rnd.items.first()
         # Le filtre d'etat n'est pas decoratif : `vote.reset` remet le round a IDLE
         # en LAISSANT son Result en place. Sans lui, un round reinitialise
@@ -336,6 +364,7 @@ def build_agenda(room):
             "id": rnd.id,
             "text": first.text if first else "",
             "status": status,
+            "state": rnd.state,
             "result": result,
             "items": items_payload(rnd),
         })
@@ -359,11 +388,18 @@ def _replay_round(room, participant, source):
     sans choix explicite, jamais ouverte), `source.deck_snapshot` est deja None :
     on ne fige alors rien de plus que ce que la source avait elle-meme, et le
     round neuf herite du deck actif a l'ouverture, comme aujourd'hui.
+
+    La SEQUENCE, elle, ne suit PAS la source (tache 1) : un rejeu se place a la
+    fin de la file de la salle, il ne s'insere pas a la place du round qu'il
+    rejoue. `_next_round_sequence` (maximum existant + 1) est ce qui le
+    garantit meme quand la source n'est plus le dernier round de la file --
+    voir `test_replaying_a_round_that_is_not_last_appends_at_the_end`.
     """
     rnd = Round.objects.create(
         room=room,
         state=RoundState.IDLE,
         facilitator=participant,
+        sequence=_next_round_sequence(room),
         deck_snapshot=source.deck_snapshot,
         # dict(...) : une copie, pas la meme reference — la source et le rejeu
         # ne doivent jamais partager un objet mutable en memoire.
@@ -425,6 +461,88 @@ def add_scenario_item(room, participant, text):
         room.save(update_fields=["current_round"])
     room.touch()
     return rnd.id
+
+
+def reorder_rounds(room, participant, round_ids):
+    """Refixe la sequence des rounds de la salle sur l'ordre donne (tache 2) :
+    c'est le geste qui fait d'une file un scenario compose en amont.
+
+    Facilitateur seul, meme raisonnement que `reorder_items` : reordonner
+    porte sur la file ENTIERE, pas sur une contribution propre -- ce n'est pas
+    un droit d'auteur, c'est un geste de facilitation.
+
+    Deplacer un round deja ACTE est autorise, y compris celui qui vient
+    d'etre acte : la sequence ne pilote que l'AFFICHAGE de l'agenda dans la
+    salle, jamais l'historique (`history/`), qui se trie sur `decided_at`, pas
+    sur `Round.sequence`. Changer son rang dans la file ne reecrit donc rien
+    -- a la difference de `remove_round`, qui protege le `Result` lui-meme.
+    """
+    _require_facilitator(room, participant, "round.reorder")
+    known = {rnd.id: rnd for rnd in room.rounds.all()}
+    # len() en plus du set() : sans elle, [1, 1, 2] passe pour {1, 2} -- meme
+    # piege que `reorder_items`, deja paye sur les items de ce depot.
+    if len(round_ids) != len(known) or set(round_ids) != set(known):
+        raise RoomError("state.invalid_transition", "Round set mismatch", "round.reorder")
+    for index, round_id in enumerate(round_ids, start=1):
+        rnd = known[round_id]
+        rnd.sequence = index
+        rnd.save(update_fields=["sequence"])
+    room.touch()
+    return build_agenda(room)
+
+
+def remove_round(room, participant, round_id):
+    """Retire un round du scenario (tache 2). On n'elague que ce qui n'a pas
+    encore vecu -- regle resserree au round de correction 1 -- : un round
+    n'est retirable que s'il reunit les TROIS conditions ci-dessous. C'est
+    explicable en une phrase a un facilitateur : « on ne retire qu'un round
+    prepare qui n'est pas a l'ecran ».
+
+    1. Il ne porte aucun `Result` -- l'historique ne se reecrit pas, meme
+       garde et meme motif que `remove_item` pour un item deja acte. Un round
+       ACTE puis remis a `idle` (`vote.reset`) reste protege : son `Result`
+       survit au reset (c'est le but de `vote.reset`), donc cette garde
+       continue de le couvrir meme si la garde d'etat ci-dessous, elle, ne le
+       verrait plus.
+    2. Il est `idle`. Pas seulement "il n'est pas le round courant" : la
+       premiere version de cette garde ne testait que le pointeur
+       `room.current_round_id`, or `select_round` n'impose pas de fermer un
+       round avant d'en designer un autre comme courant -- un round `open`
+       avec des reponses vivantes cesse d'etre courant sans jamais etre acte,
+       donc sans jamais porter de `Result`. Sans la garde d'ETAT, ce round
+       abandonne en vol redevenait retirable des qu'on basculait ailleurs :
+       exactement le contournement, en deux gestes au lieu d'un, de la raison
+       d'etre de la garde suivante -- un round en cours de vote disparaissait
+       alors silencieusement.
+    3. Il n'est pas le round COURANT -- choix arrete ici, pas laisse au hasard
+       de l'implementation. L'autre lecture possible (accepter et designer un
+       autre round comme courant) forcerait un choix arbitraire -- lequel
+       devient courant ? le suivant par sequence ? le premier round
+       `pending` ? -- au nom du facilitateur, qui n'a pourtant rien demande
+       d'autre que "retirer CE round". Pire : un participant connecte regarde
+       le round courant en direct (state.sync/agenda) ; le faire basculer
+       vers un AUTRE round sans geste explicite du facilitateur serait un
+       changement d'activite impose silencieusement sous ses yeux. Refuser
+       est sans surprise : le facilitateur choisit explicitement son nouveau
+       round courant via `select_round` avant de pouvoir retirer l'ancien.
+    """
+    _require_facilitator(room, participant, "round.remove")
+    rnd = room.rounds.filter(id=round_id).first()
+    if rnd is None:
+        raise RoomError("state.invalid_transition", "Unknown round", "round.remove")
+    if rnd.results.exists():
+        raise RoomError("state.invalid_transition", "Round already decided", "round.remove")
+    if rnd.state != RoundState.IDLE:
+        raise RoomError("state.invalid_transition", "Round in flight", "round.remove")
+    if room.current_round_id == rnd.id:
+        raise RoomError("state.invalid_transition", "Current round", "round.remove")
+    rnd.delete()
+    for index, remaining in enumerate(room.rounds.all().order_by("sequence", "id"), start=1):
+        if remaining.sequence != index:
+            remaining.sequence = index
+            remaining.save(update_fields=["sequence"])
+    room.touch()
+    return round_id
 
 
 def set_timer(room, participant, enabled, seconds):
