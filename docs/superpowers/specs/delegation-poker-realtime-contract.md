@@ -433,6 +433,18 @@ où le round lié devient courant (`realtime/services.py::select_round`, appel
 automatique à `resolve_source`) — `round.selected` porte déjà les items
 résultants, aucun fait de plus n'est donc nécessaire ici.
 
+⚠️ **Asymétrie assumée entre les deux chemins.** `round.selected` construit
+ses `items` avec `items_payload()` (§8.1) — `{id, text, sequence}` — pas avec
+`_chained_items_payload()` : une copie faite en mode `auto` n'expose donc ni
+`originItemId` (racine de la chaîne) ni `sourceItemId` (parent direct), alors
+que `round.resolved` (mode `manual`, ci-dessus) porte les deux. La traçabilité
+d'une copie chaînée n'est donc disponible par WS **que sur le chemin
+manuel** ; elle existe bien en base dans les deux cas (`Item.origin_item`,
+`Item.source_item`), un `state.sync` ultérieur sur le round consommateur ne
+la révèle pas non plus (`items`, §5.1, utilise la même forme courte). Pas
+traité comme un défaut à corriger dans cette livraison — voir le rapport de
+tâche pour l'arbitrage.
+
 En mode `manual`, il n'y a **aucun message client pour demander les
 candidats**. Quand un round lié en mode `manual`, pas encore résolu, devient
 courant via `round.select`, le serveur émet lui-même :
@@ -452,6 +464,26 @@ part jamais qu'au client qui a demandé le join.
 conditions, sous réserve que le destinataire soit lui-même le facilitateur :
 un facilitateur qui (re)connecte sur un round manuel non résolu les revoit
 donc sans avoir à re-sélectionner le round.
+
+⚠️ **Ordre d'arrivée contre-intuitif sur la connexion du facilitateur, à ne
+pas prendre pour un bug.** Sur SA propre connexion (celle qui a émis
+`round.select`), `round.candidates` arrive **avant** `vote.wasReset`,
+`round.selected`, `subject.updated` et `agenda.updated` — alors que le code
+les diffuse dans l'ordre inverse (les quatre diffusions de groupe, PUIS
+l'émission directe des candidats). La raison tient à deux chemins de
+livraison différents : `self._emit()` écrit directement sur le socket
+pendant que le handler tourne encore, alors qu'un `self._broadcast()` sur SA
+PROPRE connexion doit repasser par la boucle de distribution du channel
+layer, qui ne reprend la main qu'**après** que le handler courant (donc
+l'émission des candidats) a rendu la sienne. Un client qui supposerait l'ordre
+« le round a changé, puis voici les candidats » verrait donc l'inverse sur le
+fil. Sur la connexion d'un AUTRE participant (jamais destinataire de
+`round.candidates`), les quatre diffusions arrivent dans leur ordre normal —
+l'inversion ne touche que l'émetteur de `round.select` lui-même. Figé par
+`test_candidates_arrive_before_the_round_select_broadcasts_on_the_facilitators_own_connection`
+(`realtime/tests/test_chaining_ws.py`) : sans ce test, une réorganisation du
+traitement pourrait inverser cet ordre sans qu'aucun autre test ne le
+remarque, cassant un client qui s'y serait fié.
 
 ---
 

@@ -1,4 +1,4 @@
-"""Chainage (design 2026-09-11 sec7) sur le contrat WebSocket (sec8.5, tache 3).
+"""Chainage (design 2026-09-11 §7) sur le contrat WebSocket (§8.5, tache 3).
 
 `realtime/services.py::bind_round`/`chaining_candidates`/`resolve_source` (taches
 1-2, voir task-2-report.md) portent toute la logique de domaine ; ces tests ne
@@ -197,6 +197,38 @@ async def test_manual_binding_presents_candidates_to_the_facilitator_only():
 
     await fac.disconnect()
     await voter.disconnect()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_candidates_arrive_before_the_round_select_broadcasts_on_the_facilitators_own_connection():
+    """Ordre contre-intuitif, documente au contrat (§8.5.a) : sur SA PROPRE
+    connexion, round.select emet ses candidats par ecriture directe pendant
+    que le handler tourne encore, alors que ses quatre diffusions de groupe
+    ne reviennent au facilitateur qu'apres avoir repasse par la boucle de
+    distribution du channel layer -- qui ne reprend la main qu'apres que ce
+    meme handler a rendu la sienne. round.candidates arrive donc EN PREMIER
+    sur cette connexion, avant meme round.selected, alors que le code les
+    emet dans l'ordre inverse. Sans ce test, une reorganisation du traitement
+    pourrait inverser cet ordre sans qu'aucun autre test (qui cherchent un
+    type au fil de l'eau, sans imposer d'ordre) ne le remarque."""
+    code, fac_token, _ = await database_sync_to_async(_make_room)()
+    source_id, consumer_id = await database_sync_to_async(_two_rounds)(code, fac_token)
+    fac, _ = await _join(fac_token, code)
+    await _settle_join(fac)
+
+    rule = {"take": "items", "mode": "manual", "top": None}
+    await fac.send_json_to({"v": 1, "type": "round.bind", "payload": {
+        "roundId": consumer_id, "sourceRoundId": source_id, "rule": rule,
+    }})
+    await _drain_until(fac, "round.bound")
+
+    await fac.send_json_to({"v": 1, "type": "round.select", "payload": {"roundId": consumer_id}})
+    types = [(await fac.receive_json_from())["type"] for _ in range(5)]
+    assert types == [
+        "round.candidates", "vote.wasReset", "round.selected", "subject.updated", "agenda.updated",
+    ]
+
+    await fac.disconnect()
 
 
 @pytest.mark.django_db(transaction=True)
