@@ -194,6 +194,16 @@ def create_dot_voting_deck():
 
     free_tier=False comme les decks icones : reserve aux equipes payantes tant
     que ce n'est pas offert par defaut aux salles sans compte.
+
+    is_active=False a la creation : `decks.selection.available_decks` filtre sur
+    ce drapeau pour TOUTE salle (equipe ou non), donc un deck inactif ne peut pas
+    etre propose ni active depuis le catalogue. Regle du projet : un client ne se
+    voit jamais proposer un geste que le serveur refusera -- or tant qu'aucune
+    entree de registre (realtime/activities.py) ne connait "dot_voting", toute
+    reponse serait refusee par la regle par defaut "la valeur appartient au deck",
+    un deck sans carte n'en ayant aucune. A rebasculer sur is_active=True (en base
+    ou admin) seulement quand cette entree de registre existe -- jamais en
+    rejouant ce seed, qui ne touche pas une ligne deja presente.
     """
     vt, _ = VoteType.objects.get_or_create(
         code=DOT_VOTING_CODE, defaults={"resolution_strategy": DOT_VOTING_RESOLUTION_STRATEGY}
@@ -203,7 +213,8 @@ def create_dot_voting_deck():
     vt.save()
 
     deck = Deck.objects.create(
-        vote_type=vt, is_standard=True, free_tier=False, card_back_image=_standard_card_back()
+        vote_type=vt, is_standard=True, free_tier=False, is_active=False,
+        card_back_image=_standard_card_back(),
     )
     for lang, name in DOT_VOTING_NAMES.items():
         deck.set_current_language(lang)
