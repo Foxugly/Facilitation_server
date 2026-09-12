@@ -122,12 +122,17 @@ def test_migration_backfills_sequence_by_creation_order_per_room():
 
 
 @pytest.mark.django_db
-def test_removing_a_round_leaves_a_gap_that_does_not_break_the_order(standard_deck):
-    """Retirer un round du milieu laisse un trou dans les sequences : le round
-    suivant cree reprend `room.rounds.count() + 1`, qui peut alors REDONNER une
-    valeur deja portee par un round restant (count passe de 3 a 2 apres
-    suppression, donc +1 = 3, deja pris par C). L'ordre doit rester correct
-    grace au tri secondaire sur `id` -- le trou ne doit pas le casser."""
+def test_removing_a_round_leaves_a_gap_but_next_round_does_not_collide(standard_deck):
+    """Retirer un round du milieu laisse un trou dans les sequences (1, _, 3) --
+    mais ce trou ne fait plus collisionner le round suivant (tache 2) :
+    l'attribution est desormais fondee sur la sequence MAXIMALE existante
+    (`services._next_round_sequence`), jamais sur `room.rounds.count() + 1`.
+
+    Avant la tache 2, `count() + 1` retombait a 3 apres ce meme retrait (le
+    compte redescend de 3 a 2) -- une valeur DEJA PORTEE par C, departagee
+    uniquement par le tri secondaire sur `id`. Avec le maximum (toujours 3
+    ici, meme apres le retrait de B), D prend 4 : aucune collision, donc plus
+    besoin de departage pour cette file."""
     room = _room(standard_deck)
     fac = _facilitator(room)
 
@@ -136,13 +141,15 @@ def test_removing_a_round_leaves_a_gap_that_does_not_break_the_order(standard_de
     c_id = services.add_scenario_item(room, fac, "C")
     assert Round.objects.get(id=c_id).sequence == 3
 
+    # Retrait direct (hors `services.remove_round`, qui renumerote) : le trou
+    # doit survivre pour que ce test reste une preuve sur `_next_round_sequence`
+    # seul, independante de la renumerotation que `remove_round` appliquerait.
     Round.objects.get(id=b_id).delete()
 
     d_id = services.add_scenario_item(room, fac, "D")
-    # Le trou (b supprime) fait que D reprend la meme sequence que C...
-    assert Round.objects.get(id=d_id).sequence == Round.objects.get(id=c_id).sequence == 3
+    # D ne retombe plus sur la sequence de C : le maximum (3) + 1 donne 4.
+    assert Round.objects.get(id=d_id).sequence == 4
+    assert Round.objects.get(id=c_id).sequence == 3
 
-    # ... mais l'agenda reste dans l'ordre attendu (A, C, D) : le tri par id
-    # tranche les ex-aequo sans jamais inverser deux rounds.
     agenda = services.build_agenda(room)
     assert [entry["id"] for entry in agenda] == [a_id, c_id, d_id]
