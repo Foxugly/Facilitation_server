@@ -71,7 +71,7 @@ py -m venv .venv
 ```
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 331 passed
+.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 381 passed
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py # un fichier
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py::test_nom -x
 .\.venv\Scripts\python.exe -m pytest -k "reveal and not deck"
@@ -379,16 +379,29 @@ facilitateur puisse reformuler un sujet sans réécrire l'historique de l'activi
      (réordonnancement, élagage). Pas de nouveau message `scenario.*` ni
      d'états `DRAFT`/`READY` — écarts assumés, voir
      `docs/superpowers/specs/2026-09-11-scenario-et-items-design.md` §8.
-   **Seule 5e n'a pas démarré.** **Additif** : le poker garde ses champs actuels.
-6. **Dot Voting** — première activité neuve. Choisie avant Weighted Ranking parce qu'elle
-   exerce le modèle N-items sans le risque du drag & drop tactile.
+   - **5e** : `Round.source_round` / `source_rule` (la liaison de chaînage,
+     `auto` et `manual`), `Round.source_resolved_at` (marqueur d'idempotence
+     dédié — voir l'écart appris ci-dessous) et `Item.source_item` (parent
+     direct d'une copie, distinct d'`origin_item` qui remonte à la racine),
+     résolution en copie (`realtime/services.py::bind_round`/
+     `resolve_source`), garde-fous du registre (`ActivitySpec.rank_value`),
+     `round.bind` / `round.resolve` au contrat (§8.5), écran de sélection
+     manuelle côté front. Vérifié en production le 2026-09-12 (salle 3WGR6E).
+     **Le programme 5a → 5e est clos** — voir
+     `docs/superpowers/specs/2026-09-11-scenario-et-items-design.md` §8 pour
+     ce que les cinq livraisons ont produit ensemble, et pour deux écarts
+     appris pendant 5e que ce document ne prévoyait pas.
+6. **Dot Voting** — prochaine étape, première activité neuve. Choisie avant Weighted
+   Ranking parce qu'elle exerce le modèle N-items sans le risque du drag & drop
+   tactile, et parce qu'elle sera la première à exercer le chaînage de 5e entre
+   **deux types** d'activité différents (le poker n'a chaîné qu'avec lui-même).
 
 MVP visé ensuite : Planning Poker, Delegation Poker, Roman Vote, Dot Voting,
 Weighted Ranking, QCM/Poll, ROTI.
 
 ## Règles de travail
 
-- **`pytest` vert à chaque commit.** Référence actuelle : 331 passed.
+- **`pytest` vert à chaque commit.** Référence actuelle : 381 passed.
 - Le poker existant doit continuer à fonctionner **à chaque étape**. Aucune étape ne livre
   une régression « qu'on corrigera après ».
 - Étapes petites et testables. Pas de réécriture de masse.
@@ -409,12 +422,15 @@ Weighted Ranking, QCM/Poll, ROTI.
   décision explicite.
 - **`Room.owner`, `can_facilitate`, `can_administer`, `facilitator_live_view`
   n'existent pas.** Seul `Team.owner` existe. L'autorité en room passe aujourd'hui par
-  `rooms.Role.FACILITATOR` + `_require_facilitator`. `origin_item` **existe et est déjà
-  utilisé** (`services._replay_round` : reprendre un round acté du scénario crée une copie de
-  ses items, `origin_item` pointant l'original) — mais seulement pour rejouer un round de la
-  **même** activité dans le scénario du poker. Le chaînage inter-activités visé par 5e
-  (`source_round`/`source_rule`, résolution en copie depuis la sortie d'une AUTRE activité)
-  n'existe pas encore.
+  `rooms.Role.FACILITATOR` + `_require_facilitator`.
+- **Le chaînage inter-activités n'est plus un écart — il est livré (5e).**
+  `Round.source_round` / `source_rule` déclarent la liaison, `resolve_source`
+  la résout en copie, `Item.origin_item` (racine de la chaîne) et
+  `Item.source_item` (parent direct) portent la traçabilité. Seule limite
+  réelle aujourd'hui : le registre ne compte qu'une seule activité
+  (`delegation_poker`), donc le chaînage n'a encore été exercé qu'entre deux
+  rounds de la **même** activité — Dot Voting (étape 6) sera le premier à le
+  faire jouer entre deux **types** différents.
 - **`reveal_on_timeout` révèle automatiquement**, alors que la cible veut un reveal manuel.
 - **CLOSED n'existe pas** dans `RoundState`.
 - **`Round.vote_type` n'existe pas — et n'existera pas.** Ce n'est pas la même chose qu'un
@@ -568,6 +584,18 @@ Weighted Ranking, QCM/Poll, ROTI.
   sur `ALLOWED_HOSTS` seul rejetterait tous les clients réels.
 - Dependabot **ignore toutes les majeures** (npm/pip/gradle) par politique de flotte ; les
   correctifs de sécurité passent quand même, majeures comprises.
+- **Le caractère `§` se fait remplacer en silence par certains outils d'écriture —
+  vérifier après coup, pas avant.** Rencontré trois fois pendant 5e/5d : des
+  citations de section du contrat ou de la conception transcrites `section7`,
+  `sec8.5`, `SS8.4` au lieu du `§` littéral attendu partout ailleurs dans le
+  dépôt. Le défaut ne casse rien à l'exécution — ce sont des commentaires ou de
+  la doc — mais il rend la ligne **invisible à la recherche** qui sert
+  justement à retrouver ce qui cite une section avant de la modifier (`grep
+  '§8.5'` ne trouve pas `SS8.5`). Aucun outil ne prévient : la substitution
+  passe pour un caractère normal tant qu'on ne la cherche pas. Remède : après
+  avoir écrit un commentaire ou une doc qui cite une section, `grep -n "§"` (ou
+  le numéro visé) sur le fichier modifié pour confirmer que le caractère est
+  bien littéral — ne jamais supposer qu'un outil l'a transcrit correctement.
 
 ## Déploiement
 
