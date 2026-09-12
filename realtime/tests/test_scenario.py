@@ -337,3 +337,51 @@ def test_agenda_ever_decided_is_false_for_a_round_never_played(room_with_facilit
 
     entry = _agenda_entry(agenda, b_id)
     assert entry["everDecided"] is False
+
+
+@pytest.mark.django_db
+def test_agenda_can_rank_is_false_when_the_activity_declares_no_ranking(room_with_facilitator):
+    """QUATRIEME question de l'agenda, independante des trois autres :
+    `canRank` dit si CE round, servant un jour de source a un chainage,
+    laisserait `bind_round` accepter un `top` non nul. `standard_deck`
+    (fixture) porte `delegation_v1`, qui ne declare pas de `rank_value`
+    (`ActivitySpec.rank_value`, `realtime/activities.py`) -- un consensus par
+    item, pas un ordre entre items -- donc `canRank` doit rester `False`."""
+    room, fac, _voter = room_with_facilitator
+    a_id, _b_id, _c_id = _three_rounds(room, fac)
+
+    agenda = services.build_agenda(room)
+
+    entry = _agenda_entry(agenda, a_id)
+    assert entry["canRank"] is False
+
+
+@pytest.mark.django_db
+def test_agenda_can_rank_is_true_when_the_activity_declares_a_ranking(
+    room_with_facilitator, monkeypatch
+):
+    """Contre-cas, pour que le test ci-dessus ne devienne pas creux : une
+    strategie qui declare `rank_value` (aucune ne le fait encore aujourd'hui,
+    voir le commentaire sur ce champ) doit faire passer `canRank` a `True`.
+    Meme motif que `test_top_rule_keeps_only_the_ranked_top_n`
+    (`realtime/tests/test_chaining.py`) pour eprouver le registre sans
+    attendre une vraie activite de classement (Dot Voting)."""
+    from realtime.activities import ACTIVITY_REGISTRY, ActivitySpec
+
+    room, fac, _voter = room_with_facilitator
+    monkeypatch.setitem(
+        ACTIVITY_REGISTRY,
+        "ranked_v1",
+        ActivitySpec(
+            consumes="items", produces="results", rank_value=lambda result: int(result.chosen_value)
+        ),
+    )
+    a_id, _b_id, _c_id = _three_rounds(room, fac)
+    ranked_round = Round.objects.get(id=a_id)
+    ranked_round.deck_snapshot = {"resolutionStrategy": "ranked_v1", "cards": []}
+    ranked_round.save(update_fields=["deck_snapshot"])
+
+    agenda = services.build_agenda(room)
+
+    entry = _agenda_entry(agenda, a_id)
+    assert entry["canRank"] is True
