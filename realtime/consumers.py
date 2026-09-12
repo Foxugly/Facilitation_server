@@ -94,7 +94,8 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             # confondre avec item.add ci-dessus, qui ajoute un item au round
             # COURANT. Deux semantiques distinctes qui se ressemblent au premier
             # coup d'oeil : round.add avance dans la file, item.add enrichit le
-            # tour en cours. Reprend ce que diffusait l'alias herite subject.add.
+            # tour en cours. Ne diffuse aucun fait propre : agenda.updated et
+            # subject.updated (contrat 8.1.a) suffisent a l'agenda a jour.
             await database_sync_to_async(services.add_scenario_item)(room, participant, payload.get("text", ""))
             await self._broadcast_agenda(room)
             await self._broadcast_current_item(room)
@@ -107,27 +108,6 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self._broadcast("round.selected", {**out, "nextState": "idle"})
             await self._broadcast("subject.updated", {"text": out["text"]})
             await self._broadcast_agenda(room)
-        # --- alias herites de 5a, en attente de la bascule front ---------
-        elif mtype == "subject.set":
-            # Alias herite : emet UNIQUEMENT subject.updated + agenda.updated, comme
-            # avant (Interfaces du brief task-4). Pas de item.updated ici : ce
-            # message en plus depasse la limite de 8 messages tolerable par
-            # _drain_until dans les tests existants du consumer.
-            text = await database_sync_to_async(services.set_current_item)(room, participant, payload.get("text", ""))
-            await self._broadcast("subject.updated", {"text": text})
-            await self._broadcast_agenda(room)
-        elif mtype == "subject.add":
-            # Meme fonction que round.add, mais refuse sous SON PROPRE nom
-            # (rejected_type="subject.add") : pas de delegation par self._dispatch
-            # ici, contrairement a subject.select/round.select, precisement pour
-            # que le rejet ne se fasse pas passer pour l'intention moderne.
-            await database_sync_to_async(services.add_scenario_item)(
-                room, participant, payload.get("text", ""), rejected_type="subject.add"
-            )
-            await self._broadcast_agenda(room)
-            await self._broadcast_current_item(room)
-        elif mtype == "subject.select":
-            return await self._dispatch("round.select", {"roundId": payload.get("subjectId")}, cid)
         elif mtype == "round.prepare":
             summary = await database_sync_to_async(services.prepare_round)(
                 room,
