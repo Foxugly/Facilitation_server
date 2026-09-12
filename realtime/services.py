@@ -562,11 +562,19 @@ def reset_round(room, participant):
         raise RoomError("state.invalid_transition", "No round", "vote.reset")
     rnd.responses.all().delete()
     rnd.state = RoundState.IDLE
-    rnd.deck_snapshot = None
+    # Le deck NE se remet plus a None ici (avant cette tache, ca laissait
+    # open_vote le refiger sur le deck ACTIF de la room, seule semantique
+    # possible tant qu'un round n'avait pas de deck propre). Depuis que
+    # prepare_round fige le deck SUR LE ROUND des la preparation, et que
+    # open_vote ne l'ecrase plus s'il est deja fige, effacer ici ferait
+    # perdre au round son type au reset : le rouvrir lui donnerait alors le
+    # deck ACTIF courant de la room — celui d'un AUTRE round prepare entre
+    # temps — au lieu du sien. Un round garde son type pour toute sa vie ;
+    # le changer explicitement passe par select_deck / prepare_round.
     rnd.opened_at = None
     rnd.revealed_at = None
     rnd.vote_deadline = None
-    rnd.save(update_fields=["deck_snapshot", "state", "opened_at", "revealed_at", "vote_deadline"])
+    rnd.save(update_fields=["state", "opened_at", "revealed_at", "vote_deadline"])
     room.touch()
     return "idle"
 

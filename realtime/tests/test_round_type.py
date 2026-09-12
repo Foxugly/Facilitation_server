@@ -92,6 +92,27 @@ def test_round_prepared_without_explicit_deck_inherits_the_room_deck(room_with_t
     assert rnd.deck_snapshot["deckId"] == standard.pk
 
 
+def test_reset_then_reopen_keeps_the_rounds_own_deck(room_with_two_decks):
+    """Reinitialiser un round (`vote.reset`) ne lui fait pas perdre son deck : le
+    rouvrir doit retrouver le sien, pas le deck ACTIF courant de la room — qu'un
+    AUTRE round prepare entre-temps a pu changer."""
+    room, fac, standard, other = room_with_two_decks
+    services.prepare_round(room, fac, subject_text="A", deck_id=standard.pk)
+    a_id = services.current_round(room).id
+
+    b_id = services.add_scenario_item(room, fac, "B")
+    services.prepare_round(room, fac, subject_id=b_id, deck_id=other.pk)
+
+    # Revient sur A puis le reinitialise, avant de le rouvrir.
+    services.select_round(room, fac, a_id)
+    services.reset_round(room, fac)
+
+    services.open_vote(room, fac)
+
+    rnd = Round.objects.get(id=a_id)
+    assert rnd.deck_snapshot["deckId"] == standard.pk
+
+
 def test_round_config_defaults_to_empty_dict_and_round_trips(room_with_two_decks):
     """`Round.config` vaut {} par defaut et survit a un aller-retour en base."""
     room, fac, _, _ = room_with_two_decks
