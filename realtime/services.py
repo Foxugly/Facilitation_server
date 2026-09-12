@@ -1118,6 +1118,55 @@ def cast_response(room, participant, item_id, payload):
     return payload
 
 
+def _freeze_results(room, rnd):
+    """Fige le resultat du round SI son activite declare `freeze_results`
+    (tache 6a-4). Sans declaration -- le poker -- ne fait RIEN : son `Result`
+    continue de naitre du geste du facilitateur (`act_result`), pas de la
+    revelation. C'est le registre qui decide, jamais une condition « si
+    c'est telle activite » ecrite ici.
+
+    Regle du depot : un resultat est fige a la revelation et ne se recalcule
+    jamais, parce qu'il devient l'entree d'une autre activite (chainage
+    « top N ») et que l'historique doit rester stable. C'est pour cela qu'il
+    est ECRIT en base ici plutot que recalcule a chaque lecture : une reponse
+    qui bougerait apres coup -- un `cast_response` en vol, une reprise -- ne
+    doit pas reecrire un classement deja montre.
+
+    Les agregats sont passes dans l'ordre (sequence, id) des items
+    (`Item.Meta.ordering`), sur lequel repose le departage deterministe des
+    ex aequo : `sorted` etant stable, une activite qui trie par score
+    conserve cet ordre entre deux items a egalite.
+
+    `update_or_create` et non `create` : `vote.reset` remet un round a IDLE
+    en LAISSANT son `Result` en place (comportement documente dans
+    `reset_round`), donc rejouer puis reveler a nouveau doit refiger, pas
+    lever une violation d'unicite sur (round, item).
+    """
+    spec = spec_for(_round_resolution_strategy(rnd, room))
+    if spec.freeze_results is None:
+        return
+    card_values = _card_values(room)
+    items = list(rnd.items.all())
+    aggregates = [(item.id, spec.aggregate(responses_of(rnd, item), card_values)) for item in items]
+    frozen = spec.freeze_results(aggregates)
+    for item in items:
+        entry = frozen.get(item.id)
+        if entry is None:
+            continue
+        Result.objects.update_or_create(
+            round=rnd,
+            item=item,
+            defaults={
+                "chosen_value": entry.get("chosenValue", ""),
+                "payload": entry.get("payload") or {},
+                # `decided_by` reste NULL : personne n'a « decide » un classement,
+                # c'est le depouillement qui le produit. Le champ est nullable et
+                # l'historique n'en depend pas.
+                "decided_by": None,
+            },
+        )
+
+
 def reveal(room, participant):
     _require_facilitator(room, participant, "vote.reveal")
     rnd = current_round(room)
@@ -1128,6 +1177,10 @@ def reveal(room, participant):
     rnd.state = RoundState.REVEALED
     rnd.revealed_at = timezone.now()
     rnd.save(update_fields=["state", "revealed_at"])
+    # Avant `room.touch()` et avant tout appel a `revealed_payload` : le premier
+    # lecteur du round revele doit deja voir le resultat FIGE, sinon il verrait
+    # un recalcul et le figement ne vaudrait que pour les lecteurs suivants.
+    _freeze_results(room, rnd)
     room.touch()
 
 
@@ -1164,28 +1217,55 @@ def reveal_on_timeout(room):
     # (build_state_sync, revealed_payload...) sans recharger depuis la base.
     rnd.state = RoundState.REVEALED
     rnd.revealed_at = now
+    # Meme figement que sur la revelation manuelle (tache 6a-4) : une
+    # revelation par echeance produit le MEME resultat stable, sans quoi un
+    # round revele par le timer resterait recalcule a chaque lecture. Place
+    # apres l'UPDATE conditionnel : un seul appelant arrive jusqu'ici, donc
+    # un seul fige.
+    _freeze_results(room, rnd)
     room.touch()
     return True
 
 
 def act_result(room, participant, chosen_value):
+    """Conclut un round revele : `result.act` (contrat §4).
+
+    Deux regimes, tranches par le REGISTRE et non par une condition « si
+    c'est telle activite » (tache 6a-4) :
+
+    - l'activite ne declare PAS `freeze_results` (le poker) : le geste du
+      facilitateur EST le resultat, on ecrit son `Result` ici. Comportement
+      historique, inchange jusqu'au champ ecrit et au message d'erreur ;
+    - l'activite declare `freeze_results` : son resultat a deja ete fige a la
+      revelation, l'acte ne fait que conclure. Rien n'est reecrit -- reecrire
+      ecraserait le classement tout juste fige.
+
+    Avant cette tache, la garde de valeur etait `chosen_value not in
+    _card_values(room)`, en dur : pour une activite SANS cartes ce test
+    refusait TOUT, `card_values` etant toujours vide (design section 7). La
+    fonction n'etait pas « pas encore branchee », elle etait INERTE. La regle
+    vit desormais dans `ActivitySpec.validate_chosen_value`, dont le defaut
+    est exactement l'ancien test.
+    """
     _require_facilitator(room, participant, "result.act")
     rnd = current_round(room)
     if rnd is None or rnd.state != RoundState.REVEALED:
         raise RoomError("state.invalid_transition", "Not revealed", "result.act")
-    if chosen_value not in _card_values(room):
+    spec = spec_for(_round_resolution_strategy(rnd, room))
+    if not spec.validate_chosen_value(chosen_value, _card_values(room)):
         raise RoomError("state.invalid_transition", "Unknown card value", "result.act")
-    item = _first_item(rnd)
-    if item is None:
-        # `Result.item` est NOT NULL : sans ce refus, update_or_create leverait une
-        # IntegrityError, que le consumer ne rattrape pas (il ne connait que
-        # RoomError) et qui coutait sa socket au facilitateur.
-        raise RoomError("state.invalid_transition", "No item to act on", "result.act")
-    Result.objects.update_or_create(
-        round=rnd,
-        item=item,
-        defaults={"chosen_value": chosen_value, "decided_by": participant},
-    )
+    if spec.freeze_results is None:
+        item = _first_item(rnd)
+        if item is None:
+            # `Result.item` est NOT NULL : sans ce refus, update_or_create leverait une
+            # IntegrityError, que le consumer ne rattrape pas (il ne connait que
+            # RoomError) et qui coutait sa socket au facilitateur.
+            raise RoomError("state.invalid_transition", "No item to act on", "result.act")
+        Result.objects.update_or_create(
+            round=rnd,
+            item=item,
+            defaults={"chosen_value": chosen_value, "decided_by": participant},
+        )
     rnd.state = RoundState.ACTED
     rnd.save(update_fields=["state"])
     room.touch()
@@ -1269,7 +1349,12 @@ def revealed_payload(room):
     """Resultat d'un round revele — ONLY ever called in REVEALED state.
 
     Porte un bloc PAR ITEM (``itemResults``), chacun agrege par l'``aggregate``
-    que declare le registre pour la strategie active.
+    que declare le registre pour la strategie active -- ou RELU du ``Result``
+    fige a la revelation quand l'activite declare ``freeze_results`` (tache
+    6a-4). Le contenu de l'agregat est fusionne tel quel dans le bloc
+    (``{"itemId": ..., **counted}``) : cette fonction ne connait plus les
+    cles du poker (``tally``/``spread``), qu'elle lisait en dur et qui
+    faisaient lever une ``KeyError`` a toute autre activite.
 
     ``itemResults`` et non ``items`` : ``state.sync`` emet deja une cle
     ``items`` de forme differente (``[{id, text, sequence}]``, la liste des
@@ -1295,20 +1380,48 @@ def revealed_payload(room):
     # Hisse hors de la boucle : meme requete pour chaque item, sinon un round a
     # N items la relance N fois pour le meme resultat.
     participants = list(room.participants.all())
+    # Resultat FIGE a la revelation, s'il y en a un (tache 6a-4). Il PRIME sur
+    # l'agregat recalcule : c'est la regle du depot (« Result est fige au
+    # reveal, jamais recalcule »), sans quoi une reponse qui bougerait apres
+    # la revelation rebattrait un classement deja montre.
+    #
+    # Lu SEULEMENT pour une activite qui declare `freeze_results`. Le poker
+    # n'en declare pas : son `Result` nait a l'acte, avec un `payload` vide --
+    # le relire ici viderait le depouillement d'un round ACTED, que
+    # `build_state_sync` affiche comme un round revele. C'est le registre qui
+    # tranche, pas une condition « si c'est telle activite ».
+    frozen = {}
+    if rnd is not None and spec.freeze_results is not None:
+        frozen = {r.item_id: (r.payload or {}) for r in rnd.results.all()}
     items_out = []
     for item in (rnd.items.all() if rnd else []):
         item_responses = responses_of(rnd, item)
-        counted = spec.aggregate(item_responses, card_values)
+        # `**counted` et non un choix de cles en dur : `counted["tally"]` /
+        # `counted["spread"]` levaient une KeyError immediate sur l'agregat
+        # d'une activite qui ne compte pas des cartes. Le poker est
+        # rigoureusement inchange : son agregat porte exactement ces deux
+        # cles, et pas d'autres.
+        counted = (
+            frozen[item.id]
+            if item.id in frozen
+            else spec.aggregate(item_responses, card_values)
+        )
+        # `**counted` EN PREMIER : les cles du contrat (`itemId`, `anonymous`)
+        # ecrasent celles de l'agregat, jamais l'inverse -- une activite ne
+        # doit pas pouvoir se declarer non anonyme depuis son agregateur.
         block = {
+            **counted,
             "itemId": item.id,
-            "tally": counted["tally"],
-            "spread": counted["spread"],
             "anonymous": anonymous,
         }
         if not anonymous:
-            by_participant = {r.participant_id: r.payload.get("card") for r in item_responses}
+            # L'invariant de secret tient ICI, pas dans `response_view` : sur un
+            # round anonyme rien de nominatif n'est CONSTRUIT. `response_view`
+            # ne dit que la FORME d'une reponse individuelle deja autorisee --
+            # `{"cardValue": ...}` pour le poker, inchange.
+            by_participant = {r.participant_id: r.payload for r in item_responses}
             block["votes"] = [
-                {"participantId": str(p.public_id), "cardValue": by_participant[p.id]}
+                {"participantId": str(p.public_id), **spec.response_view(by_participant[p.id])}
                 for p in participants
                 if p.id in by_participant
             ]

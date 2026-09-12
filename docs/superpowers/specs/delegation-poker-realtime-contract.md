@@ -487,6 +487,39 @@ remarque, cassant un client qui s'y serait fié.
 
 ---
 
+## 8.6 Dépouillement et résultat pilotés par l'activité (6a)
+
+> Ajouté 2026-09-12, livraison 6a tâche 4 (`.superpowers/sdd/2026-09-12-6a-dot-voting/`).
+> Aucun nouvel événement : `vote.revealed` et `result.act` existants deviennent
+> **génériques**. Le poker est inchangé, cle par cle.
+
+**`itemResults[]` porte ce que déclare l'activité.** Le bloc n'est plus figé sur
+`tally`/`spread` : le serveur y fusionne l'agrégat que rend l'activité (`ActivitySpec.aggregate`),
+plus les deux clés du contrat, `itemId` et `anonymous`, qui gagnent toujours en cas de collision.
+
+- **Delegation Poker / Fist of Five** : `{ itemId, tally, spread, anonymous, votes? }` —
+  strictement la forme de §8.2.a, inchangée.
+- **Dot Voting** : `{ itemId, totalPoints, responseCount, rank, anonymous, votes? }`.
+
+`votes[]` suit la même règle : `{ participantId }` plus ce que déclare l'activité —
+`cardValue` pour le poker (inchangé), `points` pour Dot Voting. L'invariant §6.a tient
+toujours **par construction** : sur un round anonyme, aucun bloc ne porte `votes`, rien de
+nominatif n'étant construit.
+
+**`result.act` a deux régimes**, selon que l'activité fige son résultat à la révélation :
+
+| Activité | `chosenValue` attendu | Effet |
+|---|---|---|
+| Poker (ne fige rien à la révélation) | une **carte du deck actif** | écrit le `Result` (inchangé) |
+| Dot Voting (fige à la révélation) | **absent / `null`** | conclut le round ; le classement, déjà figé, n'est pas réécrit. Une valeur non vide est refusée (`state.invalid_transition`, `rejectedType: "result.act"`). |
+
+**Le résultat d'une activité qui fige est écrit dès `vote.revealed`** (révélation manuelle
+comme par échéance), et `vote.revealed` le **relit** au lieu de réagréger : une réponse qui
+changerait après coup ne rebat pas un classement déjà montré. C'est ce résultat figé que le
+chaînage « top N » (§8.5) reprend.
+
+---
+
 ## 9. Hors périmètre (Phase 1)
 
 - ~~❌ `facilitator.transfer` **volontaire** (Phase 2)~~ — **implémenté** : l'intention WS

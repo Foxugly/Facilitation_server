@@ -255,6 +255,18 @@ class Result(models.Model):
     round = models.ForeignKey(Round, on_delete=models.CASCADE, related_name="results")
     item = models.ForeignKey(Item, on_delete=models.PROTECT, related_name="results")
     chosen_value = models.CharField(max_length=32)
+    # Ce que l'activite fige EN PLUS de `chosen_value` (design 2026-09-12 section 6 :
+    # « Result ne porte qu'une valeur de carte. Il lui faut un payload, ADDITIF »).
+    # Additif au sens strict : `chosen_value` ne change ni de type, ni de sens, ni de
+    # lecteur -- le poker continue d'y ecrire la carte retenue et l'historique
+    # (`history/api_views.py`) de l'y lire, ce champ restant vide ({}) pour lui.
+    # Dot Voting y fige son classement (total de l'item + rang), qui ne tient pas
+    # dans un CharField de 32 sans etre reencode.
+    #
+    # La FORME du contenu appartient a l'activite, pas au modele : c'est
+    # `ActivitySpec.freeze_results` (`realtime/activities.py`) qui la produit. Le
+    # modele ne declare qu'un sac JSON, exactement comme `Response.payload`.
+    payload = models.JSONField(default=dict, blank=True)
     decided_by = models.ForeignKey(Participant, on_delete=models.SET_NULL, null=True, blank=True)
     decided_at = models.DateTimeField(auto_now_add=True)
 

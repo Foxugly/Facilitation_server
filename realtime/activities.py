@@ -16,6 +16,13 @@ depouillent tous deux comme une echelle ordinale.
 Le registre porte aussi, depuis la tache 3, le schema de payload et
 l'agregateur d'une activite : ajouter une activite ne doit toucher QUE ce
 fichier, jamais `realtime/services.py`.
+
+Depuis la tache 6a-4, il porte en plus tout ce qui restait poker-specifique
+dans le domaine : la FORME d'une reponse dans le depouillement nominatif
+(`response_view`), le POINT ou le resultat se fige (`freeze_results`) et la
+regle qui juge la valeur retenue a l'acte (`validate_chosen_value`). Les trois
+defauts reproduisent a l'identique le code en dur qu'ils remplacent, pour que
+le poker ne voie rien changer.
 """
 from collections import Counter
 from collections.abc import Callable
@@ -155,6 +162,64 @@ class ActivitySpec:
     #: personne avant dot_voting_v1 n'utilisait (ensemble du round).
     validate_responses: Callable[[list, int, dict, int], bool] = field(default=None)
 
+    #: Comment une reponse INDIVIDUELLE se donne a lire dans le depouillement
+    #: NOMINATIF (`services.revealed_payload`, cle `votes`). Signature :
+    #: (payload) -> dict, fusionne a cote de `participantId` dans chaque entree.
+    #: Defaut : la forme historique du poker, `{"cardValue": payload["card"]}`.
+    #:
+    #: Vit dans le registre parce que `revealed_payload` lisait jusqu'ici
+    #: `r.payload.get("card")` EN DUR : une activite dont le payload ne porte
+    #: aucune carte (dot_voting_v1 : `{"points": n}`) y aurait diffuse un
+    #: `cardValue: null` par participant.
+    #:
+    #: ATTENTION -- l'invariant de secret ne tient PAS dans cette fonction, il
+    #: tient un cran au-dessus : `revealed_payload` ne l'APPELLE que sur un
+    #: round non anonyme, et ne construit donc jamais les valeurs individuelles
+    #: d'un round anonyme. Une activite ne doit jamais s'en servir pour
+    #: « masquer » quoi que ce soit : le serveur ne construit pas ce qui doit
+    #: rester secret, il ne le cache pas.
+    response_view: Callable[[dict], dict] = field(default=None)
+
+    #: OU se fige le resultat de cette activite -- et, par voie de consequence,
+    #: ce que `result.act` a encore a ecrire.
+    #:
+    #: `None` (defaut, le poker) : rien ne se fige a la revelation. Le `Result`
+    #: nait du GESTE du facilitateur (`result.act` -> `services.act_result`),
+    #: qui retient une carte ; `revealed_payload` reagrege a chaque appel.
+    #: Comportement historique, inchange.
+    #:
+    #: Non-`None` : l'activite fige son resultat A LA REVELATION, depuis les
+    #: agregats -- et `act_result` ne fait plus alors que conclure le round,
+    #: sans rien reecrire. Signature :
+    #: (aggregates) -> {item_id: {"chosenValue": str, "payload": dict}}.
+    #: `aggregates` est `[(item_id, counted), ...]` pour TOUS les items du
+    #: round, dans l'ordre (sequence, id), `counted` etant ce que rend
+    #: `aggregate` pour cet item. Un item absent du dict rendu ne recoit pas
+    #: de `Result`.
+    #:
+    #: Pourquoi UN champ pour DEUX consequences (figer a la revelation, et ne
+    #: plus ecrire a l'acte) : c'est une seule decision d'activite -- « ou se
+    #: fige mon resultat » -- et la scinder en deux declarations permettrait de
+    #: les rendre incoherentes, un acte qui reecrit ecrasant le classement tout
+    #: juste fige.
+    #:
+    #: Regle du depot : « Result est fige au reveal, jamais recalcule : il
+    #: devient l'input d'une autre activite et l'historique doit rester
+    #: stable. » C'est pour cela que `revealed_payload` RELIT le `Result` fige
+    #: au lieu de reagreger des qu'une activite declare ce point d'accroche.
+    freeze_results: Callable[[list], dict] | None = field(default=None)
+
+    #: La valeur que le facilitateur retient a `result.act` est-elle recevable ?
+    #: Signature : (chosen_value, card_values) -> bool.
+    #:
+    #: Defaut (`_default_validate_chosen_value`) : elle appartient au deck actif
+    #: -- la regle du poker, inchangee, deplacee telle quelle depuis
+    #: `services.act_result`. C'est elle qui rendait `act_result` INERTE pour
+    #: toute activite sans cartes : `card_values` y est toujours vide (design
+    #: section 7), donc la garde refusait TOUT, y compris la seule valeur
+    #: sensee. Pas « pas encore branchee » : inerte.
+    validate_chosen_value: Callable[[object, list[str]], bool] = field(default=None)
+
     #: Qui a le droit de CREER un item sur un round de cette activite :
     #: "facilitator" (le facilitateur seul, comportement du poker) ou
     #: "participants" (tout participant -- un brainstorming, ou chacun ecrit
@@ -205,6 +270,10 @@ class ActivitySpec:
             object.__setattr__(self, "validate_value", _default_validate_value)
         if self.validate_responses is None:
             object.__setattr__(self, "validate_responses", _default_validate_responses)
+        if self.response_view is None:
+            object.__setattr__(self, "response_view", _default_response_view)
+        if self.validate_chosen_value is None:
+            object.__setattr__(self, "validate_chosen_value", _default_validate_chosen_value)
 
 
 def _default_validate_value(payload, card_values, item_count=0):
@@ -223,6 +292,23 @@ def _default_validate_responses(existing, item_id, payload, item_count=0):
     (design §8). Les arguments sont acceptes et ignores -- signature commune
     a tout `validate_responses` du registre."""
     return True
+
+
+def _default_response_view(payload):
+    """La forme historique du poker : le depouillement nominatif emet
+    `{"participantId": ..., "cardValue": ...}`. Lue telle quelle par
+    `Facilitation_frontend` -- `cardValue` est la cle que le contrat fige pour
+    `itemResults[].votes` (§8.2.a), d'ou un defaut rigoureusement identique au
+    code en dur qu'il remplace."""
+    return {"cardValue": payload.get("card")}
+
+
+def _default_validate_chosen_value(chosen_value, card_values):
+    """La regle du poker : le facilitateur retient une carte du deck actif.
+    Exactement le test qui vivait en dur dans `services.act_result`, deplace
+    sans changer d'un caractere -- `chosen_value not in _card_values(room)`
+    refusait, cette fonction accepte l'inverse."""
+    return chosen_value in card_values
 
 
 def _default_aggregate(ordinal):
@@ -305,32 +391,90 @@ def _dot_voting_aggregate(responses, card_values):
     signature commune a tout `aggregate` du registre, mais reste inutilise
     -- toujours vide pour cette strategie (design §7).
 
-    Ouverture NON faite par cette tache, a signaler : `revealed_payload`
-    (`realtime/services.py`) suppose encore la forme poker (`counted["tally"]`,
-    `counted["spread"]`) et lit `payload.get("card")` pour le detail
-    nominatif -- la generaliser pour consommer cette forme differente est
-    un travail de domaine qui reste a faire (voir rapport de tache).
+    Cette forme differente est desormais DIFFUSABLE telle quelle : depuis la
+    tache 6a-4, `revealed_payload` (`realtime/services.py`) fusionne ce que
+    rend `aggregate` dans le bloc de l'item (`{"itemId": ..., **counted}`)
+    au lieu d'y piocher `counted["tally"]` / `counted["spread"]` en dur --
+    ce qui levait une `KeyError` immediate sur tout agregat non-poker.
     """
     total = sum(r.payload.get("points", 0) for r in responses)
     return {"totalPoints": total, "responseCount": len(responses)}
+
+
+def _dot_voting_response_view(payload):
+    """Depouillement nominatif : combien de jetons CE participant a pose sur
+    cet item. Pas de `cardValue` -- cette activite n'a pas de cartes (design
+    section 7), et le defaut poker aurait emis `cardValue: null`.
+
+    N'est appele QUE sur un round non anonyme : c'est `revealed_payload` qui
+    tient l'invariant, en ne construisant rien de nominatif autrement. Voir
+    `ActivitySpec.response_view`."""
+    return {"points": payload.get("points", 0)}
+
+
+def _dot_voting_freeze_results(aggregates):
+    """Le classement fige a la revelation (design section 6) : somme des points
+    par item, du plus haut au plus bas.
+
+    `aggregates` arrive dans l'ordre (sequence, id) des items du round, et
+    `sorted` est STABLE en Python (garanti par le langage) : deux items a
+    egalite de points ressortent donc toujours dans l'ordre de sequence du
+    round, jamais dans un ordre arbitraire. C'est EXACTEMENT le departage
+    retenu par la tache 6a-2 pour `_dot_voting_rank_value` (voir sa
+    docstring) -- le meme, pas un second : un classement fige ici et un
+    classement recalcule au chainage doivent trancher les ex aequo de la
+    meme facon, sinon le « top N » ne reprendrait pas les items que le
+    depouillement a montres.
+
+    Les rangs sont des POSITIONS strictes (1, 2, 3...), pas des rangs
+    partages : deux items a egalite recoivent deux rangs consecutifs, celui
+    de plus petite sequence d'abord. Un rang partage ne dirait pas au
+    facilitateur lequel de deux ex aequo un « top 1 » emporterait, alors que
+    la reponse, elle, est deterministe.
+
+    `chosenValue` porte le TOTAL, en chaine : c'est le champ que
+    `_dot_voting_rank_value` relit (`int(result.chosen_value)`) pour le
+    chainage « top N », et le seul que `Result` portait avant cette tache.
+    Le detail (total + rang) va dans `payload`, le champ additif ajoute par
+    cette tache.
+    """
+    ordered = sorted(aggregates, key=lambda pair: pair[1].get("totalPoints", 0), reverse=True)
+    return {
+        item_id: {
+            "chosenValue": str(counted.get("totalPoints", 0)),
+            "payload": dict(counted, rank=position),
+        }
+        for position, (item_id, counted) in enumerate(ordered, start=1)
+    }
+
+
+def _dot_voting_validate_chosen_value(chosen_value, card_values):
+    """Acter un round de Dot Voting ne retient AUCUNE valeur : le classement
+    est deja fige a la revelation (`_dot_voting_freeze_results`), l'acte ne
+    fait que conclure le round. La regle par defaut (« la valeur appartient
+    au deck ») rendait cet acte impossible : `card_values` est toujours vide
+    pour une activite sans cartes, donc elle refusait tout.
+
+    Accepte donc l'absence de valeur (`None`, ce que le consumer transmet
+    quand le client n'envoie pas de `chosenValue`, et `""`), et refuse une
+    valeur porteuse : la laisser passer ecrirait dans `Result.chosen_value`
+    un jeton que rien ne relit, en travers du total que la revelation vient
+    d'y figer."""
+    return chosen_value in (None, "")
 
 
 def _dot_voting_rank_value(result):
     """Classement (design section 6) : le total de l'item, PLUS GRAND = PLUS
     prioritaire -- donc le total lui-meme, aucune transformation.
 
-    Lit `Result.chosen_value` (CharField) comme une chaine d'entier : c'est
-    le SEUL champ que `Result` porte aujourd'hui. Le design l'a deja
-    identifie comme une dette (section 6 : « Result ne porte qu'une valeur
-    de carte. Il lui faut un payload, additif »). Cette tache ne leve pas
-    cette dette -- « Aucune migration » est une contrainte explicite de la
-    tache 6a-2 -- et ne cable pas non plus `act_result`
-    (`realtime/services.py`) pour y ecrire un total : ce `rank_value` est
-    donc EXERCABLE des aujourd'hui (tests directs, et par
-    `_chaining_candidate_items` si un `Result.chosen_value` porte deja un
-    total ecrit par un autre moyen), mais rien ne l'alimente encore en
-    production. A signaler comme ouverture de domaine restante, pas a faire
-    ici.
+    Lit `Result.chosen_value` (CharField) comme une chaine d'entier.
+    Depuis la tache 6a-4, ce champ est bien ALIMENTE en production :
+    `_dot_voting_freeze_results` y ecrit le total de l'item a la revelation,
+    et `Result.payload` (migration `0022_result_payload`) porte a cote le
+    detail (total + rang). `rank_value` continue de lire `chosen_value`
+    plutot que `payload["rank"]` : un rang se deduit du total, l'inverse
+    non, et `bind_round` fige une strategie SOURCE dont le classement doit
+    rester calculable sur un `Result` venu de n'importe quelle activite.
 
     Departage des ex aequo : NE se fait PAS dans cette fonction, une cle de
     tri seule ne peut pas etre "stable" par elle-meme. Il se fait par
@@ -371,12 +515,22 @@ ACTIVITY_REGISTRY: dict[str, ActivitySpec] = {
     # (valeur par defaut du modele : {}) tant que le facilitateur n'a rien
     # choisi -- a lire cote domaine avec `.get("liveTotals", False)`, secret
     # par defaut, jamais un oubli de configuration.
+    #
+    # Tache 6a-4 : `response_view`, `freeze_results` et `validate_chosen_value`
+    # completent l'entree pour que le DEPOUILLEMENT et l'ACTE cessent d'etre
+    # poker-specifiques cote domaine. Le classement se fige A LA REVELATION
+    # (design section 6) dans `Result.chosen_value` + `Result.payload`
+    # (migration `0022_result_payload`), et `result.act` ne fait plus alors
+    # que conclure le round.
     "dot_voting_v1": ActivitySpec(
         payload_schema={"points": int},
         config_schema={"liveTotals": bool},
         validate_value=_dot_voting_validate_value,
         validate_responses=_dot_voting_validate_responses,
         aggregate=_dot_voting_aggregate,
+        response_view=_dot_voting_response_view,
+        freeze_results=_dot_voting_freeze_results,
+        validate_chosen_value=_dot_voting_validate_chosen_value,
         rank_value=_dot_voting_rank_value,
         consumes="items",
         produces="results",
