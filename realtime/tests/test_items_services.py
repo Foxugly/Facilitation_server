@@ -5,7 +5,8 @@ testable sans socket.
 """
 import pytest
 
-from realtime import services
+from realtime import activities, services
+from realtime.activities import ActivitySpec
 from realtime.services import RoomError
 from realtime.tests.helpers import cast_first_item
 from rooms.codes import generate_token, generate_unique_code
@@ -191,3 +192,147 @@ def test_cannot_rewrite_an_item_already_decided(room_with_facilitator):
 
     assert exc.value.rejected_type == "item.update"
     assert Item.objects.get(id=item_id).text == "Budget ?"
+
+
+@pytest.fixture
+def delegation_v1_authored_by_participants(monkeypatch):
+    """Le poker (`delegation_v1`) ne declare pas `items_authored_by` — aucune
+    activite du registre ne le fait aujourd'hui. Meme motif que
+    `delegation_v1_with_note_option` (`test_round_type.py`) : preter
+    temporairement au poker une politique qu'il n'a pas, pour tester le
+    registre sans attendre qu'une vraie activite "participants" existe.
+    Restaure automatiquement par `monkeypatch` en fin de test."""
+    monkeypatch.setitem(
+        activities.ACTIVITY_REGISTRY,
+        "delegation_v1",
+        ActivitySpec(ordinal=True, items_authored_by="participants"),
+    )
+
+
+@pytest.mark.django_db
+def test_a_voter_may_add_an_item_when_the_activity_authors_by_participants(
+    room_with_facilitator, delegation_v1_authored_by_participants
+):
+    """Sous `items_authored_by = "participants"`, le votant peut ecrire son
+    propre post-it — et l'item porte son auteur en base (design §3 : `author`
+    n'est jamais vide en base, meme si l'affichage le masque ensuite)."""
+    room, fac, voter = room_with_facilitator
+    services.set_current_item(room, fac, "Budget ?")
+
+    out = services.add_item(room, voter, "Mon post-it")
+
+    item = Item.objects.get(id=out["id"])
+    assert item.text == "Mon post-it"
+    assert item.author_id == voter.id
+
+
+@pytest.mark.django_db
+def test_a_voter_may_edit_and_remove_their_own_item(
+    room_with_facilitator, delegation_v1_authored_by_participants
+):
+    room, fac, voter = room_with_facilitator
+    services.set_current_item(room, fac, "Budget ?")
+    mine = services.add_item(room, voter, "Mon post-it")
+
+    services.update_item(room, voter, mine["id"], "Mon post-it corrige")
+    assert Item.objects.get(id=mine["id"]).text == "Mon post-it corrige"
+
+    services.remove_item(room, voter, mine["id"])
+    assert not Item.objects.filter(id=mine["id"]).exists()
+
+
+@pytest.mark.django_db
+def test_a_voter_may_not_edit_or_remove_anothers_item(
+    room_with_facilitator, delegation_v1_authored_by_participants
+):
+    """Le serveur fait autorite : un participant qui tente de toucher l'item
+    d'un AUTRE participant recoit une `RoomError` dont `rejected_type`
+    correspond a l'intention qu'il a emise, pas d'ecriture silencieusement
+    ignoree.
+
+    Verifie par mutation : neutraliser la garde de propriete dans
+    `_require_item_author` (faire retourner la fonction sans lever, pour un
+    participant non facilitateur) fait PASSER silencieusement cet `update_item`
+    et laisse le texte change — ce test echoue alors sur l'assertion de texte.
+    Restaurer la garde le fait a nouveau passer. Trace dans le rapport de
+    tache."""
+    room, fac, voter = room_with_facilitator
+    other = Participant.objects.create(
+        room=room, token=generate_token(), display_name="Bo", role=Role.VOTER
+    )
+    services.set_current_item(room, fac, "Budget ?")
+    theirs = services.add_item(room, voter, "Post-it de Alex")
+
+    with pytest.raises(RoomError) as exc:
+        services.update_item(room, other, theirs["id"], "Je modifie Alex")
+    assert exc.value.rejected_type == "item.update"
+    assert Item.objects.get(id=theirs["id"]).text == "Post-it de Alex"
+
+    with pytest.raises(RoomError) as exc:
+        services.remove_item(room, other, theirs["id"])
+    assert exc.value.rejected_type == "item.remove"
+    assert Item.objects.filter(id=theirs["id"]).exists()
+
+
+@pytest.mark.django_db
+def test_the_facilitator_may_edit_and_remove_any_item_under_participants_policy(
+    room_with_facilitator, delegation_v1_authored_by_participants
+):
+    """Le facilitateur peut toujours editer et retirer n'importe quel item,
+    meme ecrit par un participant (design §5) — sa main ne depend jamais de
+    `Item.author`."""
+    room, fac, voter = room_with_facilitator
+    services.set_current_item(room, fac, "Budget ?")
+    theirs = services.add_item(room, voter, "Post-it de Alex")
+
+    services.update_item(room, fac, theirs["id"], "Corrige par le facilitateur")
+    assert Item.objects.get(id=theirs["id"]).text == "Corrige par le facilitateur"
+
+    services.remove_item(room, fac, theirs["id"])
+    assert not Item.objects.filter(id=theirs["id"]).exists()
+
+
+@pytest.mark.django_db
+def test_an_item_without_an_author_is_not_editable_by_an_ordinary_participant(
+    room_with_facilitator, delegation_v1_authored_by_participants
+):
+    """`Item.author` est SET_NULL : un item dont l'auteur a quitte la salle a un
+    auteur nul. Decision prise dans ce rapport : un item sans auteur ne devient
+    PAS modifiable par n'importe quel participant — seul le facilitateur le
+    reste. Sans cette regle, quitter la salle transformerait un post-it prive
+    en post-it libre, l'inverse de ce que l'auteur attendait."""
+    room, fac, voter = room_with_facilitator
+    services.set_current_item(room, fac, "Budget ?")
+    orphan = services.add_item(room, voter, "Post-it orphelin")
+    voter.delete()  # SET_NULL : Item.author_id devient None.
+
+    other = Participant.objects.create(
+        room=room, token=generate_token(), display_name="Bo", role=Role.VOTER
+    )
+
+    with pytest.raises(RoomError) as exc:
+        services.update_item(room, other, orphan["id"], "Je recupere l'orphelin")
+    assert exc.value.rejected_type == "item.update"
+
+    services.update_item(room, fac, orphan["id"], "Le facilitateur, lui, peut")
+    assert Item.objects.get(id=orphan["id"]).text == "Le facilitateur, lui, peut"
+
+
+@pytest.mark.django_db
+def test_a_voter_cannot_open_a_round_by_adding_the_first_item(
+    room_with_facilitator, delegation_v1_authored_by_participants
+):
+    """Meme sous `items_authored_by = "participants"`, un votant ne peut pas
+    creer le PREMIER round d'une room en y ecrivant un post-it : `_new_round`
+    assignerait la facilitation du round neuf a son appelant, ce qui ferait
+    d'un simple participant le facilitateur du round qu'il vient de creer.
+    Le scenario (ouvrir un round) reste un geste du facilitateur ; les
+    participants n'ecrivent que dans un round deja courant."""
+    room, fac, voter = room_with_facilitator
+    assert services.current_round(room) is None
+
+    with pytest.raises(RoomError) as exc:
+        services.add_item(room, voter, "Mon post-it")
+
+    assert exc.value.rejected_type == "item.add"
+    assert services.current_round(room) is None
