@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from decks.seed import create_dot_voting_deck, create_standard_deck
@@ -582,7 +583,10 @@ def test_refreezing_after_a_reset_refreshes_the_decision_date():
 
     refrozen = Result.objects.get(round=rnd, item=items[0])
     assert refrozen.chosen_value == "1"
-    assert refrozen.decided_at.date() == datetime.date.today()
+    # Les deux côtés en heure de Bruxelles (TIME_ZONE), comme l'historique qui regroupe
+    # par `decided_at__date` : `decided_at.date()` donnait le jour UTC, et le test
+    # échouait entre minuit et 2 h (CI du 2026-10-10, peu après minuit à Bruxelles).
+    assert timezone.localdate(refrozen.decided_at) == timezone.localdate()
 
 
 @pytest.mark.django_db
