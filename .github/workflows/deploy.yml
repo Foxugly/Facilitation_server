@@ -22,7 +22,9 @@ jobs:
     # ne les voie. On teste donc sur le moteur de production.
     services:
       postgres:
-        image: postgres:16
+        # Miroir AWS de l'image officielle : Docker Hub limite les téléchargements
+        # anonymes et a déjà fait échouer la CI de Chronos avant le premier test.
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
