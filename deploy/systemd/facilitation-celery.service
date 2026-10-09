@@ -9,7 +9,18 @@ Group=www-data
 UMask=0027
 WorkingDirectory=/var/www/django_websites/Facilitation_server
 EnvironmentFile=/run/facilitation/.env
-ExecStart=/var/www/django_websites/Facilitation_server/.venv/bin/celery -A config worker -l info --concurrency=2
+# --pool=solo : le worker exécute lui-même les tâches, sans processus enfant. Il n'y en a
+# qu'une (rooms.tasks.expire_stale_rooms, un UPDATE toutes les 15 min) : deux enfants
+# coûtaient ~200 Mo à une machine qui manque de mémoire (incident du 2026-09-10).
+ExecStart=/var/www/django_websites/Facilitation_server/.venv/bin/celery -A config worker -l info --pool=solo
+# Durcissement (2026-10-09) : pas d'élévation de privilèges, /tmp privé, système en
+# lecture seule (/usr, /boot, /etc) — /var/www (pièces, beat) et /run restent inscriptibles.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
 Restart=always
 RestartSec=5
 KillMode=mixed

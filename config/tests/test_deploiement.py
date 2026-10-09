@@ -70,3 +70,39 @@ def test_la_production_partage_son_cache_entre_les_processus():
     """Plusieurs workers : un cache par processus diviserait les limites de débit."""
     prod = lire("config/settings/prod.py")
     assert "django.core.cache.backends.redis.RedisCache" in prod
+
+
+DIRECTIVES_DE_DURCISSEMENT = (
+    "NoNewPrivileges=yes", "PrivateTmp=yes", "ProtectSystem=full",
+    "ProtectKernelTunables=yes", "ProtectControlGroups=yes", "RestrictSUIDSGID=yes",
+)
+
+
+def test_les_quatre_services_sont_durcis():
+    for unite in ("asgi", "gunicorn", "celery", "celery-beat"):
+        texte = lire("deploy/systemd/facilitation-%s.service" % unite)
+        for directive in DIRECTIVES_DE_DURCISSEMENT:
+            assert directive in texte, (unite, directive)
+        # ProtectSystem=strict rendrait /var/www en lecture seule : pièces et beat cassés.
+        assert "ProtectSystem=strict" not in texte
+
+
+def test_celery_tourne_sans_processus_enfant():
+    """Une seule tâche, toutes les 15 min : `--pool=solo` économise ~200 Mo."""
+    texte = lire("deploy/systemd/facilitation-celery.service")
+    assert "--pool=solo" in texte
+    assert "--concurrency" not in texte
+
+
+def test_les_connexions_persistantes_ne_vont_qu_a_gunicorn():
+    """En ASGI (daphne), une connexion persistante peut passer d'un thread à l'autre."""
+    assert 'Environment="DB_CONN_MAX_AGE=60"' in lire("deploy/systemd/facilitation-gunicorn.service")
+    for unite in ("asgi", "celery", "celery-beat"):
+        assert "DB_CONN_MAX_AGE" not in lire("deploy/systemd/facilitation-%s.service" % unite)
+
+
+def test_sans_variable_une_connexion_par_requete():
+    from django.conf import settings
+
+    assert settings.DATABASES["default"]["CONN_MAX_AGE"] == 0
+    assert settings.DATABASES["default"]["CONN_HEALTH_CHECKS"] is True

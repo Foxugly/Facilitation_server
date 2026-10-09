@@ -43,6 +43,13 @@ Sans ce réglage, DRF prenait tout `X-Forwarded-For`, en partie écrit par le cl
 différent à chaque requête, et la limite de connexion ne s'appliquait plus.
 `accounts/tests/test_client_ip.py` le garde.
 
+**Optimisations du 2026-10-09** (`config/tests/test_deploiement.py` les garde) : Celery en
+`--pool=solo` (une seule tâche, toutes les 15 min : plus de processus enfants, ~200 Mo de
+moins) ; connexions PostgreSQL persistantes 60 s **pour gunicorn seulement** (`DB_CONN_MAX_AGE`
+dans son unité ; daphne et Celery restent à 0, en ASGI une connexion peut changer de thread) ;
+les quatre unités durcies (`NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full` — jamais
+`strict`, qui rendrait `/var/www` en lecture seule).
+
 ## Vocabulaire — non négociable
 
 | Terme | Sens | État |

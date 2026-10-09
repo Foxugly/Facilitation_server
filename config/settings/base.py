@@ -100,6 +100,10 @@ DATABASES = {
         "PORT": env("DB_PORT", default=""),
         "USER": env("DB_USER", default=""),
         "PASSWORD": env("DB_PASSWORD", default=""),
+        # 0 par défaut (une connexion par requête) ; l'unité gunicorn met 60. Daphne et
+        # Celery restent à 0 : en ASGI, une connexion persistante peut changer de thread.
+        "CONN_MAX_AGE": env.int("DB_CONN_MAX_AGE", default=0),
+        "CONN_HEALTH_CHECKS": True,
     }
 }
 

@@ -14,6 +14,14 @@ EnvironmentFile=/run/facilitation/.env
 # Since 2026-10-09 nginx sends it ONLY /ws/; the HTTP API is facilitation-gunicorn (8011).
 # --proxy-headers: take the client address from nginx's X-Forwarded-For, not 127.0.0.1.
 ExecStart=/var/www/django_websites/Facilitation_server/.venv/bin/daphne --proxy-headers -b 127.0.0.1 -p 8009 config.asgi:application
+# Durcissement (2026-10-09) : pas d'élévation de privilèges, /tmp privé, système en
+# lecture seule (/usr, /boot, /etc) — /var/www (pièces, beat) et /run restent inscriptibles.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
 Restart=always
 RestartSec=5
 KillMode=mixed
