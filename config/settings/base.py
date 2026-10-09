@@ -196,6 +196,10 @@ REST_FRAMEWORK = {
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.AllowAny",),
+    # nginx est le seul proxy devant l'API : il ajoute l'adresse qu'il voit à droite de
+    # X-Forwarded-For. Sans NUM_PROXIES, DRF prenait l'en-tête entier comme identité —
+    # écrit en partie par le client, donc une limite contournable à volonté.
+    "NUM_PROXIES": 1,
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
     ],
