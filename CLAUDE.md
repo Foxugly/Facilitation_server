@@ -28,9 +28,20 @@ Le fork n'a renommé que l'identité d'infrastructure — aucun modèle, aucune 
 logique métier n'a été touchée. `FORK.md` fait foi sur ce qui a été renommé et ce qui a
 été laissé intact délibérément.
 
-**Exception de flotte :** seul site Foxugly tournant en **ASGI (daphne)** et non
-gunicorn/WSGI, parce que Channels l'exige. La brique temps réel est isolée dans
-`realtime/` + `config/asgi.py`. Conventions de flotte : `foxugly-ops/OPERATIONS.md`.
+**Deux serveurs depuis le 2026-10-09.** L'API HTTP (DRF, admin, `/health/`) tourne sous
+**gunicorn** (`facilitation-gunicorn`, WSGI, `127.0.0.1:8011`, 2 workers) ; **daphne**
+(`facilitation-asgi`, `127.0.0.1:8009`) ne sert plus que les WebSockets `/ws/`, parce que
+Channels exige l'ASGI. nginx fait l'aiguillage. Avant, daphne servait tout : sous ASGI, Django
+exécute chaque vue synchrone sur **un seul thread d'un seul processus**, si bien qu'une requête
+lente bloquait toutes les autres. Le cache de production est dans Redis (`CACHES`, `prod.py`) :
+avec plusieurs processus, un cache en mémoire diviserait les limites de débit. La brique temps
+réel reste isolée dans `realtime/` + `config/asgi.py`. Conventions de flotte :
+`foxugly-ops/OPERATIONS.md`.
+
+**Les limites de débit lisent l'adresse donnée par nginx** (`NUM_PROXIES = 1`, 2026-10-09).
+Sans ce réglage, DRF prenait tout `X-Forwarded-For`, en partie écrit par le client : un en-tête
+différent à chaque requête, et la limite de connexion ne s'appliquait plus.
+`accounts/tests/test_client_ip.py` le garde.
 
 ## Vocabulaire — non négociable
 
@@ -578,8 +589,9 @@ Weighted Ranking, QCM/Poll, ROTI.
 
 - **Coordonnées d'infrastructure, relevées sur la box le 2026-09-10.** Port **8009**
   (`8000`–`8008` tous occupés, dont `8006` daphne Poker, `8007` gunicorn billing, `8008` daphne
-  Fabric ; suivant occupé : `8125` netdata). Redis **db5** (`db0`–`db4` pris — un index partagé
-  mélangerait les channel layers de deux applications). Base et rôle SQL `facilitation`, SSM
+  Fabric ; suivant occupé : `8125` netdata). Redis **db6** depuis le 2026-10-09 (db5, prise au
+  départ, était déjà celle de Fabric — un index partagé mélangerait les channel layers de deux
+  applications ; attribution dans `OPERATIONS.md` §3.4). Base et rôle SQL `facilitation`, SSM
   `/facilitation/prod`, env `/run/facilitation/.env`, arbre
   `/var/www/django_websites/Facilitation_server`, rôle IAM `facilitation-deploy`.
   **Ne pas réutiliser une valeur de Poker :** jusqu'au 2026-09-10, `deploy/` et `deploy.yml`
@@ -589,7 +601,7 @@ Weighted Ranking, QCM/Poll, ROTI.
   répond `{"status": "ok", "database": "ok"}`, les quatre units tournent, le WebSocket
   négocie bien un `101 Switching Protocols`. Séparation d'avec Poker vérifiée sur les cinq
   axes : bases distinctes (`facilitation` porte `rooms_round`, `poker` garde
-  `rooms_votesession`), Redis `db5` vs `db3`, chemins des units, `/run` séparés, zéro
+  `rooms_votesession`), Redis `db6` (ex-`db5`) vs `db3`, chemins des units, `/run` séparés, zéro
   croisement de processus.
 - **Le claim OIDC de GitHub est au format *immuable*.** Le rôle `facilitation-deploy` doit
   accepter `repo:Foxugly@3275928/Facilitation_server@1363704826:environment:production` —
@@ -658,8 +670,12 @@ script env-fetch **depuis le blob git committé**, puis lance `deploy/deploy.sh`
 `django`. Ne jamais `cp` un artefact chargé par root depuis l'arbre inscriptible par django
 (escalade de privilèges, OPERATIONS.md §3.10/§3.11).
 
-Quatre units : `facilitation-env-fetch` (oneshot, SSM → `/run/facilitation/.env` en tmpfs),
-`facilitation-asgi` (daphne), `facilitation-celery`, `facilitation-celery-beat`. Un déploiement
+Cinq units : `facilitation-env-fetch` (oneshot, SSM → `/run/facilitation/.env` en tmpfs),
+`facilitation-gunicorn` (API HTTP, 8011), `facilitation-asgi` (daphne, WebSockets, 8009),
+`facilitation-celery`, `facilitation-celery-beat`. `facilitation-gunicorn` est redémarré **par
+root** dans la commande SSM, après `deploy.sh` (la délégation sudoers de `django` lui est
+antérieure), et doit répondre sur `/health/` **avant** que le vhost nginx soit installé :
+un gunicorn qui ne démarre pas arrête le déploiement sans basculer nginx. Un déploiement
 de code **ne redémarre pas** `env-fetch` : une valeur SSM modifiée exige un restart explicite.
 
 Secrets : AWS SSM Parameter Store uniquement. Ne jamais committer de `.env` — `.gitignore`

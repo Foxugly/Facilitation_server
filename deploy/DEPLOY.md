@@ -1,7 +1,8 @@
 # Facilitation — Deployment (fleet onboarding, OPERATIONS.md §3.12)
 
-Backend `facilitation-api.foxugly.com`, **ASGI/daphne on `127.0.0.1:8009`** (the fleet's only
-ASGI + WebSocket site). Frontend `facilitation.foxugly.com` lives in `Facilitation_frontend`.
+Backend `facilitation-api.foxugly.com`: HTTP API on **gunicorn `127.0.0.1:8011`** (WSGI, 2 workers),
+WebSockets on **daphne `127.0.0.1:8009`** (ASGI) — split on 2026-10-09, nginx routes `/ws/` to
+daphne and everything else to gunicorn. Frontend `facilitation.foxugly.com` lives in `Facilitation_frontend`.
 
 CI/CD is **OIDC → SSM** on push to `main` (`.github/workflows/deploy.yml`): tests run, then
 root installs units / nginx vhost / the env-fetch oneshot **from the committed git blob**
@@ -15,16 +16,19 @@ Les ports `8000`–`8008` sont **tous occupés** (`8006` = daphne Poker, `8007` 
 billing, `8008` = daphne Fabric). Facilitation prend donc **8009**, premier libre de la série
 — le suivant occupé est `8125` (netdata).
 
-Redis : les index `db0`–`db4` sont utilisés ; Facilitation prend **db5** (`REDIS_URL`). Un
-index déjà pris mélangerait les channel layers de deux applications.
+Redis : Facilitation est sur **db6** (`REDIS_URL`) depuis le 2026-10-09. Elle avait pris db5,
+déjà attribuée à Fabric (arrêté) : un index partagé mélangerait les channel layers et les files
+Celery de deux applications. Toujours relire `REDIS_URL` dans chaque `/run/<app>/.env` avant de
+choisir (`OPERATIONS.md` §3.4).
 
 PostgreSQL : aucune base `facilitation` n'existe (les bases en place sont quizonline, pushit,
 ical, trainingmanager, tm, foxugly, poker, billing, fabric).
 
 ## ⚠️ The one fleet exception: ASGI + WebSocket
 
-Every other site is gunicorn/WSGI. Facilitation runs **daphne** and needs the nginx
-`location /ws/` upgrade block (`deploy/nginx/facilitation-api.conf`). Redis is required for the
+Every other site is gunicorn/WSGI only. Facilitation runs **daphne for `/ws/`** (nginx
+`location /ws/` upgrade block, `deploy/nginx/facilitation-api.conf`) and **gunicorn for the rest**
+(`location /`). Under daphne alone, Django ran every sync view on one thread of one process. Redis is required for the
 Channels layer in prod (multi-process) and is already on the box.
 
 ## Off-box prerequisites (do once, in order)
@@ -40,7 +44,9 @@ Channels layer in prod (multi-process) and is already on the box.
    least-priv (`ssm:SendCommand` on the instance + `AWS-RunShellScript`, `ssm:GetCommandInvocation`).
    GitHub repo secrets: `AWS_DEPLOY_ROLE_ARN`, `EC2_INSTANCE_ID`.
 4. **sudoers** (root, out-of-band): `/etc/sudoers.d/facilitation-deploy` `0440 root:root`,
-   `visudo -c`, grant `django (root) NOPASSWD` ONLY `/bin/systemctl restart facilitation-*` +
+   `visudo -c`, grant `django (root) NOPASSWD` ONLY `/bin/systemctl restart facilitation-*` (the
+   live grant lists the four units by name; `facilitation-gunicorn` is restarted by root in the
+   SSM command instead, so the grant does not need to change) +
    `/usr/sbin/nginx -t` + `/bin/systemctl reload nginx`, with `!setenv,!env_keep`.
 5. **DNS**: `facilitation-api.foxugly.com` (+ `facilitation.foxugly.com` for the SPA) A/ALIAS → box IP.
    TLS is already covered by the shared wildcard `*.foxugly.com` — **never** run per-subdomain
@@ -69,7 +75,9 @@ runs `deploy.sh` (migrate, collectstatic, seed the standard deck, restart), and
 - `curl https://facilitation-api.foxugly.com/health/` → `{"status": "ok", ...}` 200.
 - A browser WS to `wss://facilitation-api.foxugly.com/ws/rooms/<code>/` upgrades (101) — create a
   room in the SPA and confirm live participation.
-- `sudo ss -lntp | grep 8009` → daphne, and nothing else on that port.
+- `sudo ss -lntp | grep -E ':80(09|11) '` → daphne on 8009, gunicorn on 8011.
+- `curl -sI https://facilitation-api.foxugly.com/health/` answers from gunicorn
+  (`journalctl -u facilitation-gunicorn`), a WebSocket still upgrades through daphne.
 - `sudo find <tree> ! -type l \( -perm /020 -o -perm /004 \)` reports 0; `sudo -l -U django` shows
   only the `facilitation-*` restart + nginx grant.
 

@@ -30,7 +30,7 @@ put DB_USER "facilitation"
 secret DB_PASSWORD "<DB_PASSWORD>"
 
 # --- Redis (Channels transport + Celery broker; already on the box) ---
-put REDIS_URL "redis://127.0.0.1:6379/5"
+put REDIS_URL "redis://127.0.0.1:6379/6"
 
 # --- Secrets ---
 secret SECRET_KEY "<DJANGO_SECRET_KEY>"

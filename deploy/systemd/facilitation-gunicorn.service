@@ -1,0 +1,29 @@
+[Unit]
+Description=Facilitation — gunicorn (WSGI, config.wsgi) — HTTP API on 127.0.0.1:8011
+After=network.target facilitation-env-fetch.service postgresql.service redis-server.service
+# Hard dependency: without the SSM-fetched env, refuse to start.
+Requires=facilitation-env-fetch.service
+
+[Service]
+Type=simple
+User=django
+Group=www-data
+UMask=0027
+WorkingDirectory=/var/www/django_websites/Facilitation_server
+EnvironmentFile=/run/facilitation/.env
+Environment="PYTHONUNBUFFERED=1"
+# The HTTP API (DRF, admin, /health/) runs here; daphne keeps only /ws/ (nginx routes them).
+# Under daphne, Django ran every sync view on ONE thread of ONE process — a slow request
+# stalled all the others. Two workers only: the box is RAM-bound (incident 2026-09-10,
+# see CLAUDE.md); each worker costs ~80-100 MB.
+ExecStart=/var/www/django_websites/Facilitation_server/.venv/bin/gunicorn --workers 2 --timeout 60 \
+    --bind 127.0.0.1:8011 \
+    config.wsgi:application
+Restart=always
+RestartSec=5
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

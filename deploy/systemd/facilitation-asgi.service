@@ -1,5 +1,5 @@
 [Unit]
-Description=Facilitation — Daphne (ASGI, config.asgi) — the fleet's only ASGI site
+Description=Facilitation — Daphne (ASGI, config.asgi) — WebSockets only (/ws/)
 After=network.target facilitation-env-fetch.service redis-server.service
 # Hard dependency: without the SSM-fetched env, refuse to start.
 Requires=facilitation-env-fetch.service
@@ -10,9 +10,10 @@ Group=www-data
 UMask=0027
 WorkingDirectory=/var/www/django_websites/Facilitation_server
 EnvironmentFile=/run/facilitation/.env
-# Daphne (not gunicorn): Channels needs an ASGI server. Binds localhost:8009
-# (§3.4); nginx proxies HTTP + upgrades /ws/ to it (deploy/nginx/facilitation-api.conf).
-ExecStart=/var/www/django_websites/Facilitation_server/.venv/bin/daphne -b 127.0.0.1 -p 8009 config.asgi:application
+# Daphne (not gunicorn): Channels needs an ASGI server. Binds localhost:8009 (§3.4).
+# Since 2026-10-09 nginx sends it ONLY /ws/; the HTTP API is facilitation-gunicorn (8011).
+# --proxy-headers: take the client address from nginx's X-Forwarded-For, not 127.0.0.1.
+ExecStart=/var/www/django_websites/Facilitation_server/.venv/bin/daphne --proxy-headers -b 127.0.0.1 -p 8009 config.asgi:application
 Restart=always
 RestartSec=5
 KillMode=mixed

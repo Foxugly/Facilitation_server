@@ -47,8 +47,10 @@ chmod -R g-w,o-rwx "$APP_DIR"
 
 # facilitation-env-fetch is intentionally NOT restarted here (a code deploy keeps the
 # env already in /run/facilitation/.env). To pick up changed SSM values:
-#   sudo systemctl restart facilitation-env-fetch && sudo systemctl restart facilitation-asgi facilitation-celery facilitation-celery-beat
+#   sudo systemctl restart facilitation-env-fetch && sudo systemctl restart facilitation-asgi facilitation-gunicorn facilitation-celery facilitation-celery-beat
 echo ">>> Restarting services..."
+# daphne (WebSockets). The HTTP API, facilitation-gunicorn, is restarted by root in the
+# SSM command (deploy.yml), right after this script: django's sudoers grant predates it.
 sudo /bin/systemctl restart facilitation-asgi
 
 # Celery n'est redemarre QUE s'il est active. Le 2026-09-10, son demarrage a
