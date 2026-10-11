@@ -20,24 +20,66 @@ jobs:
     # et laisse passer des requetes que PostgreSQL refuse — c'est ainsi que deux
     # endpoints casses ont vecu en production sur QuizOnline sans qu'aucun test
     # ne les voie. On teste donc sur le moteur de production.
-    services:
-      postgres:
-        # Miroir AWS de l'image officielle : Docker Hub limite les téléchargements
-        # anonymes et a déjà fait échouer la CI de Chronos avant le premier test.
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: facilitation
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v7
+
+      # PostgreSQL n'est pas un `service` : un service se télécharge avant toute
+      # étape, sans cache possible, et le registre refuse parfois (Docker Hub,
+      # « Data limit exceeded » sur public.ecr.aws) — la CI échouait avant le
+      # moindre test. L'image vit dans le cache d'Actions : un téléchargement par
+      # mois au plus, trois tentatives, l'image du mois précédent en secours.
+      - name: Clé du cache de l'image PostgreSQL (une par mois)
+        id: cle-postgres
+        run: echo "mois=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - name: Image PostgreSQL depuis le cache
+        id: cache-postgres
+        uses: actions/cache/restore@v6
+        with:
+          path: /tmp/postgres-16.tar
+          key: postgres-16-${{ steps.cle-postgres.outputs.mois }}
+          restore-keys: postgres-16-
+
+      - name: Image PostgreSQL depuis le registre (si le cache n'a pas celle du mois)
+        id: telechargement-postgres
+        if: steps.cache-postgres.outputs.cache-hit != 'true'
+        run: |
+          for essai in 1 2 3; do
+            if docker pull public.ecr.aws/docker/library/postgres:16; then
+              docker save public.ecr.aws/docker/library/postgres:16 -o /tmp/postgres-16.tar
+              echo "neuve=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep $((essai * 20))
+          done
+          if [ -f /tmp/postgres-16.tar ]; then
+            echo "::warning::Registre indisponible : image du cache d'un mois précédent."
+          else
+            echo "::error::Registre indisponible et aucune image en cache."
+            exit 1
+          fi
+
+      - name: Mettre l'image du mois en cache
+        if: steps.telechargement-postgres.outputs.neuve == 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: /tmp/postgres-16.tar
+          key: postgres-16-${{ steps.cle-postgres.outputs.mois }}
+
+      - name: Démarrer PostgreSQL 16
+        run: |
+          docker load -i /tmp/postgres-16.tar
+          docker run -d --name postgres -p 5432:5432 \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=facilitation \
+            public.ecr.aws/docker/library/postgres:16
+          for i in $(seq 1 30); do
+            if docker exec postgres pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1; then
+              echo "PostgreSQL prêt."; exit 0
+            fi
+            sleep 2
+          done
+          docker logs postgres
+          echo "::error::PostgreSQL ne répond pas."; exit 1
 
       - uses: actions/setup-python@v7
         with:
