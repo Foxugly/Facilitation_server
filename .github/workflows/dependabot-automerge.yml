@@ -1,0 +1,41 @@
+name: Dependabot auto-merge
+
+# Turns on GitHub auto-merge (squash) for Dependabot PRs that are not a major
+# bump. GitHub then merges the PR only once every required status check of the
+# branch protection on main is green — this workflow never merges a red PR.
+# Majors (routine ones are ignored in dependabot.yml; security ones can be
+# major) stay open for a human.
+#
+# The merge must be made with DEPENDABOT_AUTOMERGE_TOKEN (a fine-grained PAT,
+# stored as a *Dependabot* secret): a merge made with GITHUB_TOKEN does not
+# trigger the push workflows, so CI/Deploy would never run on main. Without the
+# secret the job fails loudly instead of silently doing nothing.
+# Fleet doc: OPERATIONS.md §3.20.
+
+on: pull_request
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  automerge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+
+      - name: Enable auto-merge (non-major only)
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDABOT_AUTOMERGE_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::DEPENDABOT_AUTOMERGE_TOKEN (Dependabot secret) is not set — auto-merge not enabled."
+            exit 1
+          fi
+          gh pr merge --auto --squash "$PR_URL"
