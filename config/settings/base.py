@@ -231,6 +231,7 @@ REST_FRAMEWORK = {
         "history_email": "5/hour",
         "upload": "30/hour",
         "account_delete": "10/hour",
+        "account_export": "5/hour",
         "create_room": "20/min",
         "join_room": "60/min",
         "login": "10/min",

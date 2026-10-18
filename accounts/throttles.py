@@ -52,6 +52,13 @@ class AccountDeleteRateThrottle(_WriteScopedUserThrottle):
     scope = "account_delete"
 
 
+class AccountExportRateThrottle(UserRateThrottle):
+    """GDPR export: a read, but a heavy one (every room seat and vote), so the
+    GETs themselves are counted."""
+
+    scope = "account_export"
+
+
 def with_default_throttles(*extra):
     """The default throttles plus ``extra``: a view's ``throttle_classes`` replaces
     the defaults, and the user/anon rates must keep applying."""
