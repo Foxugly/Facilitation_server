@@ -38,6 +38,8 @@ from .throttles import (
     PasswordResetRateThrottle,
     RegisterRateThrottle,
     ResendEmailRateThrottle,
+    UploadRateThrottle,
+    with_default_throttles,
 )
 
 
@@ -222,6 +224,7 @@ class MeAvatarApiView(APIView):
 
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = with_default_throttles(UploadRateThrottle)
 
     def post(self, request):
         from decks.validators import clean_image_upload

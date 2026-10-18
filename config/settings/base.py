@@ -206,11 +206,19 @@ REST_FRAMEWORK = {
     # X-Forwarded-For. Sans NUM_PROXIES, DRF prenait l'en-tête entier comme identité —
     # écrit en partie par le client, donc une limite contournable à volonté.
     "NUM_PROXIES": 1,
+    # Anonymous AND authenticated callers are limited (audit 2026-10-18, I5): with
+    # AnonRateThrottle alone, a Bearer token lifted every limit. Costly side
+    # effects get their own per-user scope on top (accounts/throttles.py).
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
         "anon": "60/min",
+        "user": "1000/hour",
+        "invite": "20/hour",
+        "history_email": "5/hour",
+        "upload": "30/hour",
         "create_room": "20/min",
         "join_room": "60/min",
         "login": "10/min",

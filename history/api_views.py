@@ -13,6 +13,7 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.throttles import HistoryEmailRateThrottle, with_default_throttles
 from billing.service import paid_required
 from config.api_errors import error_response
 from realtime.activities import spec_for
@@ -131,6 +132,7 @@ class HistoryEmailView(APIView):
     """POST to email every team member a login-required link to that day's history."""
 
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = with_default_throttles(HistoryEmailRateThrottle)
 
     def post(self, request, team_id, day):
         team = get_object_or_404(Team.objects.prefetch_related("memberships__user"), pk=team_id)

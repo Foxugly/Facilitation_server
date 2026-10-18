@@ -8,6 +8,7 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.throttles import InviteRateThrottle, with_default_throttles
 from config.api_errors import error_response
 
 from billing.service import paid_required, team_is_paid, user_is_paid, user_quota
@@ -247,6 +248,8 @@ class MemberDetailView(APIView):
 
 class InvitationListCreateView(APIView):
     permission_classes = [permissions.IsAuthenticated]
+    # Each invitation sends an e-mail carrying a caller-chosen team name.
+    throttle_classes = with_default_throttles(InviteRateThrottle)
 
     def get(self, request, team_id):
         team = get_object_or_404(Team, pk=team_id)

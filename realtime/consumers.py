@@ -7,6 +7,7 @@ Control intentions are accepted only from the facilitator (authority, contract Â
 import asyncio
 import logging
 import time
+from collections import deque
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
@@ -29,6 +30,18 @@ _timer_tasks = {}
 # receiving the room even if their socket stays silent (audit 2026-10-18, I1).
 MEMBERSHIP_RECHECK_SECONDS = 15
 
+# Per-connection budget (audit 2026-10-18, I5): every intention writes to the
+# database and fans out to the whole room. (messages, seconds) â€” a client that
+# sends more inside the sliding window is cut off. Far above human pace (the SPA
+# also pings), far below what a script needs to hurt.
+WS_RATE_LIMIT = (30, 10.0)
+# Largest accepted text frame. The biggest legitimate intention is a 300-char
+# subject; daphne itself imposes no bound (audit M7).
+WS_MAX_MESSAGE_BYTES = 8 * 1024
+# Close codes (4000-4999 are application-defined).
+CLOSE_RATE_LIMITED = 4008
+CLOSE_TOO_LARGE = 4009
+
 
 class RoomConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
@@ -38,6 +51,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         self.token = None
         self.team_room = False
         self._checked_at = 0.0
+        self._recent = deque()
         await self.accept()
 
     async def disconnect(self, close_code):
@@ -48,6 +62,28 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 await self._broadcast("participant.left", {"participantId": self.public_id})
                 await self._broadcast_presence(participant.room)
             await self.channel_layer.group_discard(self.group, self.channel_name)
+
+    async def receive(self, text_data=None, bytes_data=None, **kwargs):
+        """Frame-level guards, before any JSON decoding or database access."""
+        if not self._within_rate():
+            await self._error("rate.limited", "Too many messages", None, None)
+            return await self.close(code=CLOSE_RATE_LIMITED)
+        size = len(text_data.encode("utf-8")) if text_data is not None else len(bytes_data or b"")
+        if size > WS_MAX_MESSAGE_BYTES:
+            await self._error("payload.too_large", "Message too large", None, None)
+            return await self.close(code=CLOSE_TOO_LARGE)
+        await super().receive(text_data=text_data, bytes_data=bytes_data, **kwargs)
+
+    def _within_rate(self):
+        limit, window = WS_RATE_LIMIT
+        now = time.monotonic()
+        recent = self._recent
+        while recent and now - recent[0] > window:
+            recent.popleft()
+        if len(recent) >= limit:
+            return False
+        recent.append(now)
+        return True
 
     async def receive_json(self, content, **kwargs):
         if content.get("v") != PROTOCOL_VERSION:

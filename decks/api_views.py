@@ -14,6 +14,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.throttles import UploadRateThrottle, with_default_throttles
 from config.api_errors import error_response
 
 from .models import Background, CardBack, Felt
@@ -32,6 +33,7 @@ class _UploadView(APIView):
 
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = with_default_throttles(UploadRateThrottle)
 
     model = None
     serializer_class = None
