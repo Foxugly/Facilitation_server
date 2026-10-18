@@ -48,6 +48,10 @@ class UploadRateThrottle(_WriteScopedUserThrottle):
     scope = "upload"
 
 
+class AccountDeleteRateThrottle(_WriteScopedUserThrottle):
+    scope = "account_delete"
+
+
 def with_default_throttles(*extra):
     """The default throttles plus ``extra``: a view's ``throttle_classes`` replaces
     the defaults, and the user/anon rates must keep applying."""

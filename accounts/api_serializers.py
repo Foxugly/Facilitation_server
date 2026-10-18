@@ -120,6 +120,13 @@ class LoginResponseSerializer(serializers.Serializer):
     user = UserMeSerializer()
 
 
+class AccountDeleteSerializer(serializers.Serializer):
+    """Body of POST /api/v1/auth/account/delete/ (same contract as trainingmanager).
+    The view compares the password; the serializer only requires it."""
+
+    current_password = serializers.CharField(write_only=True)
+
+
 class LogoutSerializer(serializers.Serializer):
     refresh = serializers.CharField(write_only=True, help_text="Refresh token to invalidate")
 

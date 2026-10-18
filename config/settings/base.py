@@ -164,6 +164,12 @@ PUBLIC_MEDIA_BASE_URL = env("PUBLIC_MEDIA_BASE_URL", default=FRONTEND_BASE_URL)
 ROOM_INACTIVITY_HOURS = env.int("ROOM_INACTIVITY_HOURS", default=8)
 # Team rooms skip that window but close after this many days without activity.
 TEAM_ROOM_INACTIVITY_DAYS = env.int("TEAM_ROOM_INACTIVITY_DAYS", default=30)
+# GDPR retention (rooms.tasks.purge_retention, daily). Anonymous rooms - display
+# names and votes - are deleted this many days after their last activity. Team
+# rooms are the team history: they are kept as long as the team exists.
+RETENTION_ROOM_DAYS = env.int("RETENTION_ROOM_DAYS", default=30)
+# Invitations (an e-mail address each) are deleted this long after expiring.
+RETENTION_INVITATION_DAYS = env.int("RETENTION_INVITATION_DAYS", default=30)
 # Hard caps (product): people per room, and members per team (a team feeds a room).
 # 15 et non 20 : au-dela, les cartes deviennent trop petites autour de la table pour
 # rester lisibles. Le tour de table repartit les sieges sur un ovale, donc chaque
@@ -195,6 +201,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "rooms.tasks.expire_stale_rooms",
         "schedule": crontab(minute="*/15"),
     },
+    # GDPR retention: old anonymous rooms, dead tokens, stale invitations.
+    "facilitation-purge-retention": {
+        "task": "rooms.tasks.purge_retention",
+        "schedule": crontab(hour=3, minute=40),
+    },
 }
 
 REST_FRAMEWORK = {
@@ -219,6 +230,7 @@ REST_FRAMEWORK = {
         "invite": "20/hour",
         "history_email": "5/hour",
         "upload": "30/hour",
+        "account_delete": "10/hour",
         "create_room": "20/min",
         "join_room": "60/min",
         "login": "10/min",
