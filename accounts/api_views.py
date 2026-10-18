@@ -224,15 +224,19 @@ class MeAvatarApiView(APIView):
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
-        from decks.validators import validate_image_upload
+        from decks.validators import clean_image_upload
 
         image = request.FILES.get("image")
         try:
-            validate_image_upload(image)
+            clean_image_upload(image)
         except DjangoValidationError as e:
             return error_response(code="invalid_image", detail="; ".join(e.messages), http_status=400)
+        previous = request.user.avatar.name if request.user.avatar else None
         request.user.avatar = image
         request.user.save(update_fields=["avatar"])
+        # Replacing an avatar used to leave the old file behind for good.
+        if previous and previous != request.user.avatar.name:
+            request.user.avatar.storage.delete(previous)
         return Response(UserMeSerializer(request.user).data, status=status.HTTP_200_OK)
 
     def delete(self, request):
