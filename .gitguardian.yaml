@@ -1,0 +1,8 @@
+# Test fixtures hold fake credentials (e.g. e2e login passwords) that GitGuardian flags as "Generic Password".
+# Real secrets must never live in tests: they belong in AWS SSM (/<app>/prod), never in the repo.
+version: 2
+
+secret:
+  ignored_paths:
+    - '**/tests/**'
+    - '**/test_*.py'
