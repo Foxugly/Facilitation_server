@@ -1,0 +1,51 @@
+name: CodeQL
+
+# Analyse statique de sécurité (code scanning). Les résultats arrivent dans
+# l'onglet Security > Code scanning ; sur une PR, le check « CodeQL » signale les
+# nouvelles alertes introduites par la branche.
+# Hebdomadaire en plus des push/PR : les requêtes CodeQL évoluent, une alerte peut
+# apparaître sur du code inchangé.
+# Action épinglée sur un SHA complet (tag en commentaire) : un tag peut être
+# déplacé, un SHA non. Dependabot (github-actions) le tient à jour.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "27 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  analyze:
+    name: codeql (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python]
+    steps:
+      - uses: actions/checkout@v7
+
+      # build-mode none : Python et JavaScript/TypeScript s'analysent sans build.
+      - uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          category: "/language:${{ matrix.language }}"

@@ -1,0 +1,11 @@
+# Exceptions pip-audit (job `pip-audit` de la CI).
+#
+# Une ligne par avis connu SANS correctif applicable :
+#   <ID de l'avis> <date d'expiration AAAA-MM-JJ> # paquet, raison, lien
+# Exemple :
+#   GHSA-xxxx-xxxx-xxxx 2027-01-31 # foo 1.2 : pas de correctif publié, code non atteint
+#
+# Une exception expirée fait échouer la CI : la réexaminer (correctif sorti ?)
+# puis la supprimer ou repousser sa date. Fichier vide = aucune exception.
+
+CVE-2026-106454 2027-01-18 # twisted 26.4.0 (via daphne) : ReDoS dans twisted.mail.imap4 (GHSA-8pqf-f4m5-798g), aucun correctif publié ; module IMAP jamais chargé ici

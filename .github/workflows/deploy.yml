@@ -187,3 +187,41 @@ jobs:
             esac
           done
           echo "Timed out waiting for SSM command after 15 minutes"; exit 1
+
+  # Audit des dépendances Python contre la base d'avis PyPI (OSV) : le job échoue
+  # sur toute vulnérabilité connue. pip-audit résout l'arbre complet, dépendances
+  # transitives comprises, dans un venv jetable ; outil épinglé, cache pip.
+  # Exceptions : .pip-audit-ignore, une ligne « ID AAAA-MM-JJ # raison » ;
+  # une exception expirée fait échouer le job — à réexaminer, pas à oublier.
+  pip-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install pip-audit (version figée)
+        run: python -m pip install pip-audit==2.10.1
+
+      - name: Audit des dépendances
+        run: |
+          ignore=()
+          if [ -f .pip-audit-ignore ]; then
+            today=$(date -u +%F)
+            while read -r id expiry _ || [ -n "$id" ]; do
+              case "$id" in ''|'#'*) continue ;; esac
+              if [[ ! "$expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                echo "::error::.pip-audit-ignore : date d'expiration manquante pour $id"; exit 1
+              fi
+              if [[ "$expiry" < "$today" ]]; then
+                echo "::error::.pip-audit-ignore : l'exception $id a expiré le $expiry"; exit 1
+              fi
+              ignore+=(--ignore-vuln "$id")
+            done < .pip-audit-ignore
+          fi
+          pip-audit --progress-spinner off -r requirements.txt "${ignore[@]}"
