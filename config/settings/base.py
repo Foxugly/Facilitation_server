@@ -162,6 +162,8 @@ PUBLIC_MEDIA_BASE_URL = env("PUBLIC_MEDIA_BASE_URL", default=FRONTEND_BASE_URL)
 # --- Rooms lifecycle ---
 # Free anonymous rooms expire after this many hours of inactivity (scope §4).
 ROOM_INACTIVITY_HOURS = env.int("ROOM_INACTIVITY_HOURS", default=8)
+# Team rooms skip that window but close after this many days without activity.
+TEAM_ROOM_INACTIVITY_DAYS = env.int("TEAM_ROOM_INACTIVITY_DAYS", default=30)
 # Hard caps (product): people per room, and members per team (a team feeds a room).
 # 15 et non 20 : au-dela, les cartes deviennent trop petites autour de la table pour
 # rester lisibles. Le tour de table repartit les sieges sur un ovale, donc chaque

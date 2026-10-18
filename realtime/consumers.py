@@ -6,6 +6,7 @@ Control intentions are accepted only from the facilitator (authority, contract ย
 """
 import asyncio
 import logging
+import time
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
@@ -23,6 +24,11 @@ PROTOCOL_VERSION = 1
 # qui a ouvert le vote.
 _timer_tasks = {}
 
+# A team room re-resolves the seat (membership + active account) at most this
+# often while relaying broadcasts, so a member removed from the team stops
+# receiving the room even if their socket stays silent (audit 2026-10-18, I1).
+MEMBERSHIP_RECHECK_SECONDS = 15
+
 
 class RoomConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
@@ -30,6 +36,8 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         self.group = f"room_{self.code}"
         self.joined = False
         self.token = None
+        self.team_room = False
+        self._checked_at = 0.0
         await self.accept()
 
     async def disconnect(self, close_code):
@@ -66,7 +74,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
     async def _dispatch(self, mtype, payload, cid):
         participant = await self._resolve()
         if participant is None:
-            return await self._error("token.unknown", "Unknown participant", mtype, cid)
+            return await self._evict(mtype, cid)
         room = participant.room
 
         # --- items du round (design 2026-09-11 ยง5) -----------------------
@@ -311,6 +319,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             return await self._error("token.unknown", "Unknown or expired token", "session.join", cid)
         self.token = token
         self.public_id = str(participant.public_id)
+        self.team_room = participant.room.team_id is not None
         await database_sync_to_async(services.set_connected)(participant, True)
         await self.channel_layer.group_add(self.group, self.channel_name)
         self.joined = True
@@ -337,7 +346,19 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
     # --- helpers ----------------------------------------------------------
 
     async def _resolve(self, token=None):
-        return await database_sync_to_async(services.resolve_participant)(self.code, token or self.token)
+        participant = await database_sync_to_async(services.resolve_participant)(self.code, token or self.token)
+        if participant is not None:
+            self._checked_at = time.monotonic()
+        return participant
+
+    async def _evict(self, rejected_type=None, cid=None):
+        """The seat no longer resolves (room expired, member left the team, account
+        deactivated): stop relaying the room to this socket. The socket stays open
+        so the client reads the error instead of reconnecting in a loop."""
+        if self.joined:
+            self.joined = False
+            await self.channel_layer.group_discard(self.group, self.channel_name)
+        await self._error("token.unknown", "Unknown participant", rejected_type, cid)
 
     async def _broadcast_participation(self, room):
         data = await database_sync_to_async(services.participation)(room)
@@ -431,6 +452,17 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         }, cid)
 
     async def facilitation_event(self, event):
+        # Team rooms re-check the seat (membership, active account) at most every
+        # MEMBERSHIP_RECHECK_SECONDS: a member removed from the team stops receiving
+        # the room even if their socket stays silent (audit 2026-10-18, I1). The
+        # throttle keeps the per-delivery query count of the comment below.
+        # An evicted socket may still have room events queued: drop them. (getattr:
+        # the audience-filter unit tests build a consumer without connect().)
+        if not getattr(self, "joined", True):
+            return
+        if getattr(self, "team_room", False) and time.monotonic() - self._checked_at >= MEMBERSHIP_RECHECK_SECONDS:
+            if await self._resolve() is None:
+                return await self._evict()
         # Filtrage a l'emission, PAS a la livraison (round de correction 2) :
         # `event["audienceId"]` est l'identifiant public du facilitateur tel
         # que RESOLU AU MOMENT DE L'EMISSION (`_broadcast`, une seule requete

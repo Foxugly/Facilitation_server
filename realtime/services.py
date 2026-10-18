@@ -24,6 +24,7 @@ from rooms.models import (
     Response,
     Round,
 )
+from teams.models import TeamMembership
 
 
 TIMER_MIN_SECONDS = 10
@@ -71,16 +72,31 @@ def _round_resolution_strategy(rnd, room):
 
 
 def resolve_participant(code, token):
-    """token → participant (+ room). Returns None if unknown/expired (contract §3)."""
+    """token → participant (+ room). Returns None if unknown/expired (contract §3).
+
+    A team room is members-only for its whole life, not just at the HTTP join:
+    the seat of a member who left the team, or whose account was deactivated,
+    stops resolving (audit 2026-10-18, I1). The consumer calls this on join, on
+    every intention and periodically on broadcasts, so access follows membership.
+    """
+    if not token:
+        return None
     participant = (
-        Participant.objects.select_related("room")
+        Participant.objects.select_related("room", "user")
         .filter(room__code=code, token=token)
         .first()
     )
     if participant is None:
         return None
-    if not participant.room.is_live:
+    room = participant.room
+    if not room.is_live:
         return None
+    if room.team_id is not None:
+        user = participant.user
+        if user is None or not user.is_active:
+            return None
+        if not TeamMembership.objects.filter(team_id=room.team_id, user=user).exists():
+            return None
     return participant
 
 

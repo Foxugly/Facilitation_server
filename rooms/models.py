@@ -43,7 +43,8 @@ class Room(models.Model):
     current_round = models.ForeignKey(
         "rooms.Round", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
-    # Phase 2: a room tied to a team is members-only and NON-ephemeral (no 8h expiry).
+    # Phase 2: a room tied to a team is members-only and long-lived: no 8h expiry,
+    # but it closes after TEAM_ROOM_INACTIVITY_DAYS without activity (is_live).
     # Null = free anonymous room (Phase 1 default).
     team = models.ForeignKey("teams.Team", on_delete=models.CASCADE, null=True, blank=True, related_name="rooms")
     # Hard cap on participants per room (product limit).
@@ -67,7 +68,8 @@ class Room(models.Model):
     is_expired = models.BooleanField(default=False)
 
     def touch(self, *, save=True):
-        """Slide the 8h inactivity window forward (scope §4). Team rooms don't expire."""
+        """Slide the 8h inactivity window forward (scope §4). A team room is judged
+        on ``last_activity_at`` instead (see ``is_live``)."""
         now = timezone.now()
         self.last_activity_at = now
         self.expires_at = now + timezone.timedelta(hours=settings.ROOM_INACTIVITY_HOURS)
@@ -78,7 +80,12 @@ class Room(models.Model):
     def is_live(self):
         if self.is_expired:
             return False
-        return self.team_id is not None or self.expires_at > timezone.now()
+        if self.team_id is not None:
+            # Team rooms outlive the 8h window, but not forever: an abandoned room
+            # would keep its seats (and their tokens) valid indefinitely.
+            window = timezone.timedelta(days=settings.TEAM_ROOM_INACTIVITY_DAYS)
+            return self.last_activity_at + window > timezone.now()
+        return self.expires_at > timezone.now()
 
     def __str__(self):
         return self.code

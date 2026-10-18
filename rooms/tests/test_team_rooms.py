@@ -83,7 +83,7 @@ def test_team_room_is_not_ephemeral(standard_deck, team, member):
     room = Room.objects.get(code=code)
     room.expires_at = timezone.now() - timezone.timedelta(hours=1)  # past
     room.save(update_fields=["expires_at"])
-    assert room.is_live is True  # team rooms never expire
+    assert room.is_live is True  # the 8h window of free rooms does not apply
 
 
 @pytest.mark.django_db

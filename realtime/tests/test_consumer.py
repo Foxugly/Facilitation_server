@@ -36,6 +36,7 @@ def _make_room(with_team=False):
     # code, so a shared code would leak group state across transactional tests.
     code = generate_unique_code(lambda c: Room.objects.filter(code=c).exists())
     team = None
+    fac_user = voter_user = None
     if with_team:
         # The timer is a team-only feature; timer tests need a team room.
         from django.contrib.auth import get_user_model
@@ -46,11 +47,22 @@ def _make_room(with_team=False):
         )
         team = Team.objects.create(name=f"T-{code}", owner=owner)
         TeamMembership.objects.create(team=team, user=owner, role=TeamRole.OWNER)
+        # A team room is members-only over the socket too: each seat belongs to
+        # an active member (audit 2026-10-18, I1).
+        member = get_user_model().objects.create_user(
+            email=f"member-{code.lower()}@example.com", password="pw12345678", display_name="M"
+        )
+        TeamMembership.objects.create(team=team, user=member, role=TeamRole.MEMBER)
+        fac_user, voter_user = owner, member
     room = Room(code=code, vote_type=deck.vote_type, deck_snapshot=build_deck_snapshot(deck), title="Retro", team=team)
     room.touch(save=False)
     room.save()
-    fac = Participant.objects.create(room=room, token=generate_token(), display_name="Sam", role=Role.FACILITATOR)
-    voter = Participant.objects.create(room=room, token=generate_token(), display_name="Alex", role=Role.VOTER)
+    fac = Participant.objects.create(
+        room=room, token=generate_token(), display_name="Sam", role=Role.FACILITATOR, user=fac_user
+    )
+    voter = Participant.objects.create(
+        room=room, token=generate_token(), display_name="Alex", role=Role.VOTER, user=voter_user
+    )
     return code, fac.token, voter.token
 
 
