@@ -4,6 +4,7 @@ from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import User
+from .refresh_cookie import PERSIST_CLAIM
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -39,6 +40,9 @@ class RegisterSerializer(serializers.ModelSerializer):
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
+    # Cookie mode only (`X-Auth-Mode: cookie`): false makes the refresh cookie a
+    # browser-session cookie (no Max-Age). Ignored in body mode.
+    remember_me = serializers.BooleanField(required=False, default=True)
 
     def validate(self, attrs):
         user = authenticate(
@@ -116,7 +120,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
 
 class LoginResponseSerializer(serializers.Serializer):
     access = serializers.CharField()
-    refresh = serializers.CharField()
+    # Omitted when the request sent `X-Auth-Mode: cookie` (HttpOnly cookie instead).
+    refresh = serializers.CharField(required=False)
     user = UserMeSerializer()
 
 
@@ -128,7 +133,14 @@ class AccountDeleteSerializer(serializers.Serializer):
 
 
 class LogoutSerializer(serializers.Serializer):
-    refresh = serializers.CharField(write_only=True, help_text="Refresh token to invalidate")
+    refresh = serializers.CharField(
+        write_only=True,
+        required=False,
+        help_text=(
+            "Refresh token to invalidate. Required in body mode; in cookie mode "
+            "(`X-Auth-Mode: cookie`) the HttpOnly refresh cookie is used when omitted."
+        ),
+    )
 
 
 class StaffUserSerializer(serializers.ModelSerializer):
@@ -142,8 +154,12 @@ class StaffUserSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "email", "display_name", "bypass_granted_at"]
 
 
-def build_token_response_for_user(user: User) -> dict:
+def build_token_response_for_user(user: User, *, persist: bool = True) -> dict:
     refresh = RefreshToken.for_user(user)
+    if not persist:
+        # Survives rotation (simplejwt rotates the same token object), so the
+        # refresh cookie stays a session cookie for the whole session.
+        refresh[PERSIST_CLAIM] = False
     return {
         "access": str(refresh.access_token),
         "refresh": str(refresh),

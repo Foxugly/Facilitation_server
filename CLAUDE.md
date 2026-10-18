@@ -235,6 +235,20 @@ identifiant d'authentification** : ne jamais le mapper sur un `username` authent
 Côté comptes : `AUTH_USER_MODEL` est figé depuis la migration 0001 sur une base vierge et ne
 doit jamais être échangé. Il n'y a **pas de champ `username`** (`USERNAME_FIELD="email"`, §3.16).
 
+## Transport du refresh token (SPA) — cookie HttpOnly
+
+Design flotte piloté sur PushIT (PushIT_server #69), porté depuis Poker. Avec l'en-tête
+`X-Auth-Mode: cookie` (envoyé par la SPA seule, avec `withCredentials`), login / vérif magic link /
+confirmation e-mail / `token/refresh/` posent le refresh dans le cookie `facilitation_refresh`
+(`HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth/`, host-only, `Max-Age` = durée du refresh,
+ou cookie de session si `remember_me: false`) et le retirent du corps. Le refresh lit le cookie si
+le corps n'en a pas (401 `refresh_cookie_missing`) ; logout (sans Bearer) et suppression de compte
+l'effacent. Toute requête en mode cookie doit porter un `Origin` de `CORS_ALLOWED_ORIGINS` (403
+`origin_not_allowed`) ; CORS : credentials pour cette liste explicite seulement, `*` refusé au
+démarrage, en-tête `x-auth-mode` autorisé. Sans l'en-tête, contrat corps inchangé. **Le WebSocket
+n'est pas concerné** : il s'authentifie par le token participant dans `session.join`. Code :
+`accounts/refresh_cookie.py`, tests `accounts/tests/test_refresh_cookie.py`.
+
 ## Facturation déléguée, et inerte par défaut
 
 Aucune clé Stripe ici. `billing/client.py` est le **seul** point de sortie vers
