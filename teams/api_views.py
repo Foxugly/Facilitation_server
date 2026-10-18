@@ -29,6 +29,13 @@ from .serializers import (
 )
 
 INVITE_TTL_DAYS = 7
+_TEAM_NAME_MAX = Team._meta.get_field("name").max_length
+
+
+def _is_pk(value) -> bool:
+    """A primary key as JSON carries it: an int (bool is an int in Python, not here).
+    Anything else used to reach the ORM and come back as a 500 (audit M1)."""
+    return isinstance(value, int) and not isinstance(value, bool) and 0 < value < 2**63
 _HEX_COLOR = re.compile(r"^#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
 
 
@@ -81,10 +88,15 @@ class TeamDetailView(APIView):
             return error_response(code="forbidden", detail="Manager role required.", http_status=403)
         updates = []
         deck_ids_to_set = None
-        name = (request.data.get("name") or "").strip()
-        if name:
-            team.name = name
-            updates.append("name")
+        name = request.data.get("name")
+        if name is not None:
+            if not isinstance(name, str) or len(name.strip()) > _TEAM_NAME_MAX:
+                return error_response(code="invalid_name",
+                                      detail=f"Expected a name of at most {_TEAM_NAME_MAX} characters.",
+                                      http_status=400)
+            if name.strip():
+                team.name = name.strip()
+                updates.append("name")
         # Appearance (P2.6): card-back + felt colours, validated as #RRGGBB[AA].
         # Appearance is a paid feature (P2.7): gated once billing is live.
         if any(f in request.data for f in ("card_back_color", "felt_color", "background_color")):
@@ -104,7 +116,7 @@ class TeamDetailView(APIView):
         # never another team's custom deck or back. Null resets to the default.
         if "deck_ids" in request.data:
             raw = request.data.get("deck_ids") or []
-            if not isinstance(raw, list):
+            if not isinstance(raw, list) or not all(_is_pk(v) for v in raw):
                 return error_response(code="invalid_deck_ids", detail="Expected a list of deck ids.", http_status=400)
             ids = set(raw)
             if len(available_decks(team).filter(pk__in=ids)) != len(ids):
@@ -130,7 +142,7 @@ class TeamDetailView(APIView):
             felt_id = request.data.get("felt_id")
             if felt_id is None:
                 team.felt = None
-            elif not available_felts(team).filter(pk=felt_id).exists():
+            elif not _is_pk(felt_id) or not available_felts(team).filter(pk=felt_id).exists():
                 return error_response(code="felt_unavailable", detail="This felt is not available to this team.", http_status=400)
             else:
                 team.felt_id = felt_id
@@ -139,7 +151,7 @@ class TeamDetailView(APIView):
             back_id = request.data.get("card_back_id")
             if back_id is None:
                 team.card_back = None
-            elif not available_card_backs(team).filter(pk=back_id).exists():
+            elif not _is_pk(back_id) or not available_card_backs(team).filter(pk=back_id).exists():
                 return error_response(code="card_back_unavailable", detail="This card back is not available to this team.", http_status=400)
             else:
                 team.card_back_id = back_id
@@ -157,7 +169,7 @@ class TeamDetailView(APIView):
             background_id = request.data.get("background_id")
             if background_id is None:
                 team.background = None
-            elif not available_backgrounds(team).filter(pk=background_id).exists():
+            elif not _is_pk(background_id) or not available_backgrounds(team).filter(pk=background_id).exists():
                 return error_response(code="background_unavailable",
                                       detail="This background is not available to this team.", http_status=400)
             else:

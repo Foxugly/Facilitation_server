@@ -97,9 +97,9 @@ async def test_member_removed_mid_session_loses_intentions_and_broadcasts(monkey
 
     # An intention from the removed member is refused...
     await voter.send_json_to({"v": 1, "type": "vote.cast", "payload": {"cardValue": "1"}})
-    msg = await voter.receive_json_from()
+    msg = await voter.receive_json_from(timeout=3)
     while msg["type"] != "error":
-        msg = await voter.receive_json_from()
+        msg = await voter.receive_json_from(timeout=3)
     assert msg["payload"]["code"] == "token.unknown"
 
     while not await voter.receive_nothing(timeout=0.2):
@@ -127,8 +127,12 @@ async def test_passive_socket_is_evicted_on_next_broadcast(monkeypatch):
     await database_sync_to_async(_deactivate)(member)
     await fac.send_json_to({"v": 1, "type": "round.add", "payload": {"text": "Secret topic"}})
 
-    msg = await voter.receive_json_from()
-    assert msg["type"] == "error" and msg["payload"]["code"] == "token.unknown"
+    # Join chatter still in flight may be relayed first; the eviction follows.
+    for _ in range(10):
+        msg = await voter.receive_json_from(timeout=3)
+        if msg["type"] == "error":
+            break
+    assert msg["payload"]["code"] == "token.unknown"
     assert await voter.receive_nothing(timeout=0.3)
     await fac.disconnect()
     await voter.disconnect()

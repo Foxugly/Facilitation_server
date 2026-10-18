@@ -7,6 +7,8 @@ import requests
 from django.conf import settings
 from msal import ConfidentialClientApplication
 
+from .pii import mask_email
+
 logger = logging.getLogger("facilitation")
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
@@ -52,4 +54,4 @@ def send_email(*, to: str, subject: str, body: str) -> None:
         },
         timeout=30,
     ).raise_for_status()
-    logger.info("graph_mail_sent", extra={"to": to, "subject": subject})
+    logger.info("graph_mail_sent", extra={"to": mask_email(to), "subject": subject})

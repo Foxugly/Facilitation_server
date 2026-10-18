@@ -5,6 +5,7 @@ the state machine and *rebroadcasts the fact*. Vote values stay secret until rev
 Control intentions are accepted only from the facilitator (authority, contract §0.2).
 """
 import asyncio
+import json
 import logging
 import time
 from collections import deque
@@ -72,7 +73,15 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         if size > WS_MAX_MESSAGE_BYTES:
             await self._error("payload.too_large", "Message too large", None, None)
             return await self.close(code=CLOSE_TOO_LARGE)
-        await super().receive(text_data=text_data, bytes_data=bytes_data, **kwargs)
+        # Decoded here rather than by the parent class: a binary frame or broken
+        # JSON raised out of the consumer, closing the socket (audit M1).
+        try:
+            content = json.loads(text_data) if text_data is not None else None
+        except ValueError:
+            content = None
+        if not isinstance(content, dict):
+            return await self._error("payload.invalid", "Expected a JSON object", None, None)
+        await self.receive_json(content, **kwargs)
 
     def _within_rate(self):
         limit, window = WS_RATE_LIMIT
@@ -90,8 +99,12 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             return await self._error("protocol.version", "Unsupported protocol version",
                                      content.get("type"), content.get("cid"))
         mtype = content.get("type")
-        payload = content.get("payload") or {}
+        payload = content.get("payload")
         cid = content.get("cid")
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict) or not isinstance(mtype, str):
+            return await self._error("payload.invalid", "Expected a payload object", mtype, cid)
 
         if mtype == "session.join":
             return await self._handle_join(payload, cid)
@@ -104,6 +117,11 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self._dispatch(mtype, payload, cid)
         except RoomError as exc:
             await self._error(exc.code, exc.message, exc.rejected_type or mtype, cid)
+        except Exception:
+            # Anything unexpected is logged once and answered with a generic
+            # frame; the socket (and the room for everyone else) stays up.
+            logger.exception("ws_intention_failed", extra={"room_code": self.code, "type": mtype})
+            await self._error("server.error", "Unexpected server error", mtype, cid)
 
     # --- intentions -------------------------------------------------------
 
