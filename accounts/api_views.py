@@ -1,4 +1,5 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
@@ -19,6 +20,7 @@ from .models import User
 from .password_reset import confirm_password_reset, request_password_reset
 from .turnstile import get_remote_ip, turnstile_enabled, verify_turnstile_token
 from .erasure import erase_account
+from .export import build_export
 from .api_serializers import (
     AccountDeleteSerializer,
     EmailConfirmSerializer,
@@ -36,6 +38,7 @@ from .api_serializers import (
 )
 from .throttles import (
     AccountDeleteRateThrottle,
+    AccountExportRateThrottle,
     LoginRateThrottle,
     MagicLinkRateThrottle,
     PasswordResetRateThrottle,
@@ -279,6 +282,25 @@ class AccountDeleteApiView(APIView):
                                   http_status=status.HTTP_409_CONFLICT)
         erase_account(user)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AccountExportApiView(APIView):
+    """GET /api/v1/auth/account/export/ - GDPR export of one's own data.
+
+    Same idea as trainingmanager_server's ``me/export/``: a JSON document served
+    as a download (Content-Disposition: attachment). Contents and exclusions are
+    documented in ``accounts/export.py``.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = with_default_throttles(AccountExportRateThrottle)
+
+    def get(self, request):
+        response = Response(build_export(request.user), status=status.HTTP_200_OK)
+        filename = f"facilitation-export-{timezone.now():%Y-%m-%d}.json"
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Cache-Control"] = "no-store"
+        return response
 
 
 class CustomTokenRefreshView(TokenRefreshView):
