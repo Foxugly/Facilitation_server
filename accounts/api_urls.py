@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .api_views import (
+    AccountDeleteApiView,
     ConfirmEmailApiView,
     CustomTokenRefreshView,
     ForgotPasswordApiView,
@@ -22,6 +23,7 @@ urlpatterns = [
     path("token/refresh/", CustomTokenRefreshView.as_view(), name="token-refresh"),
     path("me/", MeApiView.as_view(), name="me"),
     path("me/avatar/", MeAvatarApiView.as_view(), name="me-avatar"),
+    path("account/delete/", AccountDeleteApiView.as_view(), name="account-delete"),
     path("email/confirm/", ConfirmEmailApiView.as_view(), name="email-confirm"),
     path("email/resend/", ResendConfirmationApiView.as_view(), name="email-resend"),
     path("forgot-password/", ForgotPasswordApiView.as_view(), name="forgot-password"),

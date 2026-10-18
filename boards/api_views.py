@@ -15,6 +15,19 @@ from teams.permissions import is_manager, is_member
 
 from .models import Board, BoardRow
 
+TOPIC_MAX_LENGTH = BoardRow._meta.get_field("topic").max_length
+ORDER_MAX = 2**31 - 1  # PositiveIntegerField: int4 under PostgreSQL
+
+
+def _clean_topic(value):
+    """The stripped topic, or None when it is missing, not a string, or too long."""
+    if not isinstance(value, str):
+        return None
+    topic = value.strip()
+    if not topic or len(topic) > TOPIC_MAX_LENGTH:
+        return None
+    return topic
+
 
 def _levels():
     """The 7 delegation levels (value + translated name dict) from the standard deck."""
@@ -79,9 +92,11 @@ class BoardRowListView(APIView):
             return error_response(code="forbidden", detail="Manager role required.", http_status=403)
         if (err := paid_required(team)) is not None:
             return err
-        topic = (request.data.get("topic") or "").strip()
-        if not topic:
-            return error_response(code="invalid_topic", detail="Topic is required.", http_status=400)
+        topic = _clean_topic(request.data.get("topic"))
+        if topic is None:
+            return error_response(code="invalid_topic",
+                                  detail=f"Topic is required (at most {TOPIC_MAX_LENGTH} characters).",
+                                  http_status=400)
         board = _get_board(team)
         order = board.rows.count()
         row = BoardRow.objects.create(board=board, topic=topic, order=order)
@@ -111,9 +126,11 @@ class BoardRowDetailView(APIView):
         valid = _valid_values()
         updates = []
         if "topic" in data:
-            topic = (data.get("topic") or "").strip()
-            if not topic:
-                return error_response(code="invalid_topic", detail="Topic is required.", http_status=400)
+            topic = _clean_topic(data.get("topic"))
+            if topic is None:
+                return error_response(code="invalid_topic",
+                                      detail=f"Topic is required (at most {TOPIC_MAX_LENGTH} characters).",
+                                      http_status=400)
             row.topic = topic
             updates.append("topic")
         for field, key in (("as_is_level", "asIs"), ("to_be_level", "toBe")):
@@ -125,10 +142,14 @@ class BoardRowDetailView(APIView):
                 updates.append(field)
         if "order" in data:
             try:
-                row.order = int(data.get("order"))
-                updates.append("order")
-            except (TypeError, ValueError):
-                return error_response(code="invalid_order", detail="Order must be an integer.", http_status=400)
+                order = int(data.get("order"))
+            except (TypeError, ValueError, OverflowError):
+                order = None
+            if order is None or not 0 <= order <= ORDER_MAX:
+                return error_response(code="invalid_order", detail="Order must be a non-negative integer.",
+                                      http_status=400)
+            row.order = order
+            updates.append("order")
         if updates:
             row.save(update_fields=updates)
         return Response(_row_dict(row))

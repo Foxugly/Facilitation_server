@@ -7,6 +7,7 @@ from django.conf import settings
 from django.core.mail import send_mail
 
 from . import graph_mail
+from .pii import mask_email
 
 logger = logging.getLogger("facilitation")
 
@@ -18,6 +19,6 @@ def send_email(*, to: str, subject: str, body: str) -> None:
         else:
             from_email = getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@facilitation.foxugly.com")
             send_mail(subject, body, from_email, [to], fail_silently=False)
-        logger.info("email_sent", extra={"to": to, "subject": subject})
+        logger.info("email_sent", extra={"to": mask_email(to), "subject": subject})
     except Exception:
-        logger.exception("email_send_failed", extra={"to": to})
+        logger.exception("email_send_failed", extra={"to": mask_email(to)})

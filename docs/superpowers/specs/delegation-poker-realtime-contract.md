@@ -205,6 +205,18 @@ hors garde-fou). **`room.expired` n'existe pas** — prévu par ce document Phas
 implémenté : une salle expirée ou inconnue résout en `token.unknown` (`resolve_participant`/
 `room_by_code` renvoient `None` dans les deux cas, sans distinction de code pour l'appelant).
 
+Ajoutés par l'audit du 2026-10-18 :
+- `payload.invalid` — trame non JSON, enveloppe ou `payload` qui n'est pas un objet, texte non
+  chaîne ou trop long (texte d'item : 300 caractères). La socket reste ouverte.
+- `limit.reached` — `item.add` au-delà de 20 items par participant et par round, ou de 200 items
+  par round.
+- `server.error` — erreur inattendue côté serveur, journalisée ; la socket reste ouverte.
+- `rate.limited` — plus de 30 messages en 10 s sur une connexion ; suivi d'une fermeture **4008**.
+- `payload.too_large` — trame de plus de 8 Kio ; suivi d'une fermeture **4009**.
+- `token.unknown` peut aussi arriver **sans intention** (`rejectedType: null`) dans une salle
+  d'équipe : le membre a quitté l'équipe ou son compte est désactivé. Le serveur cesse alors de
+  relayer la salle à cette socket (elle reste ouverte, sans reconnexion automatique utile).
+
 ---
 
 ## 8. Transport & robustesse

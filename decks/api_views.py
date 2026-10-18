@@ -14,12 +14,13 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.throttles import UploadRateThrottle, with_default_throttles
 from config.api_errors import error_response
 
 from .models import Background, CardBack, Felt
 from .selection import can_upload
 from .serializers import BackgroundSerializer, CardBackSerializer, FeltSerializer
-from .validators import MAX_BACKGROUND_BYTES, MAX_UPLOAD_BYTES, validate_image_upload
+from .validators import MAX_BACKGROUND_BYTES, MAX_UPLOAD_BYTES, clean_image_upload
 
 
 class _UploadView(APIView):
@@ -32,6 +33,7 @@ class _UploadView(APIView):
 
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = with_default_throttles(UploadRateThrottle)
 
     model = None
     serializer_class = None
@@ -42,7 +44,7 @@ class _UploadView(APIView):
             return error_response(code="forbidden", detail="Only a team owner or manager can upload.", http_status=403)
         image = request.FILES.get("image")
         try:
-            validate_image_upload(image, max_bytes=self.max_upload_bytes)
+            clean_image_upload(image, max_bytes=self.max_upload_bytes)
         except ValidationError as e:
             return error_response(code="invalid_image", detail="; ".join(e.messages), http_status=400)
         name = (request.data.get("name") or "").strip()[:120]

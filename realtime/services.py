@@ -24,6 +24,7 @@ from rooms.models import (
     Response,
     Round,
 )
+from teams.models import TeamMembership
 
 
 TIMER_MIN_SECONDS = 10
@@ -71,16 +72,31 @@ def _round_resolution_strategy(rnd, room):
 
 
 def resolve_participant(code, token):
-    """token → participant (+ room). Returns None if unknown/expired (contract §3)."""
+    """token → participant (+ room). Returns None if unknown/expired (contract §3).
+
+    A team room is members-only for its whole life, not just at the HTTP join:
+    the seat of a member who left the team, or whose account was deactivated,
+    stops resolving (audit 2026-10-18, I1). The consumer calls this on join, on
+    every intention and periodically on broadcasts, so access follows membership.
+    """
+    if not token:
+        return None
     participant = (
-        Participant.objects.select_related("room")
+        Participant.objects.select_related("room", "user")
         .filter(room__code=code, token=token)
         .first()
     )
     if participant is None:
         return None
-    if not participant.room.is_live:
+    room = participant.room
+    if not room.is_live:
         return None
+    if room.team_id is not None:
+        user = participant.user
+        if user is None or not user.is_active:
+            return None
+        if not TeamMembership.objects.filter(team_id=room.team_id, user=user).exists():
+            return None
     return participant
 
 
@@ -280,10 +296,31 @@ def _leading_result(rnd):
     return min(results, key=lambda r: (sequences.get(r.item_id, 0), r.item_id))
 
 
+ITEM_MAX_LENGTH = Item._meta.get_field("text").max_length
+# Volume guard for participant-written items (audit 2026-10-18, M2). Each item.add
+# re-broadcasts the agenda and the totals to the whole room: without a cap, one
+# participant could post an unbounded stream of post-its once an activity lets
+# participants author items.
+ITEMS_PER_PARTICIPANT_PER_ROUND = 20
+ITEMS_PER_ROUND = 200
+
+
+def _clean_text(value, rejected_type, max_length=ITEM_MAX_LENGTH):
+    """A client-supplied text: a string (None reads as empty) within the column
+    size. Anything else is refused with ``payload.invalid`` instead of raising
+    (non-string) or failing at the database (too long under PostgreSQL)."""
+    if value is None:
+        return ""
+    if not isinstance(value, str) or len(value) > max_length:
+        raise RoomError("payload.invalid", f"Expected a text of at most {max_length} characters", rejected_type)
+    return value
+
+
 def set_current_item(room, participant, text):
     """Ex-`set_subject`, semantique inchangee : on reecrit l'item du round courant
     s'il est encore idle, sinon on ouvre un round neuf."""
     _require_facilitator(room, participant, "item.update")
+    text = _clean_text(text, "item.update")
     rnd = current_round(room)
     first = _first_item(rnd)
     if rnd and rnd.state == RoundState.IDLE and first:
@@ -323,7 +360,7 @@ def add_item(room, participant, text):
     strategy = _resolution_strategy(room)
     if spec_for(strategy).items_authored_by != "participants" and not caller_is_facilitator:
         raise RoomError("forbidden.not_facilitator", "Not the facilitator", "item.add")
-    text = (text or "").strip()
+    text = _clean_text(text, "item.add").strip()
     if not text:
         raise RoomError("state.invalid_transition", "Empty item", "item.add")
     author = None if caller_is_facilitator else participant
@@ -342,7 +379,13 @@ def add_item(room, participant, text):
         room.save(update_fields=["current_round"])
         item = _first_item(rnd)
     else:
-        seq = rnd.items.count() + 1
+        count = rnd.items.count()
+        if count >= ITEMS_PER_ROUND:
+            raise RoomError("limit.reached", f"At most {ITEMS_PER_ROUND} items per round", "item.add")
+        if author is not None and rnd.items.filter(author=author).count() >= ITEMS_PER_PARTICIPANT_PER_ROUND:
+            raise RoomError("limit.reached",
+                            f"At most {ITEMS_PER_PARTICIPANT_PER_ROUND} items per participant", "item.add")
+        seq = count + 1
         item = Item.objects.create(round=rnd, text=text, sequence=seq, author=author)
     room.touch()
     return {"id": item.id, "text": item.text, "sequence": item.sequence}
@@ -356,7 +399,7 @@ def _item_of_room(room, item_id, rejected_type):
 
 
 def update_item(room, participant, item_id, text):
-    text = (text or "").strip()
+    text = _clean_text(text, "item.update").strip()
     if not text:
         raise RoomError("state.invalid_transition", "Empty item", "item.update")
     item = _item_of_room(room, item_id, "item.update")
@@ -888,7 +931,7 @@ def add_scenario_item(room, participant, text):
     Retourne l'id du round cree — c'est lui que l'agenda designe.
     """
     _require_facilitator(room, participant, "round.add")
-    text = (text or "").strip()
+    text = _clean_text(text, "round.add").strip()
     if not text:
         raise RoomError("state.invalid_transition", "Empty item", "round.add")
     rnd = _new_round(room, participant, text)
@@ -1070,6 +1113,7 @@ def prepare_round(
     in one place.
     """
     _require_facilitator(room, participant, "round.prepare")
+    subject_text = _clean_text(subject_text, "round.prepare") if subject_text is not None else None
     # 1) Make the chosen round current (creating/resetting it). `subject_id` designe
     # desormais un ROUND (build_agenda l'a toujours appele `id`) : l'alias vit sans
     # le savoir.

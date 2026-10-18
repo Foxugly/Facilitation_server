@@ -6,6 +6,7 @@ from django.utils.http import urlsafe_base64_encode
 from rest_framework.test import APIClient
 
 from accounts.models import MagicLinkToken
+from accounts.tokens import email_confirmation_token_generator
 
 User = get_user_model()
 
@@ -43,7 +44,7 @@ def test_login_blocked_until_email_confirmed_then_works(client):
 
     user = User.objects.get(email="sam@example.com")
     uid = urlsafe_base64_encode(force_bytes(user.pk))
-    token = default_token_generator.make_token(user)
+    token = email_confirmation_token_generator.make_token(user)
     confirm = client.post("/api/v1/auth/email/confirm/", {"uid": uid, "token": token}, format="json")
     assert confirm.status_code == 200
     assert confirm.json()["access"] and confirm.json()["refresh"]

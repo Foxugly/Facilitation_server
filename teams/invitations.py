@@ -24,4 +24,4 @@ def send_invitation_email(invitation) -> None:
             "If you didn't expect this, you can ignore this email.\n"
         ),
     )
-    logger.info("team_invitation_sent", extra={"team_id": invitation.team_id, "email": invitation.email})
+    logger.info("team_invitation_sent", extra={"team_id": invitation.team_id, "invitation_id": invitation.pk})

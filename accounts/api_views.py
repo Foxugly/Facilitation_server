@@ -18,7 +18,9 @@ from .magic_link import request_magic_link, verify_magic_link
 from .models import User
 from .password_reset import confirm_password_reset, request_password_reset
 from .turnstile import get_remote_ip, turnstile_enabled, verify_turnstile_token
+from .erasure import erase_account
 from .api_serializers import (
+    AccountDeleteSerializer,
     EmailConfirmSerializer,
     EmailResendSerializer,
     ForgotPasswordSerializer,
@@ -33,11 +35,14 @@ from .api_serializers import (
     build_token_response_for_user,
 )
 from .throttles import (
+    AccountDeleteRateThrottle,
     LoginRateThrottle,
     MagicLinkRateThrottle,
     PasswordResetRateThrottle,
     RegisterRateThrottle,
     ResendEmailRateThrottle,
+    UploadRateThrottle,
+    with_default_throttles,
 )
 
 
@@ -222,17 +227,22 @@ class MeAvatarApiView(APIView):
 
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = with_default_throttles(UploadRateThrottle)
 
     def post(self, request):
-        from decks.validators import validate_image_upload
+        from decks.validators import clean_image_upload
 
         image = request.FILES.get("image")
         try:
-            validate_image_upload(image)
+            clean_image_upload(image)
         except DjangoValidationError as e:
             return error_response(code="invalid_image", detail="; ".join(e.messages), http_status=400)
+        previous = request.user.avatar.name if request.user.avatar else None
         request.user.avatar = image
         request.user.save(update_fields=["avatar"])
+        # Replacing an avatar used to leave the old file behind for good.
+        if previous and previous != request.user.avatar.name:
+            request.user.avatar.storage.delete(previous)
         return Response(UserMeSerializer(request.user).data, status=status.HTTP_200_OK)
 
     def delete(self, request):
@@ -241,6 +251,34 @@ class MeAvatarApiView(APIView):
             request.user.avatar = None
             request.user.save(update_fields=["avatar"])
         return Response(UserMeSerializer(request.user).data, status=status.HTTP_200_OK)
+
+
+class AccountDeleteApiView(APIView):
+    """POST /api/v1/auth/account/delete/ - delete one's own account (GDPR).
+
+    Same contract as trainingmanager_server: body {current_password}; 204 on
+    success; 400 ``current_password_invalid`` (or a field error when missing);
+    409 ``owns_teams`` while the caller still owns a team - Team.owner cascades,
+    so deleting the account would silently delete the team and its history for
+    every member. Ownership must be handed over (or the team deleted) first.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = with_default_throttles(AccountDeleteRateThrottle)
+
+    def post(self, request):
+        serializer = AccountDeleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = request.user
+        if not user.check_password(serializer.validated_data["current_password"]):
+            return error_response(code="current_password_invalid", detail="Current password is incorrect.",
+                                  http_status=status.HTTP_400_BAD_REQUEST)
+        if user.owned_teams.exists():
+            return error_response(code="owns_teams",
+                                  detail="Transfer or delete the teams you own before deleting your account.",
+                                  http_status=status.HTTP_409_CONFLICT)
+        erase_account(user)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class CustomTokenRefreshView(TokenRefreshView):

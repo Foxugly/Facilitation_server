@@ -162,6 +162,14 @@ PUBLIC_MEDIA_BASE_URL = env("PUBLIC_MEDIA_BASE_URL", default=FRONTEND_BASE_URL)
 # --- Rooms lifecycle ---
 # Free anonymous rooms expire after this many hours of inactivity (scope §4).
 ROOM_INACTIVITY_HOURS = env.int("ROOM_INACTIVITY_HOURS", default=8)
+# Team rooms skip that window but close after this many days without activity.
+TEAM_ROOM_INACTIVITY_DAYS = env.int("TEAM_ROOM_INACTIVITY_DAYS", default=30)
+# GDPR retention (rooms.tasks.purge_retention, daily). Anonymous rooms - display
+# names and votes - are deleted this many days after their last activity. Team
+# rooms are the team history: they are kept as long as the team exists.
+RETENTION_ROOM_DAYS = env.int("RETENTION_ROOM_DAYS", default=30)
+# Invitations (an e-mail address each) are deleted this long after expiring.
+RETENTION_INVITATION_DAYS = env.int("RETENTION_INVITATION_DAYS", default=30)
 # Hard caps (product): people per room, and members per team (a team feeds a room).
 # 15 et non 20 : au-dela, les cartes deviennent trop petites autour de la table pour
 # rester lisibles. Le tour de table repartit les sieges sur un ovale, donc chaque
@@ -193,6 +201,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "rooms.tasks.expire_stale_rooms",
         "schedule": crontab(minute="*/15"),
     },
+    # GDPR retention: old anonymous rooms, dead tokens, stale invitations.
+    "facilitation-purge-retention": {
+        "task": "rooms.tasks.purge_retention",
+        "schedule": crontab(hour=3, minute=40),
+    },
 }
 
 REST_FRAMEWORK = {
@@ -204,11 +217,20 @@ REST_FRAMEWORK = {
     # X-Forwarded-For. Sans NUM_PROXIES, DRF prenait l'en-tête entier comme identité —
     # écrit en partie par le client, donc une limite contournable à volonté.
     "NUM_PROXIES": 1,
+    # Anonymous AND authenticated callers are limited (audit 2026-10-18, I5): with
+    # AnonRateThrottle alone, a Bearer token lifted every limit. Costly side
+    # effects get their own per-user scope on top (accounts/throttles.py).
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
         "anon": "60/min",
+        "user": "1000/hour",
+        "invite": "20/hour",
+        "history_email": "5/hour",
+        "upload": "30/hour",
+        "account_delete": "10/hour",
         "create_room": "20/min",
         "join_room": "60/min",
         "login": "10/min",
@@ -225,7 +247,9 @@ REST_FRAMEWORK = {
 # token and blacklists the old — clients MUST persist the rotated token. ---
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=env.int("JWT_ACCESS_MINUTES", default=15)),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=env.int("JWT_REFRESH_DAYS", default=90)),
+    # 30 days, down from 90 (audit 2026-10-18, I4): bounds what a leaked refresh
+    # token is worth when nobody resets the password.
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=env.int("JWT_REFRESH_DAYS", default=30)),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
     "UPDATE_LAST_LOGIN": True,

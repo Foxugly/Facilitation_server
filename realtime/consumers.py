@@ -5,7 +5,10 @@ the state machine and *rebroadcasts the fact*. Vote values stay secret until rev
 Control intentions are accepted only from the facilitator (authority, contract §0.2).
 """
 import asyncio
+import json
 import logging
+import time
+from collections import deque
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
@@ -23,6 +26,23 @@ PROTOCOL_VERSION = 1
 # qui a ouvert le vote.
 _timer_tasks = {}
 
+# A team room re-resolves the seat (membership + active account) at most this
+# often while relaying broadcasts, so a member removed from the team stops
+# receiving the room even if their socket stays silent (audit 2026-10-18, I1).
+MEMBERSHIP_RECHECK_SECONDS = 15
+
+# Per-connection budget (audit 2026-10-18, I5): every intention writes to the
+# database and fans out to the whole room. (messages, seconds) — a client that
+# sends more inside the sliding window is cut off. Far above human pace (the SPA
+# also pings), far below what a script needs to hurt.
+WS_RATE_LIMIT = (30, 10.0)
+# Largest accepted text frame. The biggest legitimate intention is a 300-char
+# subject; daphne itself imposes no bound (audit M7).
+WS_MAX_MESSAGE_BYTES = 8 * 1024
+# Close codes (4000-4999 are application-defined).
+CLOSE_RATE_LIMITED = 4008
+CLOSE_TOO_LARGE = 4009
+
 
 class RoomConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
@@ -30,6 +50,9 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         self.group = f"room_{self.code}"
         self.joined = False
         self.token = None
+        self.team_room = False
+        self._checked_at = 0.0
+        self._recent = deque()
         await self.accept()
 
     async def disconnect(self, close_code):
@@ -41,13 +64,47 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 await self._broadcast_presence(participant.room)
             await self.channel_layer.group_discard(self.group, self.channel_name)
 
+    async def receive(self, text_data=None, bytes_data=None, **kwargs):
+        """Frame-level guards, before any JSON decoding or database access."""
+        if not self._within_rate():
+            await self._error("rate.limited", "Too many messages", None, None)
+            return await self.close(code=CLOSE_RATE_LIMITED)
+        size = len(text_data.encode("utf-8")) if text_data is not None else len(bytes_data or b"")
+        if size > WS_MAX_MESSAGE_BYTES:
+            await self._error("payload.too_large", "Message too large", None, None)
+            return await self.close(code=CLOSE_TOO_LARGE)
+        # Decoded here rather than by the parent class: a binary frame or broken
+        # JSON raised out of the consumer, closing the socket (audit M1).
+        try:
+            content = json.loads(text_data) if text_data is not None else None
+        except ValueError:
+            content = None
+        if not isinstance(content, dict):
+            return await self._error("payload.invalid", "Expected a JSON object", None, None)
+        await self.receive_json(content, **kwargs)
+
+    def _within_rate(self):
+        limit, window = WS_RATE_LIMIT
+        now = time.monotonic()
+        recent = self._recent
+        while recent and now - recent[0] > window:
+            recent.popleft()
+        if len(recent) >= limit:
+            return False
+        recent.append(now)
+        return True
+
     async def receive_json(self, content, **kwargs):
         if content.get("v") != PROTOCOL_VERSION:
             return await self._error("protocol.version", "Unsupported protocol version",
                                      content.get("type"), content.get("cid"))
         mtype = content.get("type")
-        payload = content.get("payload") or {}
+        payload = content.get("payload")
         cid = content.get("cid")
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict) or not isinstance(mtype, str):
+            return await self._error("payload.invalid", "Expected a payload object", mtype, cid)
 
         if mtype == "session.join":
             return await self._handle_join(payload, cid)
@@ -60,13 +117,18 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self._dispatch(mtype, payload, cid)
         except RoomError as exc:
             await self._error(exc.code, exc.message, exc.rejected_type or mtype, cid)
+        except Exception:
+            # Anything unexpected is logged once and answered with a generic
+            # frame; the socket (and the room for everyone else) stays up.
+            logger.exception("ws_intention_failed", extra={"room_code": self.code, "type": mtype})
+            await self._error("server.error", "Unexpected server error", mtype, cid)
 
     # --- intentions -------------------------------------------------------
 
     async def _dispatch(self, mtype, payload, cid):
         participant = await self._resolve()
         if participant is None:
-            return await self._error("token.unknown", "Unknown participant", mtype, cid)
+            return await self._evict(mtype, cid)
         room = participant.room
 
         # --- items du round (design 2026-09-11 §5) -----------------------
@@ -311,6 +373,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             return await self._error("token.unknown", "Unknown or expired token", "session.join", cid)
         self.token = token
         self.public_id = str(participant.public_id)
+        self.team_room = participant.room.team_id is not None
         await database_sync_to_async(services.set_connected)(participant, True)
         await self.channel_layer.group_add(self.group, self.channel_name)
         self.joined = True
@@ -337,7 +400,19 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
     # --- helpers ----------------------------------------------------------
 
     async def _resolve(self, token=None):
-        return await database_sync_to_async(services.resolve_participant)(self.code, token or self.token)
+        participant = await database_sync_to_async(services.resolve_participant)(self.code, token or self.token)
+        if participant is not None:
+            self._checked_at = time.monotonic()
+        return participant
+
+    async def _evict(self, rejected_type=None, cid=None):
+        """The seat no longer resolves (room expired, member left the team, account
+        deactivated): stop relaying the room to this socket. The socket stays open
+        so the client reads the error instead of reconnecting in a loop."""
+        if self.joined:
+            self.joined = False
+            await self.channel_layer.group_discard(self.group, self.channel_name)
+        await self._error("token.unknown", "Unknown participant", rejected_type, cid)
 
     async def _broadcast_participation(self, room):
         data = await database_sync_to_async(services.participation)(room)
@@ -431,6 +506,17 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         }, cid)
 
     async def facilitation_event(self, event):
+        # Team rooms re-check the seat (membership, active account) at most every
+        # MEMBERSHIP_RECHECK_SECONDS: a member removed from the team stops receiving
+        # the room even if their socket stays silent (audit 2026-10-18, I1). The
+        # throttle keeps the per-delivery query count of the comment below.
+        # An evicted socket may still have room events queued: drop them. (getattr:
+        # the audience-filter unit tests build a consumer without connect().)
+        if not getattr(self, "joined", True):
+            return
+        if getattr(self, "team_room", False) and time.monotonic() - self._checked_at >= MEMBERSHIP_RECHECK_SECONDS:
+            if await self._resolve() is None:
+                return await self._evict()
         # Filtrage a l'emission, PAS a la livraison (round de correction 2) :
         # `event["audienceId"]` est l'identifiant public du facilitateur tel
         # que RESOLU AU MOMENT DE L'EMISSION (`_broadcast`, une seule requete

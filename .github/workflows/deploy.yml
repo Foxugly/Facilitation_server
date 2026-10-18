@@ -152,6 +152,7 @@ jobs:
             "# to start stops the deploy (set -eu) with the previous vhost still in place.",
             "systemctl restart facilitation-gunicorn",
             "ok=0; for i in 1 2 3 4 5 6 7 8 9 10; do if curl -fsS -o /dev/null -H 'Host: facilitation-api.foxugly.com' -H 'X-Forwarded-Proto: https' http://127.0.0.1:8011/health/; then ok=1; break; fi; sleep 2; done; [ $ok = 1 ]",
+            "git -C $APP show origin/main:deploy/nginx/facilitation-limits.conf > /etc/nginx/conf.d/facilitation-limits.conf",
             "git -C $APP show origin/main:deploy/nginx/facilitation-api.conf > /etc/nginx/sites-available/facilitation-api.conf",
             "ln -sf ../sites-available/facilitation-api.conf /etc/nginx/sites-enabled/facilitation-api.conf",
             "nginx -t && systemctl reload nginx"

@@ -649,7 +649,15 @@ Weighted Ranking, QCM/Poll, ROTI.
   `result_layout` : une room vivante ne change pas de forme sous les joueurs. À distinguer de
   `TEAM_MAX_MEMBERS` (20).
 - Les rooms anonymes gratuites expirent après `ROOM_INACTIVITY_HOURS` (8h) via la tâche beat
-  `rooms.tasks.expire_stale_rooms` ; **les rooms d'équipe n'expirent jamais** (`Room.is_live`).
+  `rooms.tasks.expire_stale_rooms` ; les rooms d'équipe échappent à cette fenêtre mais ferment
+  après `TEAM_ROOM_INACTIVITY_DAYS` (30 j) sans activité (`Room.is_live`, audit du 2026-10-18).
+  Une salle d'équipe ne se rejoint en WS que par un membre actif de l'équipe, revérifié à chaque
+  intention et, au plus toutes les 15 s, sur les diffusions relayées.
+- **Rétention RGPD** (`rooms.tasks.purge_retention`, beat quotidien 03:40) : salles anonymes
+  supprimées 30 j après leur dernière activité (`RETENTION_ROOM_DAYS`), liens magiques et
+  refresh expirés, invitations expirées depuis 30 j. Les salles d'équipe restent (historique).
+  Suppression de compte : `POST /api/v1/auth/account/delete/` `{current_password}`, même
+  contrat que trainingmanager (204 / 400 `current_password_invalid` / 409 `owns_teams`).
 - Les origines WS sont validées contre `CORS_ALLOWED_ORIGINS` **plus** `ALLOWED_HOSTS`
   (`config/asgi.py::_ws_allowed_origins`) : l'hôte du SPA diffère de celui de l'API, valider
   sur `ALLOWED_HOSTS` seul rejetterait tous les clients réels.

@@ -9,6 +9,7 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 
 from .mail import send_email
+from .tokens import revoke_sessions
 
 logger = logging.getLogger("facilitation")
 User = get_user_model()
@@ -55,5 +56,8 @@ def confirm_password_reset(uidb64: str, token: str, new_password: str) -> bool:
     if not user.email_confirmed:
         user.email_confirmed = True
     user.save()
+    # Whoever held a refresh token or a sign-in link before the reset loses it
+    # (audit 2026-10-18, I4): the reset is how a compromised account is recovered.
+    revoke_sessions(user)
     logger.info("password_reset_done", extra={"user_id": user.pk})
     return True
