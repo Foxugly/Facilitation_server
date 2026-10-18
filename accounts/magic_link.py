@@ -44,9 +44,17 @@ def request_magic_link(email: str) -> None:
 
 
 def verify_magic_link(token: str):
-    """Consume the token and return the user, or None if invalid/expired/used."""
-    link_token = MagicLinkToken.objects.select_related("user").filter(token=token or "").first()
-    if link_token is None or not link_token.is_valid:
+    """Consume the token and return the user, or None if invalid/expired/used.
+
+    Consumption is one conditional UPDATE: two concurrent verifications of the
+    same link cannot both succeed (a read-then-save could).
+    """
+    if not token:
         return None
-    link_token.consume()
-    return link_token.user
+    now = timezone.now()
+    consumed = MagicLinkToken.objects.filter(
+        token=token, used_at__isnull=True, expires_at__gt=now, user__is_active=True
+    ).update(used_at=now)
+    if consumed != 1:
+        return None
+    return MagicLinkToken.objects.select_related("user").get(token=token).user

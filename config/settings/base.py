@@ -227,7 +227,9 @@ REST_FRAMEWORK = {
 # token and blacklists the old — clients MUST persist the rotated token. ---
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=env.int("JWT_ACCESS_MINUTES", default=15)),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=env.int("JWT_REFRESH_DAYS", default=90)),
+    # 30 days, down from 90 (audit 2026-10-18, I4): bounds what a leaked refresh
+    # token is worth when nobody resets the password.
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=env.int("JWT_REFRESH_DAYS", default=30)),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
     "UPDATE_LAST_LOGIN": True,

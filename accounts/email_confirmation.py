@@ -1,14 +1,14 @@
-"""Email-confirmation flow (send link + confirm). Stateless tokens via Django's
-default_token_generator — no extra model. Anti-leak resend."""
+"""Email-confirmation flow (send link + confirm). Stateless tokens from a generator
+dedicated to confirmation (accounts.tokens) — no extra model. Anti-leak resend."""
 import logging
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.contrib.auth.tokens import default_token_generator
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 
 from .mail import send_email
+from .tokens import email_confirmation_token_generator
 
 logger = logging.getLogger("facilitation")
 User = get_user_model()
@@ -21,7 +21,7 @@ def _confirm_link(uidb64: str, token: str) -> str:
 
 def send_confirmation_email(user) -> None:
     uidb64 = urlsafe_base64_encode(force_bytes(user.pk))
-    token = default_token_generator.make_token(user)
+    token = email_confirmation_token_generator.make_token(user)
     link = _confirm_link(uidb64, token)
     send_email(
         to=user.email,
@@ -60,15 +60,22 @@ def resend_confirmation_email(email: str) -> None:
 
 
 def confirm_email(uidb64: str, token: str):
+    """Confirm the address and return the user, or None.
+
+    Single use: the token hashes ``email_confirmed``, so it stops validating as
+    soon as the account is confirmed. An already-confirmed account therefore never
+    gets a JWT pair from a confirmation link (the caller issues one on success).
+    """
     try:
         uid = force_str(urlsafe_base64_decode(uidb64))
         user = User.objects.get(pk=uid)
     except (TypeError, ValueError, OverflowError, User.DoesNotExist):
         return None
-    if not user.is_active or not default_token_generator.check_token(user, token):
+    if not user.is_active or user.email_confirmed:
         return None
-    if not user.email_confirmed:
-        user.email_confirmed = True
-        user.save(update_fields=["email_confirmed"])
-        logger.info("email_confirmed", extra={"user_id": user.pk})
+    if not email_confirmation_token_generator.check_token(user, token):
+        return None
+    user.email_confirmed = True
+    user.save(update_fields=["email_confirmed"])
+    logger.info("email_confirmed", extra={"user_id": user.pk})
     return user
