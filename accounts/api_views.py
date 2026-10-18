@@ -4,6 +4,8 @@ from rest_framework import permissions, status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
 
@@ -15,9 +17,11 @@ from .email_confirmation import (
     send_confirmation_email,
     send_duplicate_registration_email,
 )
+from . import refresh_cookie
 from .magic_link import request_magic_link, verify_magic_link
 from .models import User
 from .password_reset import confirm_password_reset, request_password_reset
+from .refresh_cookie import cookie_origin_guard, deliver_tokens
 from .turnstile import get_remote_ip, turnstile_enabled, verify_turnstile_token
 from .erasure import erase_account
 from .export import build_export
@@ -89,6 +93,8 @@ class ConfirmEmailApiView(APIView):
     authentication_classes = []
 
     def post(self, request):
+        if (rejected := cookie_origin_guard(request)) is not None:
+            return rejected
         serializer = EmailConfirmSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = confirm_email(serializer.validated_data["uid"], serializer.validated_data["token"])
@@ -96,7 +102,7 @@ class ConfirmEmailApiView(APIView):
             return error_response(code="confirmation_link_invalid",
                                   detail="This confirmation link is invalid or has expired.",
                                   http_status=status.HTTP_400_BAD_REQUEST)
-        return Response(build_token_response_for_user(user), status=status.HTTP_200_OK)
+        return deliver_tokens(request, Response(build_token_response_for_user(user), status=status.HTTP_200_OK))
 
 
 class ResendConfirmationApiView(APIView):
@@ -156,6 +162,8 @@ class LoginApiView(APIView):
     throttle_classes = [LoginRateThrottle]
 
     def post(self, request):
+        if (rejected := cookie_origin_guard(request)) is not None:
+            return rejected
         serializer = LoginSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         user = serializer.validated_data["user"]
@@ -163,7 +171,10 @@ class LoginApiView(APIView):
             return error_response(code="email_not_verified",
                                   detail="Please confirm your email address before signing in.",
                                   http_status=status.HTTP_403_FORBIDDEN)
-        return Response(build_token_response_for_user(user), status=status.HTTP_200_OK)
+        persist = serializer.validated_data["remember_me"] or not refresh_cookie.wants_cookie(request)
+        return deliver_tokens(
+            request, Response(build_token_response_for_user(user, persist=persist), status=status.HTTP_200_OK)
+        )
 
 
 class MagicLinkRequestApiView(APIView):
@@ -188,6 +199,8 @@ class MagicLinkVerifyApiView(APIView):
     throttle_classes = [LoginRateThrottle]
 
     def post(self, request):
+        if (rejected := cookie_origin_guard(request)) is not None:
+            return rejected
         serializer = MagicLinkVerifySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = verify_magic_link(serializer.validated_data["token"])
@@ -195,17 +208,56 @@ class MagicLinkVerifyApiView(APIView):
             return error_response(code="magic_link_invalid",
                                   detail="This sign-in link is invalid, expired, or already used.",
                                   http_status=status.HTTP_400_BAD_REQUEST)
-        return Response(build_token_response_for_user(user), status=status.HTTP_200_OK)
+        return deliver_tokens(request, Response(build_token_response_for_user(user), status=status.HTTP_200_OK))
+
+
+class IsAuthenticatedOrCookieMode(permissions.BasePermission):
+    """Logout: a Bearer token, or the cookie-mode opt-in (origin checked in the view).
+
+    Lets the SPA sign out even when its in-memory access token is gone (expired,
+    tab reloaded): blacklisting the caller's own refresh cookie needs nothing else.
+    """
+
+    def has_permission(self, request, view):
+        if refresh_cookie.wants_cookie(request):
+            return True
+        return bool(request.user and request.user.is_authenticated)
 
 
 class LogoutApiView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    """Blacklist the refresh token.
+
+    Body mode (Bearer required): ``{refresh}``, 400 when missing or invalid.
+    Cookie mode (``X-Auth-Mode: cookie``, no Bearer needed): blacklists the body
+    token or else the HttpOnly cookie, always clears the cookie, 204 (idempotent).
+    """
+
+    permission_classes = [IsAuthenticatedOrCookieMode]
 
     def post(self, request):
+        if (rejected := cookie_origin_guard(request)) is not None:
+            return rejected
         serializer = LogoutSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        refresh_token = serializer.validated_data.get("refresh", "")
+
+        if refresh_cookie.wants_cookie(request):
+            # Idempotent: whatever the token's state, the browser ends up signed out.
+            refresh_token = refresh_token or refresh_cookie.read_refresh_cookie(request)
+            if refresh_token:
+                try:
+                    RefreshToken(refresh_token).blacklist()
+                except TokenError:
+                    pass
+            response = Response(status=status.HTTP_204_NO_CONTENT)
+            refresh_cookie.clear_refresh_cookie(response)
+            return response
+
+        if not refresh_token:
+            return error_response(code="refresh_token_required", detail="The refresh token is required.",
+                                  http_status=status.HTTP_400_BAD_REQUEST)
         try:
-            RefreshToken(serializer.validated_data["refresh"]).blacklist()
+            RefreshToken(refresh_token).blacklist()
         except Exception:
             return error_response(code="refresh_token_invalid", detail="Invalid refresh token.",
                                   http_status=status.HTTP_400_BAD_REQUEST)
@@ -281,7 +333,10 @@ class AccountDeleteApiView(APIView):
                                   detail="Transfer or delete the teams you own before deleting your account.",
                                   http_status=status.HTTP_409_CONFLICT)
         erase_account(user)
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        response = Response(status=status.HTTP_204_NO_CONTENT)
+        if refresh_cookie.wants_cookie(request):
+            refresh_cookie.clear_refresh_cookie(response)
+        return response
 
 
 class AccountExportApiView(APIView):
@@ -305,4 +360,28 @@ class AccountExportApiView(APIView):
 
 class CustomTokenRefreshView(TokenRefreshView):
     """simplejwt refresh — with ROTATE_REFRESH_TOKENS it also returns a rotated
-    refresh token; clients MUST persist it (fleet JWT-rotation memo)."""
+    refresh token; clients MUST persist it (fleet JWT-rotation memo).
+
+    Cookie mode (``X-Auth-Mode: cookie``): the body ``refresh`` is optional; when
+    absent the HttpOnly cookie is used (401 ``refresh_cookie_missing`` if none);
+    the rotated token is set in the cookie and omitted from the body. A body
+    token sent in cookie mode is the one-time migration path for SPAs that
+    still hold one in storage."""
+
+    def post(self, request, *args, **kwargs):
+        if not refresh_cookie.wants_cookie(request):
+            return super().post(request, *args, **kwargs)
+
+        if (rejected := cookie_origin_guard(request)) is not None:
+            return rejected
+        body_token = request.data.get("refresh") if hasattr(request.data, "get") else None
+        token = body_token or refresh_cookie.read_refresh_cookie(request)
+        if not token:
+            return error_response(code="refresh_cookie_missing", detail="No refresh cookie: sign in again.",
+                                  http_status=status.HTTP_401_UNAUTHORIZED)
+        serializer = TokenRefreshSerializer(data={"refresh": token})
+        try:
+            serializer.is_valid(raise_exception=True)
+        except TokenError as exc:
+            raise InvalidToken(exc.args[0]) from exc
+        return deliver_tokens(request, Response(serializer.validated_data, status=status.HTTP_200_OK))
