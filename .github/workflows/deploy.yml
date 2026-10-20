@@ -115,6 +115,10 @@ jobs:
       # installs every root-loaded artifact (units, nginx vhost, the env-fetch
       # oneshot) from the COMMITTED GIT BLOB — never by cp-ing the django tree
       # (§3.10 / §3.11 privileged-install model) — then runs deploy.sh as django.
+      # Root reads those blobs from ITS OWN bare mirror (/var/lib/fleet-deploy,
+      # root:root 700), fetched from GitHub at the exact pushed SHA — never from
+      # the django-owned checkout, whose .git (refs, config, hooks) django could
+      # rewrite to make root install or run attacker content.
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -132,11 +136,17 @@ jobs:
             "set -eu",
             "export HOME=/root",
             "APP=/var/www/django_websites/Facilitation_server",
-            "git config --global --get-all safe.directory 2>/dev/null | grep -qx $APP || git config --global --add safe.directory $APP",
+            "SHA=${{ github.sha }}",
+            "M=/var/lib/fleet-deploy/Facilitation_server.git",
+            "git config --global --fixed-value --unset-all safe.directory $APP || true",
+            "install -d -m 700 -o root -g root /var/lib/fleet-deploy",
+            "[ -d $M ] || git init --quiet --bare $M",
+            "git --git-dir=$M fetch --quiet --depth=1 https://github.com/Foxugly/Facilitation_server.git $SHA",
+            "git --git-dir=$M cat-file -e $SHA^{commit}",
             "sudo -u django bash -c 'umask 027; cd '$APP' && git fetch --quiet origin main && git reset --hard --quiet origin/main'",
-            "git -C $APP show origin/main:deploy/fetch-env-from-ssm.sh > /usr/local/sbin/facilitation-env-fetch.sh",
+            "git --git-dir=$M show $SHA:deploy/fetch-env-from-ssm.sh > /usr/local/sbin/facilitation-env-fetch.sh",
             "chown root:root /usr/local/sbin/facilitation-env-fetch.sh && chmod 0755 /usr/local/sbin/facilitation-env-fetch.sh",
-            "for u in facilitation-env-fetch facilitation-asgi facilitation-gunicorn facilitation-celery facilitation-celery-beat; do git -C $APP show origin/main:deploy/systemd/$u.service > /etc/systemd/system/$u.service; done",
+            "for u in facilitation-env-fetch facilitation-asgi facilitation-gunicorn facilitation-celery facilitation-celery-beat; do git --git-dir=$M show $SHA:deploy/systemd/$u.service > /etc/systemd/system/$u.service; done",
             "systemctl daemon-reload",
             "# facilitation-celery{,-beat} sont VOLONTAIREMENT absents du enable ci-dessous :",
             "# la box n'a pas la RAM pour les porter (voir CLAUDE.md, incident du 2026-09-10).",
@@ -152,8 +162,8 @@ jobs:
             "# to start stops the deploy (set -eu) with the previous vhost still in place.",
             "systemctl restart facilitation-gunicorn",
             "ok=0; for i in 1 2 3 4 5 6 7 8 9 10; do if curl -fsS -o /dev/null -H 'Host: facilitation-api.foxugly.com' -H 'X-Forwarded-Proto: https' http://127.0.0.1:8011/health/; then ok=1; break; fi; sleep 2; done; [ $ok = 1 ]",
-            "git -C $APP show origin/main:deploy/nginx/facilitation-limits.conf > /etc/nginx/conf.d/facilitation-limits.conf",
-            "git -C $APP show origin/main:deploy/nginx/facilitation-api.conf > /etc/nginx/sites-available/facilitation-api.conf",
+            "git --git-dir=$M show $SHA:deploy/nginx/facilitation-limits.conf > /etc/nginx/conf.d/facilitation-limits.conf",
+            "git --git-dir=$M show $SHA:deploy/nginx/facilitation-api.conf > /etc/nginx/sites-available/facilitation-api.conf",
             "ln -sf ../sites-available/facilitation-api.conf /etc/nginx/sites-enabled/facilitation-api.conf",
             "nginx -t && systemctl reload nginx"
           ], "executionTimeout": ["900"] }
