@@ -6,10 +6,22 @@ from .models import Invitation, Team, TeamMembership, TeamRole
 
 
 class MemberUserSerializer(serializers.Serializer):
+    """A teammate as seen by another member. The e-mail is personal data: only the
+    team's managers (owner + manager, who invite and administer members) and the
+    user themself receive it; plain members get ``null`` and see the display name."""
+
     id = serializers.IntegerField()
-    email = serializers.EmailField()
+    email = serializers.SerializerMethodField()
     display_name = serializers.CharField()
     avatar_url = serializers.SerializerMethodField()
+
+    def get_email(self, user) -> str | None:
+        if self.context.get("show_emails"):
+            return user.email
+        viewer = self.context.get("viewer")
+        if viewer is not None and viewer.pk == user.pk:
+            return user.email
+        return None
 
     def get_avatar_url(self, user) -> str:
         from config.media import absolute_media_url
@@ -20,7 +32,6 @@ class MemberUserSerializer(serializers.Serializer):
 class TeamSerializer(serializers.ModelSerializer):
     my_role = serializers.SerializerMethodField()
     member_count = serializers.SerializerMethodField()
-    owner_email = serializers.EmailField(source="owner.email", read_only=True)
     deck_ids = serializers.SerializerMethodField()
     is_paid = serializers.SerializerMethodField()
     billing_enabled = serializers.SerializerMethodField()
@@ -28,7 +39,7 @@ class TeamSerializer(serializers.ModelSerializer):
     class Meta:
         model = Team
         fields = [
-            "id", "name", "owner_email", "created_at", "my_role", "member_count",
+            "id", "name", "created_at", "my_role", "member_count",
             "card_back_style", "card_back_color", "card_back_id",
             "felt_style", "felt_color", "felt_id",
             "background_style", "background_color", "background_id",
