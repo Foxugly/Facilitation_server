@@ -21,7 +21,7 @@ def emplacements_nginx():
     texte = lire("deploy/nginx/facilitation-api.conf")
     return {
         m.group(1): int(m.group(2))
-        for m in re.finditer(r"location\s+(\S+)\s*\{[^}]*?proxy_pass http://127\.0\.0\.1:(\d+);", texte, re.S)
+        for m in re.finditer(r"location\s+(\S+)\s*\{[^}]*?proxy_pass http://127\.0\.0\.1:(\d+);", texte, re.DOTALL)
     }
 
 
@@ -80,7 +80,7 @@ DIRECTIVES_DE_DURCISSEMENT = (
 
 def test_les_quatre_services_sont_durcis():
     for unite in ("asgi", "gunicorn", "celery", "celery-beat"):
-        texte = lire("deploy/systemd/facilitation-%s.service" % unite)
+        texte = lire(f"deploy/systemd/facilitation-{unite}.service")
         for directive in DIRECTIVES_DE_DURCISSEMENT:
             assert directive in texte, (unite, directive)
         # ProtectSystem=strict rendrait /var/www en lecture seule : pièces et beat cassés.
@@ -98,7 +98,7 @@ def test_les_connexions_persistantes_ne_vont_qu_a_gunicorn():
     """En ASGI (daphne), une connexion persistante peut passer d'un thread à l'autre."""
     assert 'Environment="DB_CONN_MAX_AGE=60"' in lire("deploy/systemd/facilitation-gunicorn.service")
     for unite in ("asgi", "celery", "celery-beat"):
-        assert "DB_CONN_MAX_AGE" not in lire("deploy/systemd/facilitation-%s.service" % unite)
+        assert "DB_CONN_MAX_AGE" not in lire(f"deploy/systemd/facilitation-{unite}.service")
 
 
 def test_sans_variable_une_connexion_par_requete():

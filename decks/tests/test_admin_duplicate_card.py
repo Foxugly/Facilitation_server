@@ -3,7 +3,6 @@ import pytest
 
 from decks.admin import duplicate_card
 from decks.seed import create_standard_deck
-from decks.models import Card, TextLayer
 
 
 @pytest.mark.django_db

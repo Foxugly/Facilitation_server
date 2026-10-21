@@ -11,7 +11,8 @@ the first activity, not the product. Part of the Foxugly fleet — conventions i
 ## Stack
 
 Django 6 · DRF · Channels + Redis · django-parler (i18n in DB) · Celery · PostgreSQL (prod) ·
-simplejwt (Phase 2 auth). Python 3.14, port `127.0.0.1:8009`.
+simplejwt (Phase 2 auth). Python 3.14, ports `127.0.0.1:8009` (daphne, `/ws/`) and
+`127.0.0.1:8011` (gunicorn, HTTP API).
 
 ## Apps
 

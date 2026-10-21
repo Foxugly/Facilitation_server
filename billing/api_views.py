@@ -9,7 +9,6 @@ en production.
 """
 import logging
 
-from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import permissions, status
 from rest_framework.response import Response
@@ -63,7 +62,6 @@ class CheckoutView(APIView):
         if not billing_configured():
             return _unconfigured()
 
-        base = request.build_absolute_uri("/")  # non utilisé : le SPA a sa propre URL
         from django.conf import settings
 
         front = settings.FRONTEND_BASE_URL.rstrip("/")

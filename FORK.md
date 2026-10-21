@@ -10,7 +10,7 @@ aucune logique métier n'a été touchée. `pytest` : 240 passed.
 |---|---|
 | `poker.foxugly.com` | `facilitation.foxugly.com` |
 | `poker-api.foxugly.com` | `facilitation-api.foxugly.com` |
-| port `8006` | port `8007` |
+| port `8006` | port `8009` (daphne, `/ws/`) + `8011` (gunicorn, HTTP, depuis le 2026-10-09) |
 | `Celery("poker")` | `Celery("facilitation")` |
 | `getLogger("poker")` | `getLogger("facilitation")` |
 | `poker.event` / `poker_event` (routage Channels) | `facilitation.event` / `facilitation_event` |
@@ -40,7 +40,8 @@ et la spec de modèle de données restent la référence à étendre.
 4. DNS + certificat pour `facilitation.foxugly.com` et `facilitation-api.foxugly.com`.
 5. Base de données dédiée. Les migrations sont celles de Poker : la base part vide,
    il n'y a aucune donnée à reprendre.
-6. Vérifier qu'aucun autre service de la flotte n'occupe le port 8007.
+6. Vérifier qu'aucun autre service de la flotte n'occupe les ports 8009 et 8011
+   (8007 est celui de billing).
 
 ## Premier commit — fait
 

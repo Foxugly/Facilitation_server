@@ -13,9 +13,8 @@ from realtime import services
 from realtime.services import RoomError
 from realtime.tests.helpers import cast_first_item
 from rooms.codes import generate_token, generate_unique_code
-from rooms.models import Item, Participant, Role, Room, RoundState, Round
+from rooms.models import Item, Participant, Role, Room, Round, RoundState
 from rooms.snapshot import build_deck_snapshot
-from teams.models import Team, TeamMembership, TeamRole
 
 User = get_user_model()
 

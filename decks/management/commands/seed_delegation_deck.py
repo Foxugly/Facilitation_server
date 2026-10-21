@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 
-from decks.models import Deck, VoteType
+from decks.models import Deck
 from decks.seed import create_standard_deck
 
 

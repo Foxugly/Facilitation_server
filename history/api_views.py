@@ -79,7 +79,7 @@ def _entries_for(team, day):
         # fonction pour que le registre n'ait pas a connaitre la forme d'un
         # snapshot de deck.
         spec = spec_for((snapshot or {}).get("resolutionStrategy", ""))
-        entry = spec.history_entry(r, lambda value: _level_name(snapshot, value))
+        entry = spec.history_entry(r, lambda value, snapshot=snapshot: _level_name(snapshot, value))
         # Les cles de l'historique ecrasent celles de l'activite, jamais
         # l'inverse -- meme regle defensive que le bloc de depouillement.
         out.append(

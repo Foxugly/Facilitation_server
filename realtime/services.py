@@ -13,19 +13,17 @@ from django.db.models import Max
 from django.utils import timezone
 
 from realtime.activities import RoomError, spec_for, validate_config, validate_payload
-
 from rooms.models import (
     Item,
     Participant,
+    Response,
     Result,
     Role,
     Room,
-    RoundState,
-    Response,
     Round,
+    RoundState,
 )
 from teams.models import TeamMembership
-
 
 TIMER_MIN_SECONDS = 10
 TIMER_MAX_SECONDS = 60
@@ -1761,14 +1759,20 @@ def can_claim(room):
     return (timezone.now() - fac.last_seen_at).total_seconds() >= settings.FACILITATOR_GUARD_SECONDS
 
 
+@transaction.atomic
 def promote_facilitator(room, participant):
     """First claimer becomes facilitator. Authority is by rnd.facilitator, so the
     old facilitator returning is a plain voter (definitive transfer, §6.f) — no token
-    reissue needed since control is keyed on participant identity, not a secret."""
+    reissue needed since control is keyed on participant identity, not a secret.
+
+    Les autres facilitateurs de la room sont retrogrades dans la meme transaction
+    (audit 2026-10-18, M6) : sans round courant, `_is_facilitator` retombe sur le
+    role, et l'ancien facilitateur gardait donc l'autorite a cote du nouveau."""
     rnd = current_round(room)
     if rnd:
         rnd.facilitator = participant
         rnd.save(update_fields=["facilitator"])
+    room.participants.filter(role=Role.FACILITATOR).exclude(pk=participant.pk).update(role=Role.VOTER)
     participant.role = Role.FACILITATOR
     participant.save(update_fields=["role"])
 

@@ -6,25 +6,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from rest_framework_simplejwt.settings import api_settings as jwt_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from config.api_errors import error_response
 
-from .email_confirmation import (
-    confirm_email,
-    resend_confirmation_email,
-    send_confirmation_email,
-    send_duplicate_registration_email,
-)
 from . import refresh_cookie
-from .magic_link import request_magic_link, verify_magic_link
-from .models import User
-from .password_reset import confirm_password_reset, request_password_reset
-from .refresh_cookie import cookie_origin_guard, deliver_tokens
-from .turnstile import get_remote_ip, turnstile_enabled, verify_turnstile_token
-from .erasure import erase_account
-from .export import build_export
 from .api_serializers import (
     AccountDeleteSerializer,
     EmailConfirmSerializer,
@@ -40,6 +28,18 @@ from .api_serializers import (
     UserMeSerializer,
     build_token_response_for_user,
 )
+from .email_confirmation import (
+    confirm_email,
+    resend_confirmation_email,
+    send_confirmation_email,
+    send_duplicate_registration_email,
+)
+from .erasure import erase_account
+from .export import build_export
+from .magic_link import request_magic_link, verify_magic_link
+from .models import User
+from .password_reset import confirm_password_reset, request_password_reset
+from .refresh_cookie import cookie_origin_guard, deliver_tokens
 from .throttles import (
     AccountDeleteRateThrottle,
     AccountExportRateThrottle,
@@ -51,6 +51,7 @@ from .throttles import (
     UploadRateThrottle,
     with_default_throttles,
 )
+from .turnstile import get_remote_ip, turnstile_enabled, verify_turnstile_token
 
 
 def _turnstile_ok(serializer, request) -> bool:
@@ -224,12 +225,31 @@ class IsAuthenticatedOrCookieMode(permissions.BasePermission):
         return bool(request.user and request.user.is_authenticated)
 
 
+def _blacklist_owned_refresh(request, raw_token):
+    """Blacklist ``raw_token`` if the caller may revoke it; return False otherwise.
+
+    An authenticated caller may only revoke ITS OWN refresh token (audit
+    2026-10-18, M8): a Bearer for account A must not log account B out. Without
+    a Bearer (cookie mode), possession of the token is the only proof there is.
+    Raises ``TokenError`` on an invalid or expired token.
+    """
+    token = RefreshToken(raw_token)
+    user = request.user
+    if user and user.is_authenticated:
+        owner = token.get(jwt_settings.USER_ID_CLAIM)
+        if owner is None or str(owner) != str(getattr(user, jwt_settings.USER_ID_FIELD)):
+            return False
+    token.blacklist()
+    return True
+
+
 class LogoutApiView(APIView):
     """Blacklist the refresh token.
 
     Body mode (Bearer required): ``{refresh}``, 400 when missing or invalid.
     Cookie mode (``X-Auth-Mode: cookie``, no Bearer needed): blacklists the body
     token or else the HttpOnly cookie, always clears the cookie, 204 (idempotent).
+    With a Bearer, only a refresh token of that same user is blacklisted (M8).
     """
 
     permission_classes = [IsAuthenticatedOrCookieMode]
@@ -246,7 +266,7 @@ class LogoutApiView(APIView):
             refresh_token = refresh_token or refresh_cookie.read_refresh_cookie(request)
             if refresh_token:
                 try:
-                    RefreshToken(refresh_token).blacklist()
+                    _blacklist_owned_refresh(request, refresh_token)
                 except TokenError:
                     pass
             response = Response(status=status.HTTP_204_NO_CONTENT)
@@ -257,8 +277,12 @@ class LogoutApiView(APIView):
             return error_response(code="refresh_token_required", detail="The refresh token is required.",
                                   http_status=status.HTTP_400_BAD_REQUEST)
         try:
-            RefreshToken(refresh_token).blacklist()
+            owned = _blacklist_owned_refresh(request, refresh_token)
         except Exception:
+            owned = False
+        if not owned:
+            # Same answer for a foreign token as for an invalid one: the
+            # endpoint must not confirm that someone else's token is live.
             return error_response(code="refresh_token_invalid", detail="Invalid refresh token.",
                                   http_status=status.HTTP_400_BAD_REQUEST)
         return Response(status=status.HTTP_204_NO_CONTENT)

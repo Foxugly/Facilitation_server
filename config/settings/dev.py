@@ -1,10 +1,10 @@
-from .base import *  # noqa: F401,F403
+from .base import *
 
 DEBUG = True
 
 # Card images in the frozen deck snapshot are absolute URLs; in dev they must
 # point at the local backend, not the prod host (prod default = FRONTEND_BASE_URL).
-PUBLIC_MEDIA_BASE_URL = env("PUBLIC_MEDIA_BASE_URL", default="http://127.0.0.1:8000")  # noqa: F405
+PUBLIC_MEDIA_BASE_URL = env("PUBLIC_MEDIA_BASE_URL", default="http://127.0.0.1:8000")
 
 # No Redis needed for local dev: run Channels on the in-memory layer.
 CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
@@ -24,10 +24,10 @@ CELERY_TASK_ALWAYS_EAGER = True
 #
 # Les cles sont TOUTES conservees : ScopedRateThrottle leve KeyError sur un scope
 # absent (meme raison que dans config/settings/test.py).
-if env.bool("E2E", default=False):  # noqa: F405
-    REST_FRAMEWORK = {  # noqa: F405
-        **REST_FRAMEWORK,  # noqa: F405
-        "DEFAULT_THROTTLE_RATES": {k: "100000/min" for k in REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]},  # noqa: F405
+if env.bool("E2E", default=False):
+    REST_FRAMEWORK = {
+        **REST_FRAMEWORK,
+        "DEFAULT_THROTTLE_RATES": {k: "100000/min" for k in REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]},
     }
 
 # --- sqlite et la concurrence ASGI -------------------------------------------
@@ -40,5 +40,5 @@ if env.bool("E2E", default=False):  # noqa: F405
 # `timeout` fait attendre le verrou au lieu d'abandonner tout de suite. Ce n'est
 # pas un reglage de production : la prod est en PostgreSQL, qui n'a pas ce verrou
 # global. D'ou son placement ici et non dans base.py.
-if DATABASES["default"]["ENGINE"].endswith("sqlite3"):  # noqa: F405
-    DATABASES["default"].setdefault("OPTIONS", {})["timeout"] = 20  # noqa: F405
+if DATABASES["default"]["ENGINE"].endswith("sqlite3"):
+    DATABASES["default"].setdefault("OPTIONS", {})["timeout"] = 20

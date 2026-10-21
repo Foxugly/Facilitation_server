@@ -30,7 +30,16 @@ from realtime import services
 from realtime.activities import spec_for
 from realtime.services import RoomError
 from rooms.codes import generate_token, generate_unique_code
-from rooms.models import Item, Participant, Response, Result, Role, Room, Round, RoundState
+from rooms.models import (
+    Item,
+    Participant,
+    Response,
+    Result,
+    Role,
+    Room,
+    Round,
+    RoundState,
+)
 from rooms.snapshot import build_deck_snapshot
 from teams.models import Team, TeamMembership, TeamRole
 
@@ -230,7 +239,7 @@ def test_history_still_reads_a_poker_result_unchanged():
 
     client = APIClient()
     client.force_authenticate(user)
-    day = datetime.date.today().isoformat()
+    day = timezone.localdate().isoformat()
     detail = client.get(f"/api/v1/history/{team.id}/{day}/").json()
     entry = detail["entries"][0]
     assert entry["subject"] == "Budget?"
@@ -441,7 +450,7 @@ def _team_and_user(email="corr@example.com"):
 def _history(user, team, day=None):
     client = APIClient()
     client.force_authenticate(user)
-    day = day or datetime.date.today().isoformat()
+    day = day or timezone.localdate().isoformat()
     days = client.get(f"/api/v1/history/{team.id}/").json()["days"]
     detail = client.get(f"/api/v1/history/{team.id}/{day}/").json()
     return days, detail["entries"]
@@ -503,7 +512,7 @@ def test_history_renders_an_acted_dot_voting_result_as_points():
 
     days, entries = _history(user, team)
     assert days[0]["count"] == 2
-    top = [e for e in entries if e["rank"] == 1][0]
+    top = next(e for e in entries if e["rank"] == 1)
     assert top["subject"] == "Item 1"
     assert top["totalPoints"] == 2
     # JAMAIS un niveau de delegation : le deck n'a aucune carte, et rendre ce
@@ -601,6 +610,6 @@ def test_the_agenda_reads_the_first_items_result_not_an_arbitrary_one():
     rnd.state = RoundState.ACTED
     rnd.save(update_fields=["state"])
 
-    entry = [r for r in services.build_agenda(room) if r["id"] == rnd.id][0]
+    entry = next(r for r in services.build_agenda(room) if r["id"] == rnd.id)
     assert entry["result"] == "11"
     assert services.build_state_sync(voter)["result"] == "11"

@@ -11,7 +11,7 @@ from realtime import services
 from realtime.services import RoomError
 from realtime.tests.helpers import cast_first_item
 from rooms.codes import generate_token, generate_unique_code
-from rooms.models import Participant, Role, Round, RoundState, Room
+from rooms.models import Participant, Role, Room, Round, RoundState
 from rooms.snapshot import build_deck_snapshot
 
 

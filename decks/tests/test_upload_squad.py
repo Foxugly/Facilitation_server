@@ -7,7 +7,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from PIL import Image
 from rest_framework.test import APIClient
 
-from decks.models import CardBack, Felt
+from decks.models import CardBack
 from decks.selection import available_card_backs, available_felts, can_upload, squad_of
 from teams.models import Team, TeamMembership, TeamRole
 
@@ -147,7 +147,6 @@ def test_a_non_image_is_rejected(team, owner):
 
 @pytest.mark.django_db
 def test_an_oversized_image_is_rejected(team, owner, settings):
-    from decks import validators
 
     # A 20 MB payload is over the 3 MB cap regardless of pixels.
     big = SimpleUploadedFile("big.png", b"\x89PNG\r\n" + b"0" * (20 * 1024 * 1024), content_type="image/png")

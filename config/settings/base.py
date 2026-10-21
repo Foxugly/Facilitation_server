@@ -3,9 +3,8 @@ from datetime import timedelta
 from pathlib import Path
 
 import environ
-from corsheaders.defaults import default_headers
 from celery.schedules import crontab
-
+from corsheaders.defaults import default_headers
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 env = environ.Env(DEBUG=(bool, False))

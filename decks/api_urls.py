@@ -2,7 +2,6 @@ from django.urls import path
 
 from .api_views import BackgroundUploadView, CardBackUploadView, FeltUploadView
 
-
 urlpatterns = [
     path("card-backs/", CardBackUploadView.as_view(), name="card-back-upload"),
     path("card-backs/<int:pk>/", CardBackUploadView.as_view(), name="card-back-detail"),

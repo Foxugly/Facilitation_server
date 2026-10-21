@@ -16,9 +16,9 @@ from realtime import consumers
 from realtime.routing import websocket_urlpatterns
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Participant, Role, Room
+from rooms.snapshot import build_deck_snapshot
 from rooms.tasks import expire_stale_rooms
 from teams.models import Team, TeamMembership, TeamRole
-from rooms.snapshot import build_deck_snapshot
 
 User = get_user_model()
 

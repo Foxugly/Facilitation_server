@@ -70,3 +70,51 @@ def test_a_hand_over_demotes_the_giver_for_himself(db):
 
     assert services.build_state_sync(fac)["myRole"] == Role.VOTER
     assert services.build_state_sync(voter)["myRole"] == Role.FACILITATOR
+
+
+@pytest.mark.django_db
+def test_claim_without_round_demotes_the_previous_facilitator(db):
+    """Audit 2026-10-18, M6 : sans round courant, l'autorite retombe sur le role.
+    La prise de main doit donc retrograder l'ancien facilitateur, sinon deux
+    participants pilotent la room avant le premier round."""
+    room, fac, voter = _room()
+    room.current_round = None
+    room.save(update_fields=["current_round"])
+
+    services.promote_facilitator(room, voter)
+    fac.refresh_from_db()
+    voter.refresh_from_db()
+
+    assert fac.role == Role.VOTER
+    assert voter.role == Role.FACILITATOR
+    assert not services.is_facilitator(room, fac)
+    assert services.is_facilitator(room, voter)
+    assert room.participants.filter(role=Role.FACILITATOR).count() == 1
+
+
+@pytest.mark.django_db
+def test_claim_with_round_also_demotes_the_previous_facilitator(db):
+    room, fac, voter = _room()
+    services.promote_facilitator(room, voter)
+    fac.refresh_from_db()
+
+    assert fac.role == Role.VOTER
+    assert room.participants.filter(role=Role.FACILITATOR).get() == voter
+
+
+@pytest.mark.django_db
+def test_claim_is_atomic(db, monkeypatch):
+    """Si la promotion echoue, l'ancien facilitateur n'est pas retrograde."""
+    room, fac, voter = _room()
+    room.current_round = None
+    room.save(update_fields=["current_round"])
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(Participant, "save", boom)
+    with pytest.raises(RuntimeError):
+        services.promote_facilitator(room, voter)
+    fac.refresh_from_db()
+
+    assert fac.role == Role.FACILITATOR

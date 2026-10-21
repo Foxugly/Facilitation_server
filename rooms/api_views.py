@@ -16,13 +16,12 @@ from rest_framework.views import APIView
 
 from config.api_errors import error_response
 from decks.selection import (
-    DELEGATION_POKER_CODE,
     background_for_team,
     card_back_for_team,
     decks_for_team,
+    felt_for_team,
     free_decks,
     imposed_free_card_back,
-    felt_for_team,
 )
 from teams.models import Team
 from teams.permissions import is_member

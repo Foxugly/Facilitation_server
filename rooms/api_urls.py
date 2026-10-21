@@ -2,7 +2,6 @@ from django.urls import path
 
 from .api_views import CreateRoomView, JoinRoomView, RoomExistsView
 
-
 urlpatterns = [
     path("rooms", CreateRoomView.as_view(), name="create-room"),
     path("rooms/<str:code>", RoomExistsView.as_view(), name="room-exists"),
