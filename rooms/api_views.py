@@ -39,8 +39,15 @@ def _live_room_or_none(code):
     return room
 
 
-def _display_name_for(user) -> str:
-    return (user.display_name or user.email).strip()
+def _display_name_for(user, room=None) -> str:
+    """Name shown to everyone in the room. Never the e-mail (nor its local part):
+    teammates see names only. Without a profile name, fall back to a neutral
+    "Participant N", numbered by seat in the room."""
+    name = (user.display_name or "").strip()
+    if name:
+        return name
+    seat = (room.participants.count() if room is not None else 0) + 1
+    return f"Participant {seat}"
 
 
 class CreateRoomView(APIView):
@@ -140,7 +147,7 @@ class JoinRoomView(APIView):
                 if room.participants.count() >= room.max_participants:
                     return error_response(code="room_full", detail="This room is full.", http_status=403)
                 participant = Participant.objects.create(
-                    room=room, token=generate_token(), display_name=_display_name_for(request.user),
+                    room=room, token=generate_token(), display_name=_display_name_for(request.user, room),
                     role=Role.VOTER, user=request.user,
                 )
         else:
