@@ -8,7 +8,7 @@ qu'un mode manuel a le droit de cocher.
 """
 import pytest
 
-from realtime.activities import ACTIVITY_REGISTRY, ActivitySpec, DEFAULT_SPEC, spec_for
+from realtime.activities import ACTIVITY_REGISTRY, DEFAULT_SPEC, ActivitySpec, spec_for
 from realtime.services import (
     RoomError,
     bind_round,

@@ -6,7 +6,7 @@ items, et un item copie d'un round a l'autre ne doit pas se reecrire a la source
 import pytest
 
 from rooms.codes import generate_token, generate_unique_code
-from rooms.models import Item, Participant, Round, RoundState, Room
+from rooms.models import Item, Participant, Room, Round, RoundState
 from rooms.snapshot import build_deck_snapshot
 
 

@@ -9,15 +9,32 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.throttles import InviteRateThrottle, with_default_throttles
-from config.api_errors import error_response
-
 from billing.service import paid_required, team_is_paid, user_is_paid, user_quota
-from decks.selection import available_backgrounds, available_card_backs, available_decks, available_felts
-from decks.serializers import BackgroundSerializer, CardBackSerializer, DeckSerializer, FeltSerializer
+from config.api_errors import error_response
+from decks.selection import (
+    available_backgrounds,
+    available_card_backs,
+    available_decks,
+    available_felts,
+)
+from decks.serializers import (
+    BackgroundSerializer,
+    CardBackSerializer,
+    DeckSerializer,
+    FeltSerializer,
+)
 
 from .invitations import send_invitation_email
-from .models import BackgroundStyle, Invitation, ResultLayout, SurfaceStyle, Team, TeamMembership, TeamRole
-from .permissions import is_manager, is_member, is_owner, membership_of
+from .models import (
+    BackgroundStyle,
+    Invitation,
+    ResultLayout,
+    SurfaceStyle,
+    Team,
+    TeamMembership,
+    TeamRole,
+)
+from .permissions import is_manager, is_member, is_owner
 from .serializers import (
     AcceptInviteSerializer,
     InvitationSerializer,

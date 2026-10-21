@@ -1,4 +1,4 @@
-from .base import *  # noqa: F401,F403
+from .base import *
 
 DEBUG = False
 
@@ -18,7 +18,7 @@ PARLER_ENABLE_CACHING = False
 # persists across tests in one process, so repeated register/login calls would
 # spuriously 429. Keep every scope key (ScopedRateThrottle KeyErrors on a missing
 # one) but set an unreachable rate.
-REST_FRAMEWORK = {  # noqa: F405
-    **REST_FRAMEWORK,  # noqa: F405
-    "DEFAULT_THROTTLE_RATES": {k: "100000/min" for k in REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]},  # noqa: F405
+REST_FRAMEWORK = {
+    **REST_FRAMEWORK,
+    "DEFAULT_THROTTLE_RATES": {k: "100000/min" for k in REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]},
 }

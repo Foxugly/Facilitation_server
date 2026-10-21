@@ -14,7 +14,7 @@ def send_invitation_email(invitation) -> None:
     link = f"{base}/teams/join/{invitation.token}"
     send_email(
         to=invitation.email,
-        subject=f"You've been invited to a team on Delegation Poker",
+        subject="You've been invited to a team on Delegation Poker",
         body=(
             f"You've been invited to join the team \"{invitation.team.name}\" on "
             "Delegation Poker.\n\n"

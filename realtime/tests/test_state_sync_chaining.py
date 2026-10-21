@@ -14,8 +14,13 @@ navigateur.
 """
 import pytest
 
-from realtime.services import bind_round, chaining_candidates, resolve_source, select_round
 from realtime import services
+from realtime.services import (
+    bind_round,
+    chaining_candidates,
+    resolve_source,
+    select_round,
+)
 from rooms.codes import generate_token, generate_unique_code
 from rooms.models import Item, Participant, Role, Room, Round
 

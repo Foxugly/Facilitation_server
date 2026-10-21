@@ -1,0 +1,10 @@
+# Couverture du code de l'application, pas des tests (audit 2026-10-18, M10).
+# Le seuil vit dans la CI (`--cov-fail-under`, deploy.yml).
+[run]
+source = .
+omit =
+    */tests/*
+    */migrations/*
+    conftest.py
+    manage.py
+    .venv/*

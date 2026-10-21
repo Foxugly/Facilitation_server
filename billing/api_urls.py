@@ -8,7 +8,6 @@ from .api_views import (
     SubscriptionView,
 )
 
-
 urlpatterns = [
     path("subscription/", SubscriptionView.as_view(), name="billing-subscription"),
     path("history/", BillingHistoryView.as_view(), name="billing-history"),

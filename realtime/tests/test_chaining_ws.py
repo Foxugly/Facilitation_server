@@ -10,9 +10,9 @@ suivie d'un masquage cote client).
 import pytest
 from channels.db import database_sync_to_async
 
-from rooms.models import Item, Participant, Room, Round
 from realtime.tests.test_consumer import _drain_until, _join, _make_room
 from realtime.tests.test_scenario_ws import _collect_until_pong, _settle_join
+from rooms.models import Item, Participant, Room, Round
 
 
 def _two_rounds(code, fac_token, source_items=("Un", "Deux"), consumer_strategy=None):

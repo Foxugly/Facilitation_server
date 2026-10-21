@@ -25,7 +25,10 @@ def revoke_sessions(user) -> None:
     Called when the password changes hands (reset): a stolen refresh token or a
     sign-in link already in someone else's mailbox must not survive it.
     """
-    from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+    from rest_framework_simplejwt.token_blacklist.models import (
+        BlacklistedToken,
+        OutstandingToken,
+    )
 
     from .models import MagicLinkToken
 

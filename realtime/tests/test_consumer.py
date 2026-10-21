@@ -40,6 +40,7 @@ def _make_room(with_team=False):
     if with_team:
         # The timer is a team-only feature; timer tests need a team room.
         from django.contrib.auth import get_user_model
+
         from teams.models import Team, TeamMembership, TeamRole
 
         owner = get_user_model().objects.create_user(

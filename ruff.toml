@@ -1,0 +1,34 @@
+# Configuration ruff — introduite le 2026-10-21 (audit 2026-10-18, M10).
+#
+# Même version que la flotte (ruff 0.16.10, job `lint` de la CI) et mêmes
+# exclusions que QuizOnline (ruff.toml, 2026-07-30), pour la même raison : ces
+# règles combattent l'API déclarative de Django/DRF ou relèvent du pur style,
+# sans bug évité. Le reste est corrigé dans le code.
+
+extend-exclude = ["**/migrations/**"]
+
+[lint]
+ignore = [
+    # `permission_classes = [...]`, `Meta.ordering`, `list_display` : l'API
+    # déclarative de Django et DRF, écrite ainsi dans leur documentation.
+    "RUF012",
+    # `except Exception` aux frontières défensives assumées (health, envoi de
+    # mails, révocation idempotente), qui journalisent puis dégradent.
+    "BLE001",
+    "S110",
+    "S112",
+    # Pur style (if / with imbriqués), sans effet sur le comportement.
+    "SIM102",
+    "SIM117",
+]
+
+[lint.per-file-ignores]
+# `from .base import *` : l'idiome canonique de découpage des réglages Django.
+# Exclusion par fichier plutôt qu'un `noqa`, que RUF100 juge selon la version.
+"config/settings/*.py" = ["F403", "F405"]
+# `from . import signals` dans `AppConfig.ready()` : import à seul effet de bord.
+"**/apps.py" = ["F401"]
+# Les tests déballent les fixtures composites (`room, fac, voter = _room()`)
+# sans utiliser chaque élément : lisible, et sans risque.
+"**/tests/**" = ["RUF059"]
+"conftest.py" = ["RUF059"]

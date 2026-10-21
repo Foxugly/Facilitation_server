@@ -31,7 +31,7 @@ def test_send_email_logs_a_masked_address(caplog):
 
 
 def test_failed_send_logs_a_masked_address(caplog, monkeypatch):
-    import accounts.mail as mail
+    from accounts import mail
 
     def boom(*_a, **_kw):
         raise RuntimeError("smtp down")

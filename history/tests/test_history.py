@@ -3,9 +3,10 @@ import datetime
 import pytest
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.utils import timezone
 from rest_framework.test import APIClient
 
-from rooms.models import Result, Room, RoundState, Round, Item
+from rooms.models import Item, Result, Room, Round, RoundState
 from teams.models import Team, TeamMembership, TeamRole
 
 User = get_user_model()
@@ -74,7 +75,7 @@ def test_history_forbidden_for_non_member(standard_deck, team, member):
     client = APIClient()
     client.force_authenticate(stranger)
     assert client.get(f"/api/v1/history/{team.id}/").status_code == 403
-    day = datetime.date.today().isoformat()
+    day = timezone.localdate().isoformat()
     assert client.get(f"/api/v1/history/{team.id}/{day}/").status_code == 403
 
 
@@ -84,7 +85,7 @@ def test_history_email_admin_only(standard_deck, team, member):
     _act(room, "Budget?", "5", 1)
     bob = User.objects.create_user(email="bob@example.com", password="pw12345678", display_name="Bob")
     TeamMembership.objects.create(team=team, user=bob, role=TeamRole.MEMBER)
-    day = datetime.date.today().isoformat()
+    day = timezone.localdate().isoformat()
 
     # A plain member cannot trigger the broadcast.
     bc = APIClient()
@@ -104,7 +105,7 @@ def test_history_email_admin_only(standard_deck, team, member):
 @pytest.mark.django_db
 def test_history_email_empty_day_rejected(standard_deck, team, member):
     _team_room(member, team)
-    day = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
+    day = (timezone.localdate() - datetime.timedelta(days=5)).isoformat()
     ac = APIClient()
     ac.force_authenticate(member)
     assert ac.post(f"/api/v1/history/{team.id}/{day}/email/").status_code == 400

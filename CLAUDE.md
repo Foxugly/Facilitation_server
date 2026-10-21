@@ -95,6 +95,10 @@ py -m venv .venv
 .\.venv\Scripts\python.exe -m pytest -k "reveal and not deck"
 ```
 
+Lint : `ruff check .` en **ruff 0.16.10** (job CI `lint`, règles dans `ruff.toml`) — installer
+cette version exacte dans le `.venv`. La CI exige aussi 85 % de couverture du code applicatif
+(`pytest --cov`, `pytest-cov==7.1.0`, périmètre dans `.coveragerc`).
+
 `pytest.ini` fixe `DJANGO_SETTINGS_MODULE=config.settings.test` et `asyncio_mode = auto`
 (les tests du consumer sont async et n'ont pas besoin de `@pytest.mark.asyncio`).
 `conftest.py` expose la fixture `standard_deck` via `decks.seed.create_standard_deck`.
@@ -133,8 +137,9 @@ dans `base.py` ; `dev`/`test`/`prod` sont de fines surcharges.
   rollback DB par test** : parler resservirait la traduction d'un test précédent sur une PK
   réutilisée, et des register/login répétés déclencheraient de faux 429. Conserver **toutes**
   les clés de scope en éditant (`ScopedRateThrottle` lève `KeyError` sur une clé manquante).
-- **prod** : PostgreSQL (convention flotte `DB_*` à 6 variables), Channels sur Redis, HSTS,
-  `SECURE_PROXY_SSL_HEADER` (nginx termine le TLS).
+- **prod** : PostgreSQL (convention flotte `DB_*` à 6 variables), Channels sur Redis,
+  `SECURE_PROXY_SSL_HEADER` (nginx termine le TLS). HSTS est envoyé par nginx seul
+  (`deploy/nginx/facilitation-api.conf`), et non plus par Django (`SECURE_HSTS_SECONDS = 0`).
 
 Sentry ne s'initialise que si l'environnement est prod **et** que le `SENTRY_ENVIRONMENT`
 résolu est lui-même un marqueur de production — double garde délibérée, commentée dans `base.py`.

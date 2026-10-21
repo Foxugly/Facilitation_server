@@ -21,7 +21,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from billing.client import _sign
-from billing.models import DeliveryReceipt, Subscription
+from billing.models import Subscription
 from billing.service import (
     billing_configured,
     quota_for_plan,

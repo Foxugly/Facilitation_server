@@ -575,7 +575,7 @@ def test_cast_response_serializes_two_concurrent_tabs_of_the_same_participant():
             try:
                 services.cast_response(room, voter, items[1].id, {"points": 3})
                 results["first"] = "ok"
-            except Exception as exc:  # noqa: BLE001 -- capture pour assertion, pas pour avaler
+            except Exception as exc:
                 results["first"] = exc
 
         def cast_second():
@@ -587,7 +587,7 @@ def test_cast_response_serializes_two_concurrent_tabs_of_the_same_participant():
             try:
                 services.cast_response(room, voter, items[2].id, {"points": 3})
                 results["second"] = "ok"
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 results["second"] = exc
 
         t1 = threading.Thread(target=cast_first)
