@@ -1,4 +1,5 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -269,6 +270,8 @@ class LogoutApiView(APIView):
                     _blacklist_owned_refresh(request, refresh_token)
                 except TokenError:
                     pass
+                # An old (rotated) cookie must not be redeemable after logout.
+                refresh_grace.forget(request, refresh_token)
             response = Response(status=status.HTTP_204_NO_CONTENT)
             refresh_cookie.clear_refresh_cookie(response)
             return response
@@ -407,7 +410,11 @@ class CustomTokenRefreshView(TokenRefreshView):
                                   http_status=status.HTTP_401_UNAUTHORIZED)
         serializer = TokenRefreshSerializer(data={"refresh": token})
         try:
-            serializer.is_valid(raise_exception=True)
+            with transaction.atomic():
+                # Same row lock as refresh_grace.redeem on this token: a rotation
+                # and a grace reissue of it never run concurrently.
+                refresh_grace.lock_outstanding(token)
+                serializer.is_valid(raise_exception=True)
         except TokenError as exc:
             # A token rotated seconds ago whose response the browser dropped
             # (reload during the boot refresh): one reissue, see refresh_grace.

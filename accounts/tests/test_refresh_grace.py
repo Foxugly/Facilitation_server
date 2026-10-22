@@ -15,6 +15,7 @@ from django.test import override_settings
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from accounts import refresh_grace
 from accounts.models import User
 from accounts.tokens import revoke_sessions
 
@@ -188,3 +189,70 @@ def test_forged_token_gets_no_grace(user):
     assert replay(f"{header}.{payload}.AAAA").status_code == 401
     # The bad signature did not consume the legitimate entry.
     assert replay(old).status_code == 200
+
+
+def test_logout_with_the_old_cookie_closes_the_window(user):
+    """Signing out with the lost-race cookie must not leave it redeemable."""
+    old, lost = rotated_once(user)
+    logout = browser()
+    logout.cookies[COOKIE] = old
+    assert logout.post(LOGOUT_URL, {}, format="json").status_code == 204
+
+    assert replay(old).status_code == 401
+    assert not is_live(lost)  # the successor was blacklisted too
+
+
+def test_logout_with_a_forged_old_cookie_changes_nothing(user):
+    old, lost = rotated_once(user)
+    header, payload, _sig = old.split(".")
+    logout = browser()
+    logout.cookies[COOKIE] = f"{header}.{payload}.AAAA"
+    logout.post(LOGOUT_URL, {}, format="json")
+
+    assert is_live(lost)
+    assert replay(old).status_code == 200
+
+
+class _BrokenCache:
+    """Cache whose writes fail (Redis down); reads behave as an empty cache."""
+
+    def set(self, *args, **kwargs):
+        raise ConnectionError("redis down")
+
+    def get(self, *args, **kwargs):
+        raise ConnectionError("redis down")
+
+    def delete(self, *args, **kwargs):
+        raise ConnectionError("redis down")
+
+
+def test_cache_error_during_rotation_still_returns_the_rotated_cookie(user, monkeypatch, caplog):
+    client = browser()
+    old = client.post(LOGIN_URL, {"email": EMAIL, "password": PASSWORD}, format="json").cookies[COOKIE].value
+    monkeypatch.setattr(refresh_grace, "cache", _BrokenCache())
+
+    resp = client.post(REFRESH_URL, {}, format="json")
+
+    assert resp.status_code == 200
+    rotated = resp.cookies[COOKIE].value
+    assert rotated and rotated != old
+    assert is_live(rotated)
+    assert "refresh_grace_cache_set_failed" in caplog.text
+    assert old not in caplog.text and rotated not in caplog.text
+    # Without the cache there is no grace, and a replay is the usual 401, not a 500.
+    assert replay(old).status_code == 401
+
+
+def test_grace_loses_to_a_successor_blacklisted_concurrently(user, monkeypatch):
+    """The successor gets blacklisted between the claim and the reissue (a
+    concurrent rotation): the unique blacklist row decides, no second live token."""
+    old, lost = rotated_once(user)
+    real = refresh_grace._blacklist_if_live
+
+    def racing(successor_jti):
+        RefreshToken(lost).blacklist()  # the other request wins first
+        return real(successor_jti)
+
+    monkeypatch.setattr(refresh_grace, "_blacklist_if_live", racing)
+
+    assert replay(old).status_code == 401
