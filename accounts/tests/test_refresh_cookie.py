@@ -149,9 +149,12 @@ def test_refresh_reads_the_cookie_and_rotates_it(user):
 
 
 def test_replaying_a_rotated_cookie_is_rejected(user):
+    """Once the rotated cookie has been used, the old one is dead (the short
+    reuse grace of accounts/refresh_grace.py is covered in test_refresh_grace)."""
     client = spa_client()
     original = login(client).cookies[COOKIE].value
     client.post(REFRESH_URL, {}, format="json")
+    assert client.post(REFRESH_URL, {}, format="json").status_code == 200
 
     replay = spa_client()
     replay.cookies[COOKIE] = original

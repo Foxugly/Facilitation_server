@@ -42,6 +42,10 @@ if "*" in CORS_ALLOWED_ORIGINS:
 AUTH_REFRESH_COOKIE_NAME = env("AUTH_REFRESH_COOKIE_NAME", default="facilitation_refresh")
 AUTH_REFRESH_COOKIE_PATH = "/api/v1/auth/"
 AUTH_REFRESH_COOKIE_SECURE = env.bool("AUTH_REFRESH_COOKIE_SECURE", default=True)
+# A refresh token rotated less than this many seconds ago is accepted ONCE more
+# from the same client, when the browser lost the rotated cookie (reload during
+# the boot refresh). 0 disables it. Keep it short: accounts/refresh_grace.py.
+AUTH_REFRESH_REUSE_GRACE_SECONDS = env.int("AUTH_REFRESH_REUSE_GRACE_SECONDS", default=30)
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 
 # Public base URL of the Angular SPA (share links, future emails).
