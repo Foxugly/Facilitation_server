@@ -12,7 +12,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 
 from config.api_errors import error_response
 
-from . import refresh_cookie
+from . import refresh_cookie, refresh_grace
 from .api_serializers import (
     AccountDeleteSerializer,
     EmailConfirmSerializer,
@@ -390,7 +390,9 @@ class CustomTokenRefreshView(TokenRefreshView):
     absent the HttpOnly cookie is used (401 ``refresh_cookie_missing`` if none);
     the rotated token is set in the cookie and omitted from the body. A body
     token sent in cookie mode is the one-time migration path for SPAs that
-    still hold one in storage."""
+    still hold one in storage. A token rotated in the last
+    ``AUTH_REFRESH_REUSE_GRACE_SECONDS`` is accepted once more from the same
+    client (aborted boot refresh, ``accounts/refresh_grace.py``)."""
 
     def post(self, request, *args, **kwargs):
         if not refresh_cookie.wants_cookie(request):
@@ -407,5 +409,10 @@ class CustomTokenRefreshView(TokenRefreshView):
         try:
             serializer.is_valid(raise_exception=True)
         except TokenError as exc:
+            # A token rotated seconds ago whose response the browser dropped
+            # (reload during the boot refresh): one reissue, see refresh_grace.
+            if (pair := refresh_grace.redeem(request, token)) is not None:
+                return deliver_tokens(request, Response(pair, status=status.HTTP_200_OK))
             raise InvalidToken(exc.args[0]) from exc
+        refresh_grace.remember_rotation(request, token, serializer.validated_data["refresh"])
         return deliver_tokens(request, Response(serializer.validated_data, status=status.HTTP_200_OK))

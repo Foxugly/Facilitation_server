@@ -254,6 +254,13 @@ démarrage, en-tête `x-auth-mode` autorisé. Sans l'en-tête, contrat corps inc
 n'est pas concerné** : il s'authentifie par le token participant dans `session.join`. Code :
 `accounts/refresh_cookie.py`, tests `accounts/tests/test_refresh_cookie.py`.
 
+**Grâce de réutilisation (2026-10-22).** Un refresh tourné il y a moins de
+`AUTH_REFRESH_REUSE_GRACE_SECONDS` (30 s, `0` = coupé) est accepté **une** fois de plus, en mode
+cookie seulement, depuis le même client (IP + User-Agent), si son successeur n'a jamais servi ni été
+révoqué : le successeur est alors blacklisté et une nouvelle paire émise. Cause : un rechargement
+pendant le refresh de démarrage fait perdre le `Set-Cookie` tourné. L'état vit dans le cache (Redis en
+prod, partagé entre workers). Code `accounts/refresh_grace.py`, tests `accounts/tests/test_refresh_grace.py`.
+
 ## Facturation déléguée, et inerte par défaut
 
 Aucune clé Stripe ici. `billing/client.py` est le **seul** point de sortie vers
