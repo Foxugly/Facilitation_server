@@ -9,7 +9,7 @@ channels-redis>=4.3.0,<5
 daphne>=4.2.3,<5
 celery==5.7.0
 redis==7.4.1
-psycopg[binary]>=3.3.6,<4
+psycopg[binary]>=3.3.8,<4
 requests>=2.34.2,<3
 msal>=1.39.0,<2
 pillow==13.0.0
