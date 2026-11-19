@@ -1,0 +1,19 @@
+{% extends "admin_2fa/base.html" %}
+{% load i18n %}
+{% block otp_content %}
+<p>{% blocktranslate trimmed %}
+  Two-factor authentication is required for the administration.
+  Scan this QR code with an authenticator app (Google Authenticator, Microsoft Authenticator,
+  1Password, Aegis…), then type the 6-digit code it shows.
+{% endblocktranslate %}</p>
+<p class="admin-2fa-qr">{{ qr_svg }}</p>
+<p>{% translate "Cannot scan? Enter this key by hand (time-based):" %}<br><code class="admin-2fa-key">{{ secret }}</code></p>
+<form method="post" id="login-form">{% csrf_token %}
+  <div class="form-row">
+    {{ form.token.errors }}
+    <label for="{{ form.token.id_for_label }}">{% translate "6-digit code" %}</label> {{ form.token }}
+    <input type="hidden" name="next" value="{{ next }}">
+  </div>
+  <div class="submit-row"><input type="submit" value="{% translate 'Confirm' %}"></div>
+</form>
+{% endblock %}

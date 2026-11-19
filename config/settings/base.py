@@ -54,7 +54,9 @@ FRONTEND_BASE_URL = env("FRONTEND_BASE_URL", default="https://facilitation.foxug
 INSTALLED_APPS = [
     # daphne must precede staticfiles so runserver uses the ASGI server (Channels).
     "daphne",
-    "django.contrib.admin",
+    # admin.site with mandatory TOTP 2FA (admin_2fa/, CLAUDE.md "Admin 2FA"):
+    # replaces "django.contrib.admin", same app label.
+    "admin_2fa.apps.OTPAdminConfig",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
@@ -67,6 +69,10 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework_simplejwt.token_blacklist",
     "drf_spectacular",
+    "django_otp",
+    "django_otp.plugins.otp_totp",
+    "django_otp.plugins.otp_static",
+    "admin_2fa",
     "accounts.apps.AccountsConfig",
     "teams.apps.TeamsConfig",
     "decks.apps.DecksConfig",
@@ -85,6 +91,9 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    # Binds the session's verified OTP device to request.user (admin 2FA). After
+    # AuthenticationMiddleware; JWT API users are untouched (DRF authenticates later).
+    "django_otp.middleware.OTPMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -141,6 +150,12 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 AUTH_USER_MODEL = "accounts.User"
+
+# --- Admin 2FA (django-otp). Label shown in the authenticator app. Throttling
+# stays on (factor 1 = 1 s, 2 s, 4 s... after each wrong code, per device). ---
+OTP_TOTP_ISSUER = "Facilitation admin (facilitation-api.foxugly.com)"
+OTP_TOTP_THROTTLE_FACTOR = 1
+OTP_STATIC_THROTTLE_FACTOR = 1
 
 AUTHENTICATION_BACKENDS = [
     "accounts.auth_backend.EmailBackend",

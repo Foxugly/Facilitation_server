@@ -26,6 +26,11 @@ class NginxConfTests(unittest.TestCase):
         self.assertIn("limit_req zone=facilitation_admin_login", _block("location = /admin/login/"))
         self.assertRegex(LIMITS, r"limit_req_zone \$binary_remote_addr zone=facilitation_admin_login:\S+ rate=10r/m;")
 
+    def test_admin_2fa_steps_share_the_login_limit(self):
+        block = _block("location ^~ /admin/2fa/")
+        self.assertIn("limit_req zone=facilitation_admin_login", block)
+        self.assertIn("proxy_pass http://127.0.0.1:8011;", block)  # gunicorn, not daphne
+
     def test_websockets_are_capped_per_ip(self):
         self.assertIn("limit_conn facilitation_ws_conn", _block("    location /ws/ {"))
         self.assertIn("zone=facilitation_ws_conn", LIMITS)
