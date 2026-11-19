@@ -288,6 +288,7 @@ slug doit être enregistré auprès du central, sinon aucun droit payant ne se r
 | `boards` | Delegation Board par équipe (niveau AS-IS / TO-BE par domaine de décision). |
 | `billing` | Client + gating sur cache de droits contre le service central. |
 | `health` | `/health/` liveness + `SELECT 1` (UptimeRobot vérifie `"status": "ok"`). |
+| `admin_2fa` | 2FA TOTP obligatoire sur `/admin/` (django-otp) — voir §Admin 2FA. |
 
 `docs/superpowers/specs/` fait référence : contrat temps réel et spec de modèle de données.
 **Tout nouvel event étend ce contrat, ne le double pas.**
@@ -722,6 +723,40 @@ de code **ne redémarre pas** `env-fetch` : une valeur SSM modifiée exige un re
 Secrets : AWS SSM Parameter Store uniquement. Ne jamais committer de `.env` — `.gitignore`
 couvre aussi `.env.*`, parce qu'un `.env.e2e-backup` porteur de vrais identifiants a déjà été
 trouvé non ignoré sur un dépôt voisin.
+
+## Admin 2FA
+
+`/admin/` exige un second facteur TOTP pour **tous** les comptes staff (django-otp 1.7.5 + qrcode 8.2,
+app `admin_2fa/`, portée depuis l'implémentation de référence de la flotte, `Poker_server`). Les
+utilisateurs de l'API (JWT) n'en voient rien.
+
+- **Câblage** : `"admin_2fa.apps.OTPAdminConfig"` *remplace* `"django.contrib.admin"` (il fait
+  d'`admin.site` un `Admin2FASite`, dont `has_permission` exige aussi `user.is_verified()`) ; plus
+  `django_otp`, `otp_totp`, `otp_static`, `admin_2fa` dans `INSTALLED_APPS` et
+  `django_otp.middleware.OTPMiddleware` juste après `AuthenticationMiddleware`. `OTP_TOTP_ISSUER` est
+  le libellé dans l'appli d'authentification. Une pièce manquante fait échouer `manage.py check`
+  (`admin_2fa.E001-E004`). Un `AdminSite` personnalisé devrait hériter d'`Admin2FASite`.
+- **ASGI** : rien de spécifique. L'admin est servi par **gunicorn (8011)** ; `config/asgi.py` passe
+  `"http"` à `get_asgi_application()` (donc à `MIDDLEWARE`), et les WebSockets ne touchent pas l'admin.
+- **Parcours** : mot de passe sur `/admin/login/` → `/admin/2fa/setup/` (1re fois : QR + clé, un code
+  pour confirmer, 10 codes de secours affichés **une seule fois**) ou `/admin/2fa/verify/` (code TOTP
+  ou code de secours). Templates admin rendus côté serveur, CSRF, `never_cache`, aucun script/style inline.
+- **Force brute** : django-otp freine chaque appareil (1 s, 2 s, 4 s… après chaque mauvais code) et
+  nginx place `/admin/2fa/` dans la même zone `facilitation_admin_login` que le login (10 r/min par IP).
+- **Téléphone perdu / compte bloqué** (sur la box, comme l'unit de l'app le lancerait) :
+
+  ```bash
+  sudo systemd-run --wait --pipe --quiet --uid=django --gid=www-data \
+    -p EnvironmentFile=/run/facilitation/.env -p WorkingDirectory=/var/www/django_websites/Facilitation_server \
+    /var/www/django_websites/Facilitation_server/.venv/bin/python manage.py admin_2fa_reset <email>
+  ```
+
+  supprime les appareils de l'utilisateur (réenrôlement au prochain login admin) ; `--unlock` ne vide
+  que le délai de throttling.
+- **Tests sur des pages d'admin** : `admin_2fa.testing.force_admin_login(client, user)`, pas
+  `client.force_login` (l'admin redirigerait vers le second facteur).
+- **Secrets** : ne jamais journaliser ni envoyer à Sentry la clé TOTP, le QR ou un code de secours —
+  les vues les gardent dans des `Redacted` et le champ du formulaire s'appelle `token` (nettoyé par Sentry).
 
 ## Specs
 

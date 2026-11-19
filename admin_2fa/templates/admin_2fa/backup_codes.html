@@ -1,0 +1,11 @@
+{% extends "admin_2fa/base.html" %}
+{% load i18n %}
+{% block otp_content %}
+<p>{% blocktranslate trimmed %}
+  Your phone is enrolled. Below are your backup codes: each one works <strong>once</strong>,
+  in place of the 6-digit code, if you lose your phone.
+{% endblocktranslate %}</p>
+<p class="errornote">{% translate "Save them now (password manager, paper). They will never be shown again." %}</p>
+<ol class="admin-2fa-codes">{% for code in codes %}<li><code>{{ code }}</code></li>{% endfor %}</ol>
+<div class="submit-row"><a class="button default" href="{{ next }}">{% translate "Continue to the administration" %}</a></div>
+{% endblock %}

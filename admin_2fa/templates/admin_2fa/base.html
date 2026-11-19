@@ -1,0 +1,21 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+{# Same frame as admin/login.html: no nav, no sidebar. No inline script or style: CSP-safe. #}
+{% block title %}{% if form.errors %}{% translate "Error:" %} {% endif %}{{ block.super }}{% endblock %}
+{% block extrastyle %}{{ block.super }}<link rel="stylesheet" href="{% static "admin/css/login.css" %}">{% endblock %}
+{% block bodyclass %}{{ block.super }} login{% endblock %}
+{% block usertools %}{% endblock %}
+{% block nav-global %}{% endblock %}
+{% block nav-sidebar %}{% endblock %}
+{% block content_title %}{% endblock %}
+{% block nav-breadcrumbs %}{% endblock %}
+{% block content %}
+{% for error in form.non_field_errors %}<p class="errornote">{{ error }}</p>{% endfor %}
+<div id="content-main">
+<h1>{{ title }}</h1>
+{% block otp_content %}{% endblock %}
+<form action="{% url 'admin:logout' %}" method="post" class="admin-2fa-logout">{% csrf_token %}
+  <p><button type="submit" class="button">{% translate "Log out" %}</button></p>
+</form>
+</div>
+{% endblock %}

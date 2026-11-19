@@ -65,6 +65,8 @@ def test_admin_action_wired_on_changelist():
     from django.contrib.auth import get_user_model
     from django.test import Client
 
+    from admin_2fa.testing import force_admin_login
+
     User = get_user_model()
     admin = User.objects.create_superuser(email="a@ex.com", password="pw12345678", display_name="A")
     deck = create_standard_deck()
@@ -72,7 +74,7 @@ def test_admin_action_wired_on_changelist():
     before = deck.cards.count()
 
     client = Client()
-    client.force_login(admin)
+    force_admin_login(client, admin)  # the admin requires 2FA (admin_2fa/)
     resp = client.post(
         "/admin/decks/card/",
         {"action": "duplicate_selected_cards", "_selected_action": [str(card.pk)]},
