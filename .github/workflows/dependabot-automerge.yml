@@ -26,10 +26,35 @@ jobs:
     steps:
       - name: Dependabot metadata
         id: meta
-        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        uses: dependabot/fetch-metadata@v2
+
+      # fetch-metadata misreads Dependabot range bumps such as
+      # "update psycopg requirement from <4,>=3.3.6 to >=3.3.9,<4": it takes
+      # "4,>=3.3.6" as the old version and reports 4 -> 3.3.9 as a major, so
+      # these patch/minor PRs never got auto-merge. For a reported major, keep
+      # it major unless the >= lower bound's major and the < upper bound are
+      # both unchanged.
+      - name: Classify update
+        id: kind
+        env:
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          major=false
+          if [ "$UPDATE_TYPE" = "version-update:semver-major" ]; then
+            major=true
+            from=$(printf '%s' "$TITLE" | sed -nE 's/.* requirement from (.+) to (.+)$/\1/p')
+            to=$(printf '%s' "$TITLE" | sed -nE 's/.* requirement from (.+) to (.+)$/\2/p')
+            lo() { printf '%s' "$1" | grep -oE '>=[0-9]+' | head -1; }
+            hi() { printf '%s' "$1" | grep -oE '<[0-9][0-9.]*' | head -1; }
+            if [ -n "$(lo "$from")" ] && [ "$(lo "$from")" = "$(lo "$to")" ] && [ "$(hi "$from")" = "$(hi "$to")" ]; then
+              major=false
+            fi
+          fi
+          echo "major=$major" >> "$GITHUB_OUTPUT"
 
       - name: Enable auto-merge (non-major only)
-        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        if: steps.kind.outputs.major != 'true'
         env:
           GH_TOKEN: ${{ secrets.DEPENDABOT_AUTOMERGE_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
