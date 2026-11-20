@@ -40,6 +40,8 @@ def test_gunicorn_sert_le_wsgi_sur_8011_avec_deux_workers():
     unite = lire("deploy/systemd/facilitation-gunicorn.service")
     assert "--bind 127.0.0.1:8011" in unite
     assert "config.wsgi:application" in unite
+    # gunicorn >= 25.1 ouvre sinon un socket de contrôle dans ~/.gunicorn, partagé par tous les sites.
+    assert "--no-control-socket" in unite
     assert "--workers 2" in unite  # la machine manque de mémoire : ne pas augmenter sans la mesurer
     assert "EnvironmentFile=/run/facilitation/.env" in unite
 
