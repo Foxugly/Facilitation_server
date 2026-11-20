@@ -19,6 +19,6 @@ gunicorn==23.0.0
 django-extensions>=4.1,<5
 django-otp==1.7.5
 qrcode==8.2
-pytest>=9.1.1,<10
+pytest>=9.2.0,<10
 pytest-django==4.14.0
 pytest-asyncio>=1.5.0,<2
