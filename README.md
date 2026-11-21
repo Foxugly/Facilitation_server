@@ -28,9 +28,19 @@ simplejwt (Phase 2 auth). Python 3.14, ports `127.0.0.1:8009` (daphne, `/ws/`) a
 
 ```bash
 py -m venv .venv
-.venv/Scripts/python -m pip install -r requirements.txt
+.venv/Scripts/python -m pip install -r requirements.in
 .venv/Scripts/python manage.py migrate
 .venv/Scripts/python manage.py runserver   # ASGI via daphne (Channels)
+```
+
+Dependencies: `requirements.in` lists the direct deps (ranges); `requirements.txt` is the
+hash-pinned lock generated from it for the box (Linux, Python 3.12) — what CI and the deploy
+install (`pip install --require-hashes -r requirements.txt`). It is not usable on Windows
+(platform-only deps such as `tzdata` are resolved out), hence `requirements.in` above. After
+editing `requirements.in`, regenerate the lock:
+
+```bash
+uv pip compile requirements.in --generate-hashes --python-version 3.12 --python-platform x86_64-unknown-linux-gnu -o requirements.txt
 ```
 
 Dev uses sqlite + the in-memory channel layer (no Redis needed). Tests: `.venv/Scripts/python -m pytest`.
