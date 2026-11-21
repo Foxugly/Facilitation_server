@@ -83,11 +83,26 @@ jobs:
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.13"
+          # 3.12 = la version de la box (Python 3.12.3) ; le verrou est résolu pour elle.
+          python-version: "3.12"
 
-      # pytest-cov épinglé ici et non dans requirements.txt, que la box installe.
+      # Le verrou d'abord (requirements.txt, hashes, comme au déploiement) : les tests
+      # tournent sur les versions exactes que la production reçoit. Les outils de CI
+      # ensuite, à part : pip exige des hashes pour toute l'installation dès qu'une
+      # ligne en porte.
+      # pytest-cov épinglé ici et non dans requirements.in, que la box installe.
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest-cov==7.1.0
+        run: |
+          pip install --require-hashes -r requirements.txt
+          pip install pytest-cov==7.1.0
+
+      # Même installation que deploy/deploy.sh, dans un venv propre : prouve que le
+      # verrou est complet (--no-deps : rien n'est résolu sur la box) et cohérent.
+      - name: Lock is complete
+        run: |
+          python -m venv /tmp/lock-check
+          /tmp/lock-check/bin/pip install --quiet --require-hashes --no-deps -r requirements.txt
+          /tmp/lock-check/bin/pip check
 
       - name: Run tests
         env:
@@ -233,9 +248,11 @@ jobs:
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.13"
+          python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements*.txt
+          cache-dependency-path: |
+            requirements.in
+            requirements.txt
 
       - name: Install pip-audit (version figée)
         run: python -m pip install pip-audit==2.10.1
@@ -256,4 +273,6 @@ jobs:
               ignore+=(--ignore-vuln "$id")
             done < .pip-audit-ignore
           fi
-          pip-audit --progress-spinner off -r requirements.txt "${ignore[@]}"
+          # Le verrou tel quel (versions exactes, hashes), sans résolution pip :
+          # c'est exactement ce que la production installe.
+          pip-audit --progress-spinner off --disable-pip --require-hashes -r requirements.txt "${ignore[@]}"
