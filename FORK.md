@@ -30,18 +30,11 @@ pas de la marque projet — Delegation Poker reste la première activité de Fac
 Les `docs/superpowers/specs/` sont conservées telles quelles : le contrat temps réel
 et la spec de modèle de données restent la référence à étendre.
 
-## À faire manuellement avant tout déploiement
+## Mise en production — faite
 
-1. Créer le repo GitHub et pousser (voir plus bas).
-2. Enregistrer le slug `facilitation` auprès du service de facturation central
-   (`billing-api.foxugly.com`) — sinon aucun droit payant ne sera résolu.
-3. Créer les paramètres SSM `/facilitation-server/prod/*`
-   (`deploy/seed-parameter-store.sh` en donne la liste).
-4. DNS + certificat pour `facilitation.foxugly.com` et `facilitation-api.foxugly.com`.
-5. Base de données dédiée. Les migrations sont celles de Poker : la base part vide,
-   il n'y a aucune donnée à reprendre.
-6. Vérifier qu'aucun autre service de la flotte n'occupe les ports 8009 et 8011
-   (8007 est celui de billing).
+Repo GitHub, slug `facilitation` côté billing, paramètres SSM `/facilitation-server/prod/*`,
+DNS + certificat, base dédiée et ports 8009 / 8011 : tout est en place, le site est en prod
+(`facilitation-api.foxugly.com`). Ce document est conservé comme trace du fork.
 
 ## Premier commit — fait
 
@@ -55,13 +48,5 @@ au contrat temps réel (§4) et le renommer casserait `Facilitation_frontend` ta
 les deux dépôts ne sont pas livrés ensemble. C'est le seul « session » qui subsiste
 dans le domaine.
 
-Restent à faire, dans cet ordre : `Subject` → `Item`, puis `Vote` → `Response`
-(étape 5 du plan — voir `CLAUDE.md`).
-
-## Pousser vers GitHub
-
-```
-cd Facilitation_server
-git remote add origin https://github.com/Foxugly/Facilitation_server.git
-git push -u origin main
-```
+Les renommages suivants ont été faits depuis : `Subject` → `Item` (migrations 0010-0012),
+puis `Vote` → `Response` (migrations 0013-0016) — voir `CLAUDE.md`.

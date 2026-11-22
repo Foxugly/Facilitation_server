@@ -4,14 +4,17 @@ Django + DRF + **Django Channels** (ASGI/WebSocket) backend for **facilitation.f
 the Collaborative Facilitation Toolbox. Forked from `Poker_server` — Delegation Poker is
 the first activity, not the product. Part of the Foxugly fleet — conventions in `foxugly-ops/OPERATIONS.md`.
 
-> **Fleet exception:** this is the only site that runs under an **ASGI** server (daphne),
-> not gunicorn/WSGI, because Channels needs it (README-handoff §4). The realtime brick is
+> **Two servers:** Channels needs ASGI, so **daphne** (`facilitation-asgi`, `127.0.0.1:8009`)
+> serves only the WebSockets `/ws/`; the HTTP API (and the admin) runs on **gunicorn**
+> (`facilitation-gunicorn`, `127.0.0.1:8011`) since 2026-10-09 — nginx routes `/ws/` to
+> daphne and everything else to gunicorn. Celery (`facilitation-celery`, `--pool=solo`) +
+> `facilitation-celery-beat` complete the units (`deploy/systemd/`). The realtime brick is
 > isolated in the `realtime` app + `config/asgi.py`.
 
 ## Stack
 
 Django 6 · DRF · Channels + Redis · django-parler (i18n in DB) · Celery · PostgreSQL (prod) ·
-simplejwt (Phase 2 auth). Python 3.14, ports `127.0.0.1:8009` (daphne, `/ws/`) and
+simplejwt (Phase 2 auth). Python 3.14 locally, 3.12 on the box; ports `127.0.0.1:8009` (daphne, `/ws/`) and
 `127.0.0.1:8011` (gunicorn, HTTP API).
 
 ## Apps
