@@ -99,7 +99,7 @@ uv pip compile requirements.in --generate-hashes --python-version 3.12 --python-
 ```
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 475 passed
+.\.venv\Scripts\python.exe -m pytest                              # suite complète — référence : 648 passed, 1 skipped
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py # un fichier
 .\.venv\Scripts\python.exe -m pytest realtime/tests/test_timer.py::test_nom -x
 .\.venv\Scripts\python.exe -m pytest -k "reveal and not deck"
@@ -463,7 +463,7 @@ Weighted Ranking, QCM/Poll, ROTI.
 
 ## Règles de travail
 
-- **`pytest` vert à chaque commit.** Référence actuelle : 475 passed.
+- **`pytest` vert à chaque commit.** Référence actuelle : 648 passed, 1 skipped (2026-11-22).
 - Le poker existant doit continuer à fonctionner **à chaque étape**. Aucune étape ne livre
   une régression « qu'on corrigera après ».
 - Étapes petites et testables. Pas de réécriture de masse.
@@ -504,7 +504,7 @@ Weighted Ranking, QCM/Poll, ROTI.
 
 ## Pièges
 
-- **Capacité de la box : `t3.medium` (4 Go) depuis le 2026-09-10. Celery est actif.**
+- **Capacité de la box : `t3.large` (8 Go) depuis le 2026-10-15 (`t3.medium`, 4 Go, du 2026-09-10 au 2026-10-15). Celery est actif.**
   La machine était en `t3.small` (1,9 Go) pour **dix** applications Django. Le démarrage de
   `facilitation-celery` + `facilitation-celery-beat` a suffi à la faire basculer : swap plein
   (2047/2047), load à **76**, **toute la flotte injoignable** — `poker-api` répondait en 39 s,
@@ -680,7 +680,7 @@ Weighted Ranking, QCM/Poll, ROTI.
   relecture confirmant que le front déployé n'émettait plus que la forme moderne. Réflexe :
   un plan qui affirme « le front a basculé » n'est une preuve de rien — grep (ou lire en prod)
   le dépôt frontend réellement déployé avant de retirer un alias.
-- Index Redis : la prod utilise `redis://127.0.0.1:6379/3` sur une box partagée.
+- Index Redis : la prod utilise `redis://127.0.0.1:6379/6` sur une box partagée (db3 est celle de Poker).
 - `ROOM_MAX_PARTICIPANTS` (15) est une limite de **lisibilité** — les cartes tombent à ~61px
   à 15 sièges autour de l'ovale. Figée sur `Room.max_participants` à la création, tout comme
   `result_layout` : une room vivante ne change pas de forme sous les joueurs. À distinguer de
