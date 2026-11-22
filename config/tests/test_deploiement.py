@@ -68,6 +68,25 @@ def test_le_deploiement_verifie_gunicorn_avant_de_basculer_nginx():
     assert any("facilitation-gunicorn" in c and "/etc/systemd/system" in c for c in commandes)
 
 
+def test_le_checkout_n_est_mis_a_jour_qu_apres_le_restart_de_env_fetch():
+    """Les services ont Requires=facilitation-env-fetch : son restart les relance aussitôt.
+
+    Si le checkout est déjà sur le nouveau code à ce moment-là, ils repartent avec
+    l'ancien venv et plantent dès qu'une dépendance arrive (billing_server#74).
+    """
+    commandes = [c for c in commandes_ssm() if not c.startswith("#")]
+
+    def position(motif):
+        return next(i for i, c in enumerate(commandes) if motif in c)
+
+    env_fetch = position("systemctl restart facilitation-env-fetch")
+    checkout = position("git reset --hard")
+    deploiement = position("deploy/deploy.sh")
+    assert env_fetch < checkout < deploiement
+    for unite in ("asgi", "gunicorn", "celery", "celery-beat"):
+        assert "Requires=facilitation-env-fetch.service" in lire(f"deploy/systemd/facilitation-{unite}.service")
+
+
 def test_la_production_partage_son_cache_entre_les_processus():
     """Plusieurs workers : un cache par processus diviserait les limites de débit."""
     prod = lire("config/settings/prod.py")
