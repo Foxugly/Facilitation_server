@@ -89,13 +89,13 @@ py -m venv .venv
 ```
 
 Dépendances : `requirements.in` liste les dépendances directes (plages) ; `requirements.txt` est
-le verrou à hashes qui en est généré pour la box (Linux, Python 3.12) — ce qu'installent la CI et le
+le verrou à hashes qui en est généré pour la box (Linux, Python 3.14 — deadsnakes `/usr/bin/python3.14` sur la box) — ce qu'installent la CI et le
 déploiement (`pip install --require-hashes -r requirements.txt`). Il ne sert pas sous Windows (les
 dépendances propres à une plateforme, comme `tzdata`, en sont exclues), d'où `requirements.in`
 ci-dessus. Après une modification de `requirements.in`, régénérer le verrou :
 
 ```bash
-uv pip compile requirements.in --generate-hashes --python-version 3.12 --python-platform x86_64-unknown-linux-gnu -o requirements.txt
+uv pip compile requirements.in --generate-hashes --python-version 3.14 --python-platform x86_64-unknown-linux-gnu -o requirements.txt
 ```
 
 ```powershell
