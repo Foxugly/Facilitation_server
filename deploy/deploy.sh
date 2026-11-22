@@ -11,9 +11,31 @@ VENV="$APP_DIR/.venv"
 
 cd "$APP_DIR"
 
+# The venv must run on $PYTHON (deadsnakes python3.14, root-owned in /usr/bin;
+# the system python3 stays 3.12). A venv on another version is rebuilt at its
+# final path — never built elsewhere and moved, since console-script shebangs
+# (.venv/bin/daphne, gunicorn, celery, used by the units) hard-code the venv
+# path. The old one is kept as .venv.prev and put back if the rebuild fails.
+# Every unit on this venv is restarted after this script: asgi and enabled
+# celery/celery-beat below, gunicorn by root in the SSM command (deploy.yml).
+PYTHON=/usr/bin/python3.14
+PY_WANT="$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+PY_HAVE="$("$VENV/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo none)"
+if [ "$PY_HAVE" != "$PY_WANT" ]; then
+    echo ">>> Rebuilding the venv: Python $PY_HAVE -> $PY_WANT..."
+    rm -rf "$VENV.prev"
+    if [ -e "$VENV" ]; then mv "$VENV" "$VENV.prev"; fi
+    if ! { "$PYTHON" -m venv "$VENV"            && "$VENV/bin/pip" install --quiet --require-hashes --no-deps -r requirements.txt            && "$VENV/bin/pip" check; }; then
+        echo "ERROR: venv rebuild failed; restoring the previous venv." >&2
+        rm -rf "$VENV"
+        if [ -e "$VENV.prev" ]; then mv "$VENV.prev" "$VENV"; fi
+        exit 1
+    fi
+fi
+
 echo ">>> Installing dependencies..."
 # requirements.txt is a hash-pinned lock (uv pip compile requirements.in, Linux /
-# Python 3.12). A plain `pip install -r` never upgrades a package already
+# Python 3.14). A plain `pip install -r` never upgrades a package already
 # installed inside its range, so prod silently missed releases CI had tested.
 # Installing the exact lock makes prod run what CI ran; --no-deps means nothing
 # is resolved on the box, and pip check fails the deploy on an incomplete lock.

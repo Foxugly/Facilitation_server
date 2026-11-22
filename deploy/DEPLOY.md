@@ -63,7 +63,10 @@ Channels layer in prod (multi-process) and is already on the box.
 
 Créer d'abord le répertoire `/var/www/django_websites/Facilitation_server` (clone du repo,
 `django:www-data`, `750`) et son `.venv` — le déploiement met à jour un dépôt existant, il ne
-le crée pas.
+le crée pas. Le `.venv` se crée avec `/usr/bin/python3.14` (deadsnakes, pas le `python3` système
+en 3.12) ; à chaque déploiement, `deploy.sh` (lancé après le `git reset` du checkout) le
+reconstruit **sur place** s'il est absent ou sur une autre version (l'ancien gardé en `.venv.prev`,
+remis en place si l'installation du verrou échoue).
 
 Push to `main` → the workflow installs units + nginx from the git blob, `daemon-reload`, enables
 `facilitation-env-fetch`/`facilitation-asgi`/`facilitation-celery`/`facilitation-celery-beat`,

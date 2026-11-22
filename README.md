@@ -14,7 +14,7 @@ the first activity, not the product. Part of the Foxugly fleet — conventions i
 ## Stack
 
 Django 6 · DRF · Channels + Redis · django-parler (i18n in DB) · Celery · PostgreSQL (prod) ·
-simplejwt (Phase 2 auth). Python 3.14 locally, 3.12 on the box; ports `127.0.0.1:8009` (daphne, `/ws/`) and
+simplejwt (Phase 2 auth). Python 3.14 locally and on the box (deadsnakes `/usr/bin/python3.14`; `deploy.sh` rebuilds the venv in place when it is on another version); ports `127.0.0.1:8009` (daphne, `/ws/`) and
 `127.0.0.1:8011` (gunicorn, HTTP API).
 
 ## Apps
@@ -37,13 +37,13 @@ py -m venv .venv
 ```
 
 Dependencies: `requirements.in` lists the direct deps (ranges); `requirements.txt` is the
-hash-pinned lock generated from it for the box (Linux, Python 3.12) — what CI and the deploy
+hash-pinned lock generated from it for the box (Linux, Python 3.14) — what CI and the deploy
 install (`pip install --require-hashes -r requirements.txt`). It is not usable on Windows
 (platform-only deps such as `tzdata` are resolved out), hence `requirements.in` above. After
 editing `requirements.in`, regenerate the lock:
 
 ```bash
-uv pip compile requirements.in --generate-hashes --python-version 3.12 --python-platform x86_64-unknown-linux-gnu -o requirements.txt
+uv pip compile requirements.in --generate-hashes --python-version 3.14 --python-platform x86_64-unknown-linux-gnu -o requirements.txt
 ```
 
 Dev uses sqlite + the in-memory channel layer (no Redis needed). Tests: `.venv/Scripts/python -m pytest`.
