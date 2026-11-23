@@ -2,7 +2,7 @@
 
 INFO records become Sentry breadcrumbs and ``logger.exception`` creates an
 event: whatever ``extra`` carries reaches Sentry regardless of
-``data_collection`` (only keys on the SDK denylist are scrubbed). E-mail addresses are therefore masked before logging.
+``data_collection`` (only keys on the denylist of config/sentry_scrub.py are scrubbed). E-mail addresses are therefore masked before logging.
 """
 
 

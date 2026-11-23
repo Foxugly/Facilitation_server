@@ -359,18 +359,14 @@ _SENTRY_ENV_IS_PROD = SENTRY_ENVIRONMENT.strip().upper() in {"PROD", "PRODUCTION
 if SENTRY_DSN and _SENTRY_PROD_ACTIVE and _SENTRY_ENV_IS_PROD:
     import sentry_sdk
 
-    # Underscored: a star-import of this module must not turn them into settings.
-    from config.sentry import DATA_COLLECTION as _SENTRY_DATA_COLLECTION
-    from config.sentry import scrub_event as _sentry_scrub_event
+    # Underscored: a star-import of this module must not turn it into a setting.
+    from config.sentry import sentry_init_options as _sentry_init_options
 
     sentry_sdk.init(
         dsn=SENTRY_DSN,
         environment=SENTRY_ENVIRONMENT,
         release=env("SENTRY_RELEASE", default=None),
         traces_sample_rate=env.float("SENTRY_TRACES_SAMPLE_RATE", default=0.0),
-        profiles_sample_rate=env.float("SENTRY_PROFILES_SAMPLE_RATE", default=0.0),
-        # No PII, cookies or request bodies: see config/sentry.py.
-        data_collection=_SENTRY_DATA_COLLECTION,
-        before_send=_sentry_scrub_event,
-        before_send_transaction=_sentry_scrub_event,
+        # No PII, cookies or request bodies, scrubbing: see config/sentry.py.
+        **_sentry_init_options(),
     )

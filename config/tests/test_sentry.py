@@ -1,0 +1,173 @@
+"""sentry-sdk 3.0: the init options, scrubbing and logging, through a real client.
+
+The client sends to an in-memory transport, so what is asserted is what would
+actually leave the box.
+"""
+
+import json
+import logging
+import warnings
+
+import pytest
+import sentry_sdk
+from sentry_sdk.transport import Transport
+
+from config.sentry import sentry_init_options
+from config.sentry_scrub import FILTERED, scrub_event, scrub_span
+
+SECRET = "s3cr3t-value-never-sent"
+
+
+class _Capture(Transport):
+    def __init__(self, options=None):
+        super().__init__(options)
+        self.envelopes = []
+
+    def capture_envelope(self, envelope):
+        self.envelopes.append(envelope)
+
+    def items(self, kind):
+        return [
+            item
+            for envelope in self.envelopes
+            for item in envelope.items
+            if item.headers.get("type") == kind
+        ]
+
+    def dump(self):
+        return "".join(
+            item.payload.get_bytes().decode("utf-8", "replace")
+            for envelope in self.envelopes
+            for item in envelope.items
+        )
+
+
+@pytest.fixture
+def sentry(request):
+    """`sentry_sdk.init` with the production options, into memory."""
+    transport = _Capture()
+    traces = getattr(request, "param", 0.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no deprecated option, no unknown key
+        sentry_sdk.init(
+            dsn="https://public@sentry.example.invalid/1",
+            transport=transport,
+            traces_sample_rate=traces,
+            **sentry_init_options(),
+        )
+    yield transport
+    sentry_sdk.get_client().close()
+    sentry_sdk.get_global_scope().set_client(None)
+
+
+def _events(transport):
+    sentry_sdk.flush()
+    return [json.loads(item.payload.get_bytes()) for item in transport.items("event")]
+
+
+def test_init_takes_the_options_and_collects_no_more_than_2x(sentry):
+    options = sentry_sdk.get_client().options
+    rules = options["data_collection"]
+    assert rules["user_info"] is False
+    assert rules["cookies"]["mode"] == "off"
+    assert rules["http_bodies"] == []
+    assert rules["queues"] is False
+    assert rules["database_query_data"] is False
+    assert rules["gen_ai"] == {"inputs": False, "outputs": False}
+    assert rules["mcp"] == {"inputs": False, "outputs": False}
+    assert rules["stack_frame_variables"]["mode"] == "denylist"
+    assert options["attach_stacktrace"] is False
+    assert options["before_send_span"] is scrub_span
+
+
+def test_before_send_masks_request_extra_and_local_variables(sentry):
+    def view():
+        password = SECRET  # noqa: F841 (a local variable Sentry would ship)
+        api_token = SECRET  # noqa: F841
+        raise ValueError("boom")
+
+    with sentry_sdk.new_scope() as scope:
+        scope.set_extra("token", SECRET)
+        scope.set_extra("page", 3)
+        try:
+            view()
+        except ValueError:
+            sentry_sdk.capture_exception()
+
+    (event,) = _events(sentry)
+    assert event["extra"]["token"] == FILTERED
+    assert event["extra"]["page"] == 3
+    frame = event["exception"]["values"][-1]["stacktrace"]["frames"][-1]
+    assert frame["function"] == "view"
+    assert SECRET not in json.dumps(event)
+
+
+def test_scrub_event_masks_request_data_headers_and_user():
+    event = scrub_event(
+        {
+            "request": {
+                "data": {"password": SECRET, "nested": {"refresh_token": SECRET}, "n": 1},
+                "headers": {"Authorization": SECRET, "X-Real-Ip": SECRET, "Accept": "*/*"},
+                "cookies": {"sessionid": SECRET},
+                "query_string": "token=" + SECRET + "&page=2",
+            },
+            "extra": {"secret": SECRET},
+            "user": {"id": "7", "ip_address": SECRET},
+            "breadcrumbs": {"values": [{"data": {"api_key": SECRET, "n": 1}}]},
+            "exception": {
+                "values": [{"stacktrace": {"frames": [{"vars": {"passwd": SECRET, "i": 1}}]}}]
+            },
+        },
+        {},
+    )
+    assert SECRET not in json.dumps(event)
+    assert event["request"]["data"]["n"] == 1
+    assert event["request"]["headers"]["Accept"] == "*/*"
+    assert event["request"]["query_string"] == "token=[Filtered]&page=2"
+    assert "ip_address" not in event["user"]
+    assert event["breadcrumbs"]["values"][0]["data"]["n"] == 1
+    assert event["exception"]["values"][0]["stacktrace"]["frames"][0]["vars"]["i"] == 1
+
+
+def test_scrub_event_survives_odd_shapes():
+    """In 3.0 an exception in an event callback drops the event."""
+    for event in ({}, {"request": "x"}, {"exception": {"values": [None]}}, {"user": None}):
+        assert scrub_event(event, {}) is event
+
+
+def test_scrub_span_masks_name_and_attributes():
+    span = scrub_span(
+        {
+            "name": "GET /reset?token=" + SECRET,
+            "attributes": {
+                "http.request.header.authorization": [SECRET],
+                "url.full": "https://x.invalid/?api_key=" + SECRET + "&page=2",
+                "http.request.method": "GET",
+            },
+        },
+        {},
+    )
+    assert SECRET not in json.dumps(span)
+    assert span["name"] == "GET /reset?token=[Filtered]"
+    assert span["attributes"]["url.full"] == "https://x.invalid/?api_key=[Filtered]&page=2"
+    assert span["attributes"]["http.request.method"] == "GET"
+
+
+@pytest.mark.parametrize("sentry", [1.0], indirect=True)
+def test_before_send_span_masks_what_is_sent(sentry):
+    with sentry_sdk.start_span(
+        name="GET /reset?token=" + SECRET,
+        attributes={"session_key": SECRET, "page": 2},
+    ):
+        pass
+    sentry_sdk.flush()
+    sent = sentry.dump()
+    assert "/reset?token=[Filtered]" in sent
+    assert SECRET not in sent
+
+
+def test_logger_error_still_creates_an_event(sentry):
+    logging.getLogger("rooms").error("payment failed for invoice %s", 42)
+    events = _events(sentry)
+    assert [e["logentry"]["message"] for e in events] == ["payment failed for invoice %s"]
+    assert "stacktrace" not in json.dumps(events)  # attach_stacktrace stays off

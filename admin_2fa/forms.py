@@ -3,7 +3,7 @@ from django.utils.translation import gettext_lazy as _
 
 
 class TokenForm(forms.Form):
-    # Named `token` on purpose: Sentry's default scrubber blanks any request
+    # Named `token` on purpose: the Sentry scrubber (config/sentry_scrub.py) blanks any request
     # field with that name, and the views mark it sensitive for Django's reports.
     token = forms.CharField(
         label=_("Code"),
