@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl
 
 #: Replaces a sensitive value, as sentry-sdk's own scrubbing does.
 FILTERED = "[Filtered]"
@@ -35,11 +35,10 @@ _DENYLIST = frozenset(
 _DENY_PARTS = (
     "password", "passwd", "secret", "token", "apikey", "api_key", "authoriz",
     "credential", "cookie", "session", "csrf", "xsrf", "private_key", "privatekey",
+    "ticket", "signature",
 )
-# `name=value` pairs in free text (URLs, query strings, span names).
-_SENSITIVE_PAIR = re.compile(
-    r"(?i)([\w.\-\[\]]*(?:" + "|".join(_DENY_PARTS) + r"|auth)[\w.\-\[\]]*=)[^&\s#;]*"
-)
+# `name=value` pairs in free text and query strings.
+_PAIR = re.compile(r"([\w.\-\[\]]+)=([^&\s#;\"'<>]*)")
 # Path segments that follow one of these carry a one-time secret
 # (`/reset-password/<token>/`, `/magic-link/<token>/`...).
 _SECRET_ROUTES = frozenset(
@@ -51,11 +50,15 @@ _SECRET_ROUTES = frozenset(
         "ticket", "share", "download",
     }
 )
-# A long opaque segment (token, signed value) is masked wherever it appears.
-_OPAQUE = re.compile(r"[A-Za-z0-9_\-.:=~+]{24,}")
+# What a token, signed value or key looks like once in a URL or a message.
+_OPAQUE = re.compile(r"[A-Za-z0-9_\-.:=~+%]+")
 _URL = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s\"'<>]+")
 # A path standing alone (`GET /reset/x/`), not the `//host/...` of a URL.
-_PATH = re.compile(r"(?<![:/\w])(?:/[^/\s?#\"'<>]*)+")
+_PATH = re.compile(r"(?<![:/\w\]])(?:/[^/\s?#\"'<>]*)+")
+# `host`, `host:port`, `[v6]` or `[v6]:port`: anything else after `://` hides
+# something (a `user:password` without `@`, for instance).
+_HOST = re.compile(r"(?:\[[0-9A-Fa-f:.]*\]|[^:@\[\]]*)(?::\d*)?")
+_AUTHORITY = re.compile(r"[^/?#]*")
 _MAX_DEPTH = 20
 
 
@@ -66,8 +69,35 @@ def is_sensitive_key(key: Any) -> bool:
     return normalized in _DENYLIST or any(part in normalized for part in _DENY_PARTS)
 
 
-def _is_opaque(segment: str) -> bool:
-    return bool(_OPAQUE.fullmatch(segment)) and any(c.isdigit() for c in segment)
+def _is_opaque(value: str) -> bool:
+    """A long random-looking value: hex/base64 token, signed value, key."""
+    if len(value) < 16 or not _OPAQUE.fullmatch(value):
+        return False
+    if len(value) >= 32 or any(c.isdigit() for c in value):
+        return True
+    return any(c.isupper() for c in value) and any(c.islower() for c in value)
+
+
+def _is_sensitive_param(name: str, value: str) -> bool:
+    return is_sensitive_key(name) or "auth" in name.lower() or _is_opaque(value)
+
+
+def _scrub_pair(match: re.Match[str]) -> str:
+    name, value = match.group(1), match.group(2)
+    if _is_sensitive_param(name, value):
+        return name + "=" + FILTERED
+    return match.group(0)
+
+
+def _scrub_query(query: str) -> str:
+    """Mask the values of sensitive or opaque parameters of a query string."""
+    pairs = parse_qsl(query, keep_blank_values=True)
+    if not pairs:
+        return FILTERED if _is_opaque(query) else query
+    return "&".join(
+        name + "=" + (FILTERED if _is_sensitive_param(name, value) else value)
+        for name, value in pairs
+    )
 
 
 def _scrub_path(path: str) -> str:
@@ -83,20 +113,37 @@ def _scrub_path(path: str) -> str:
 
 
 def _scrub_url(match: re.Match[str]) -> str:
-    url = match.group(0)
-    try:
-        parts = urlsplit(url)
-        netloc = parts.netloc.rpartition("@")[2]  # drop user:password@
-        return urlunsplit(parts._replace(netloc=netloc, path=_scrub_path(parts.path)))
-    except ValueError:
-        return FILTERED  # unparseable URL: do not guess what it hides
+    scheme, _, rest = match.group(0).partition("://")
+    authority_match = _AUTHORITY.match(rest)
+    authority = authority_match.group(0) if authority_match else ""
+    tail = rest[len(authority) :]
+    authority = authority.rpartition("@")[2]  # drop user:password@
+    if not _HOST.fullmatch(authority):
+        # `user:pa/ss@host`: the `@` comes after a `/`; drop up to it.
+        before_query = re.split(r"[?#]", rest, maxsplit=1)[0]
+        if "@" in before_query:
+            rest = rest[before_query.rindex("@") + 1 :]
+            authority_match = _AUTHORITY.match(rest)
+            authority = authority_match.group(0) if authority_match else ""
+            tail = rest[len(authority) :]
+        if not _HOST.fullmatch(authority):
+            authority = FILTERED
+    tail, hash_, fragment = tail.partition("#")
+    path, question, query = tail.partition("?")
+    url = scheme + "://" + authority + _scrub_path(path)
+    if question:
+        url += "?" + _scrub_query(query)
+    if hash_ and fragment:
+        url += "#" + FILTERED  # fragments carry OAuth / magic-link tokens
+    return url
 
 
 def scrub_text(text: Any) -> Any:
     """Mask secrets in free text (URLs, query strings, span names, messages).
 
-    `name=value` pairs with a sensitive name, the `user:password@` of a URL, and
-    path segments after a secret-bearing route or that look like a token.
+    URL userinfo, `name=value` pairs with a sensitive name or an opaque value,
+    URL fragments, and path segments after a secret-bearing route or that look
+    like a token.
     """
     if not isinstance(text, str):
         return text
@@ -105,17 +152,18 @@ def scrub_text(text: Any) -> Any:
     if "/" in text:
         text = _PATH.sub(lambda m: _scrub_path(m.group(0)), text)
     if "=" in text:
-        text = _SENSITIVE_PAIR.sub(lambda m: m.group(1) + FILTERED, text)
+        text = _PAIR.sub(_scrub_pair, text)
     return text
 
 
 def _scrub(value: Any, depth: int = 0) -> Any:
-    """Blank sensitive keys and mask secrets in strings, recursively, in place.
+    """Blank sensitive keys and mask secrets in strings, recursively.
 
-    Returns the scrubbed value (strings are immutable, containers are edited).
+    Dicts and lists are edited in place; the scrubbed value is returned (tuples
+    and sets come back as lists). Fails closed: too deep means `[Filtered]`.
     """
     if depth > _MAX_DEPTH:
-        return value
+        return FILTERED
     if isinstance(value, dict):
         for key in list(value):
             if is_sensitive_key(key):
@@ -125,6 +173,8 @@ def _scrub(value: Any, depth: int = 0) -> Any:
     elif isinstance(value, list):
         for i, item in enumerate(value):
             value[i] = _scrub(item, depth + 1)
+    elif isinstance(value, tuple | set | frozenset):
+        return [_scrub(item, depth + 1) for item in value]
     elif isinstance(value, str):
         return scrub_text(value)
     return value
@@ -148,7 +198,8 @@ def scrub_event(event: Any, hint: Any = None) -> Any:
 
     Request headers, cookies, body, URL and query string, `extra`, `contexts`
     (response headers, trace data...), the user (whose IP is dropped), message,
-    breadcrumb data, every stack frame's local variables and any embedded span.
+    exception and thread values, breadcrumb data, every stack frame's local
+    variables and any embedded span.
     Written so that it cannot raise: in sentry-sdk 3.0 an exception in an event
     callback drops the event.
     """
@@ -156,9 +207,11 @@ def scrub_event(event: Any, hint: Any = None) -> Any:
         return event
     request = event.get("request")
     if isinstance(request, dict):
-        for part in ("headers", "cookies", "data", "env", "query_string", "url"):
+        for part in ("headers", "cookies", "data", "env", "url"):
             if part in request:
                 request[part] = _scrub(request[part])
+        if isinstance(request.get("query_string"), str):
+            request["query_string"] = _scrub_query(request["query_string"])
     # `contexts` holds response headers, trace data...
     for section in ("extra", "contexts"):
         if section in event:
@@ -185,6 +238,13 @@ def scrub_event(event: Any, hint: Any = None) -> Any:
                 for part in ("data", "message"):
                     if part in crumb:
                         crumb[part] = _scrub(crumb[part])
+    for container in ("exception", "threads"):
+        values = event.get(container)
+        values = values.get("values") if isinstance(values, dict) else None
+        if isinstance(values, list):
+            for value in values:
+                if isinstance(value, dict) and "value" in value:
+                    value["value"] = scrub_text(value["value"])
     for frame in _frames(event):
         _scrub(frame.get("vars"))
     return event

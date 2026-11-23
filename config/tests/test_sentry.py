@@ -7,6 +7,7 @@ actually leave the box.
 import json
 import logging
 import warnings
+from typing import Any
 
 import pytest
 import sentry_sdk
@@ -239,3 +240,48 @@ def test_response_headers_are_never_collected() -> None:
     # one, it must resolve to "off".
     headers = client.options["data_collection"]["http_headers"]
     assert headers.get("response", {"mode": "off"})["mode"] == "off"
+
+
+# --- Second security review: exception values, query/fragment, userinfo, fail closed.
+
+
+def test_exception_and_thread_values_are_scrubbed() -> None:
+    event = scrub_event(
+        {
+            "exception": {
+                "values": [{"value": "GET https://h.invalid/x?token=" + SECRET}]
+            },
+            "threads": {"values": [{"value": "retry with api_key=" + SECRET}]},
+        },
+        {},
+    )
+    assert SECRET not in json.dumps(event)
+
+
+def test_query_and_fragment_values_are_masked() -> None:
+    url = "https://h.invalid/cb?page=2&ticket=t&sig=AbCdEfGhIjKlMnOp#access_token=x"
+    assert scrub_text(url) == (
+        "https://h.invalid/cb?page=2&ticket=[Filtered]&sig=[Filtered]#[Filtered]"
+    )
+    assert scrub_text("next=/a&code=0123456789abcdef") == "next=/a&code=[Filtered]"
+    event = scrub_event({"request": {"query_string": "page=2&k=" + JWT}}, {})
+    assert event["request"]["query_string"] == "page=2&k=[Filtered]"
+
+
+def test_userinfo_is_stripped_robustly() -> None:
+    assert scrub_text("https://u:pa@ss@h.invalid/") == "https://h.invalid/"
+    assert scrub_text("https://u:p/w@h.invalid/x") == "https://h.invalid/x"
+    assert scrub_text("https://user:" + SECRET + "/x") == "https://[Filtered]/x"
+    assert scrub_text("https://h.invalid:8443/a") == "https://h.invalid:8443/a"
+    assert scrub_text("http://[::1]:8000/a") == "http://[::1]:8000/a"
+
+
+def test_scrubbing_fails_closed() -> None:
+    deep: Any = SECRET
+    for _ in range(30):
+        deep = [deep]
+    event = scrub_event(
+        {"extra": {"t": ("a?token=" + SECRET,), "s": {"x?password=" + SECRET}, "d": deep}},
+        {},
+    )
+    assert SECRET not in json.dumps(event)
