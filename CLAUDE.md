@@ -105,7 +105,7 @@ uv pip compile requirements.in --generate-hashes --python-version 3.14 --python-
 .\.venv\Scripts\python.exe -m pytest -k "reveal and not deck"
 ```
 
-Lint : `ruff check .` en **ruff 0.16.10** (job CI `lint`, règles dans `ruff.toml`) — installer
+Lint : `ruff check .` en **ruff 0.17.6** (job CI `lint`, règles dans `ruff.toml`) — installer
 cette version exacte dans le `.venv`. La CI exige aussi 85 % de couverture du code applicatif
 (`pytest --cov`, `pytest-cov==7.1.0`, périmètre dans `.coveragerc`).
 
