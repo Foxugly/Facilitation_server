@@ -59,6 +59,8 @@ _PATH = re.compile(r"(?<![:/\w\]])(?:/[^/\s?#\"'<>]*)+")
 # something (a `user:password` without `@`, for instance).
 _HOST = re.compile(r"(?:\[[0-9A-Fa-f:.]*\]|[^:@\[\]]*)(?::\d*)?")
 _AUTHORITY = re.compile(r"[^/?#]*")
+# A bare word in free text that may be a token (`Invalid token 3f9a...`).
+_WORD = re.compile(r"[A-Za-z0-9_\-.~+%=]{16,}")
 _MAX_DEPTH = 20
 
 
@@ -152,8 +154,9 @@ def scrub_text(text: Any) -> Any:
     """Mask secrets in free text (URLs, query strings, span names, messages).
 
     URL userinfo, `name=value` pairs with a sensitive name or an opaque value,
-    URL fragments, and path segments after a secret-bearing route or that look
-    like a token.
+    URL fragments, path segments after a secret-bearing route or that look
+    like a token, and any bare word that looks like a token (letters and
+    digits, 16+ characters).
     """
     if not isinstance(text, str):
         return text
@@ -163,7 +166,14 @@ def scrub_text(text: Any) -> Any:
         text = _PATH.sub(lambda m: _scrub_path(m.group(0)), text)
     if "=" in text:
         text = _PAIR.sub(_scrub_pair, text)
-    return text
+    return _WORD.sub(_scrub_word, text)
+
+
+def _scrub_word(match: re.Match[str]) -> str:
+    word = match.group(0)
+    has_digit = any(c.isdigit() for c in word)
+    has_letter = any(c.isalpha() for c in word)
+    return FILTERED if has_digit and has_letter else word
 
 
 def _scrub(value: Any, depth: int = 0) -> Any:
@@ -214,12 +224,13 @@ def _frames(event: dict[str, Any]) -> Iterator[dict[str, Any]]:
 
 
 def scrub_event(event: Any, hint: Any = None) -> Any:
-    """`before_send`, first step: what 2.x's EventScrubber did, and a bit more.
+    """`before_send`, first step: what 2.x's EventScrubber did, and more.
 
-    Request headers, cookies, body, URL and query string, `extra`, `contexts`
-    (response headers, trace data...), the user (whose IP is dropped), message,
-    exception and thread values, breadcrumb data, every stack frame's local
-    variables and any embedded span.
+    Covers, failing closed on any unexpected shape: request (url, query string
+    of any type, headers, cookies, data, env), message, logentry (message,
+    formatted, params), exception and thread values (value, type, frame vars),
+    breadcrumbs (message, data), extra, tags, contexts, user (IP dropped),
+    transaction, culprit and embedded spans (name/description, data/attributes).
     Written so that it cannot raise: in sentry-sdk 3.0 an exception in an event
     callback drops the event.
     """
@@ -235,41 +246,52 @@ def scrub_event(event: Any, hint: Any = None) -> Any:
             request["query_string"] = (
                 _scrub_query(query) if isinstance(query, str) else _scrub(query)
             )
-    # `contexts` holds response headers, trace data...
-    for section in ("extra", "contexts"):
-        if section in event:
-            event[section] = _scrub(event[section])
+    elif "request" in event:
+        event["request"] = _scrub(request)
     user = event.get("user")
     if isinstance(user, dict):
         user.pop("ip_address", None)
-        _scrub(user)
-    for part in ("message", "transaction"):
-        if isinstance(event.get(part), str):
-            event[part] = scrub_text(event[part])
-    logentry = event.get("logentry")
-    if isinstance(logentry, dict):
-        _scrub(logentry)
+    # Free-form sections, scrubbed whole: keys on the denylist, every string.
+    for part in (
+        "user", "extra", "tags", "contexts", "message", "logentry",
+        "transaction", "culprit",
+    ):
+        if part in event:
+            event[part] = _scrub(event[part])
     spans = event.get("spans")
     if isinstance(spans, list):
-        for span in spans:
-            scrub_span(span)
+        event["spans"] = [
+            scrub_span(span) if isinstance(span, dict) else _scrub(span)
+            for span in spans
+        ]
+    elif "spans" in event:
+        event["spans"] = _scrub(spans)
     breadcrumbs = event.get("breadcrumbs")
-    values = breadcrumbs.get("values") if isinstance(breadcrumbs, dict) else None
-    if isinstance(values, list):
-        for crumb in values:
+    crumbs = breadcrumbs.get("values") if isinstance(breadcrumbs, dict) else None
+    if isinstance(crumbs, list):
+        for i, crumb in enumerate(crumbs):
             if isinstance(crumb, dict):
                 for part in ("data", "message"):
                     if part in crumb:
                         crumb[part] = _scrub(crumb[part])
+            else:
+                crumbs[i] = _scrub(crumb)
+    elif "breadcrumbs" in event:
+        event["breadcrumbs"] = _scrub(breadcrumbs)
     for container in ("exception", "threads"):
         values = event.get(container)
         values = values.get("values") if isinstance(values, dict) else None
         if isinstance(values, list):
-            for value in values:
-                if isinstance(value, dict) and "value" in value:
-                    value["value"] = scrub_text(value["value"])
+            for i, value in enumerate(values):
+                if isinstance(value, dict):
+                    for part in ("value", "type"):
+                        if part in value:
+                            value[part] = _scrub(value[part])
+                else:
+                    values[i] = _scrub(value)
     for frame in _frames(event):
-        _scrub(frame.get("vars"))
+        if "vars" in frame:
+            frame["vars"] = _scrub(frame["vars"])
     return event
 
 
@@ -282,11 +304,13 @@ def scrub_span(span: Any, hint: Any = None) -> Any:
     if not isinstance(span, dict):
         return span
     for part in ("name", "description"):
-        if isinstance(span.get(part), str):
-            span[part] = scrub_text(span[part])
+        if part in span:
+            span[part] = _scrub(span[part])
     for part in ("attributes", "data"):
         attributes = span.get(part)
         if not isinstance(attributes, dict):
+            if part in span:
+                span[part] = _scrub(attributes)
             continue
         for key, value in list(attributes.items()):
             last = key.rsplit(".", 1)[-1] if isinstance(key, str) else key
