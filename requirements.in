@@ -14,7 +14,8 @@ requests>=2.34.2,<3
 msal>=1.39.0,<2
 pillow==13.0.0
 drf-spectacular==0.30.0
-sentry-sdk[django]>=2.76.0,<3
+# hold: sentry-sdk 3.0 is a day-0 major (2026-11-23); migrate after it stabilises — revisit 2026-12-07
+sentry-sdk[django]>=2.76,<3
 gunicorn==27.0.1
 django-extensions>=4.1,<5
 django-otp==1.7.5
