@@ -134,7 +134,7 @@ jobs:
           python-version: "3.14"
 
       - name: Install ruff (version figée)
-        run: python -m pip install ruff==0.16.10
+        run: python -m pip install ruff==0.17.6
 
       - name: Ruff
         run: ruff check . --output-format github
