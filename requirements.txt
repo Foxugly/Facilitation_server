@@ -537,7 +537,6 @@ django==6.1.3 \
     #   djangorestframework
     #   djangorestframework-simplejwt
     #   drf-spectacular
-    #   sentry-sdk
 django-cors-headers==4.9.0 \
     --hash=sha256:15c7f20727f90044dcee2216a9fd7303741a864865f0c3657e28b7056f61b449 \
     --hash=sha256:fe5d7cb59fdc2c8c646ce84b727ac2bca8912a247e6e68e1fb507372178e59e8
@@ -1152,9 +1151,9 @@ rpds-py==2026.9.1 \
     # via
     #   jsonschema
     #   referencing
-sentry-sdk==2.76.0 \
-    --hash=sha256:08115d93eab60ab6e49e2b867254aaa0babaca4dfa4d8fcf905c5d980e157041 \
-    --hash=sha256:1cd9a82a1610ce8f472efd3841542e3b957a26d5ffe83ddf48215bfd07c3833f
+sentry-sdk==3.0.0 \
+    --hash=sha256:22cfcdb11b494e8efa82a48edd655afdf99179df37f2ed37f18846b938455c36 \
+    --hash=sha256:daa5f0baa931dfd8c4d6844b4992764683a1abdcbad968c76703c34f0e244f13
     # via -r requirements.in
 service-identity==26.1.0 \
     --hash=sha256:6358c52882c96e66ac4a55eb3a72c7dd4a70763f8cc6fa4e70abde2656f4bf3b \
