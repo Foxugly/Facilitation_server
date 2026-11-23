@@ -26,7 +26,7 @@ jobs:
     steps:
       - name: Dependabot metadata
         id: meta
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@v3
 
       # fetch-metadata misreads Dependabot range bumps such as
       # "update psycopg requirement from <4,>=3.3.6 to >=3.3.9,<4": it takes
