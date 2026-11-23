@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from typing import Any
-from urllib.parse import parse_qsl
+from urllib.parse import unquote_plus
 
 #: Replaces a sensitive value, as sentry-sdk's own scrubbing does.
 FILTERED = "[Filtered]"
@@ -84,20 +84,30 @@ def _is_sensitive_param(name: str, value: str) -> bool:
 
 def _scrub_pair(match: re.Match[str]) -> str:
     name, value = match.group(1), match.group(2)
+    if _is_opaque(name):
+        return FILTERED + "=" + FILTERED
     if _is_sensitive_param(name, value):
         return name + "=" + FILTERED
     return match.group(0)
 
 
+def _scrub_query_chunk(chunk: str) -> str:
+    # Checked decoded *and* raw; the raw text is what is kept, so nothing is
+    # re-encoded differently from what came in.
+    name, equals, value = chunk.partition("=")
+    plain_name, plain_value = unquote_plus(name), unquote_plus(value)
+    if _is_opaque(name) or _is_opaque(plain_name):
+        return FILTERED + equals + (FILTERED if equals else "")
+    if not equals:
+        return chunk  # a bare flag (`?debug`) that does not look like a token
+    if _is_sensitive_param(plain_name, plain_value) or _is_opaque(value):
+        return name + "=" + FILTERED
+    return chunk
+
+
 def _scrub_query(query: str) -> str:
-    """Mask the values of sensitive or opaque parameters of a query string."""
-    pairs = parse_qsl(query, keep_blank_values=True)
-    if not pairs:
-        return FILTERED if _is_opaque(query) else query
-    return "&".join(
-        name + "=" + (FILTERED if _is_sensitive_param(name, value) else value)
-        for name, value in pairs
-    )
+    """Mask sensitive or opaque names, values and bare chunks of a query string."""
+    return "&".join(_scrub_query_chunk(chunk) for chunk in query.split("&"))
 
 
 def _scrub_path(path: str) -> str:
@@ -160,7 +170,8 @@ def _scrub(value: Any, depth: int = 0) -> Any:
     """Blank sensitive keys and mask secrets in strings, recursively.
 
     Dicts and lists are edited in place; the scrubbed value is returned (tuples
-    and sets come back as lists). Fails closed: too deep means `[Filtered]`.
+    and sets come back as lists, bytes and other objects as scrubbed text).
+    Fails closed: too deep means `[Filtered]`.
     """
     if depth > _MAX_DEPTH:
         return FILTERED
@@ -177,6 +188,15 @@ def _scrub(value: Any, depth: int = 0) -> Any:
         return [_scrub(item, depth + 1) for item in value]
     elif isinstance(value, str):
         return scrub_text(value)
+    elif isinstance(value, bytes | bytearray):
+        return scrub_text(bytes(value).decode("utf-8", "replace"))
+    elif value is None or isinstance(value, bool | int | float):
+        return value
+    elif hasattr(value, "value") and hasattr(value, "metadata"):
+        value.value = _scrub(value.value, depth + 1)  # the SDK's AnnotatedValue
+    else:
+        # Anything else would be repr()'d by the SDK: scrub that text instead.
+        return scrub_text(repr(value))
     return value
 
 
@@ -210,8 +230,11 @@ def scrub_event(event: Any, hint: Any = None) -> Any:
         for part in ("headers", "cookies", "data", "env", "url"):
             if part in request:
                 request[part] = _scrub(request[part])
-        if isinstance(request.get("query_string"), str):
-            request["query_string"] = _scrub_query(request["query_string"])
+        if "query_string" in request:
+            query = request["query_string"]
+            request["query_string"] = (
+                _scrub_query(query) if isinstance(query, str) else _scrub(query)
+            )
     # `contexts` holds response headers, trace data...
     for section in ("extra", "contexts"):
         if section in event:

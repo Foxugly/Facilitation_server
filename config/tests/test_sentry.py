@@ -285,3 +285,39 @@ def test_scrubbing_fails_closed() -> None:
         {},
     )
     assert SECRET not in json.dumps(event)
+
+
+# --- Third review: value-less and opaque-name query chunks, encoding, types.
+
+OPAQUE = "0123456789abcdefXYZ"
+
+
+def test_query_masks_bare_chunks_and_opaque_names() -> None:
+    assert scrub_text("https://h.invalid/cb?" + OPAQUE + "&page=2") == (
+        "https://h.invalid/cb?[Filtered]&page=2"
+    )
+    event = scrub_event(
+        {"request": {"query_string": "page=2&" + OPAQUE + "=1&debug"}}, {}
+    )
+    assert event["request"]["query_string"] == "page=2&[Filtered]=[Filtered]&debug"
+
+
+def test_query_is_checked_decoded_and_kept_encoded() -> None:
+    event = scrub_event(
+        {"request": {"query_string": "%74oken=abc&next=%2Fa%3Fx%3D1"}}, {}
+    )
+    # `%74oken` is `token`; the untouched pair keeps its original encoding.
+    assert event["request"]["query_string"] == "%74oken=[Filtered]&next=%2Fa%3Fx%3D1"
+
+
+def test_non_string_query_strings_fail_closed() -> None:
+    for query in (b"token=" + SECRET.encode(), ["token=" + SECRET], ("api_key=" + SECRET,)):
+        event = scrub_event({"request": {"query_string": query}}, {})
+        assert SECRET not in json.dumps(event)
+
+    class Opaque:
+        def __repr__(self) -> str:
+            return "Opaque(https://u:" + SECRET + "@h.invalid/?token=" + SECRET + ")"
+
+    event = scrub_event({"extra": {"o": Opaque()}}, {})
+    assert SECRET not in json.dumps(event)
