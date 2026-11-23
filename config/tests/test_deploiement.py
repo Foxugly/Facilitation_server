@@ -69,17 +69,19 @@ def test_le_deploiement_verifie_gunicorn_avant_de_basculer_nginx():
 
 
 def test_le_checkout_n_est_mis_a_jour_qu_apres_le_restart_de_env_fetch():
-    """Les services ont Requires=facilitation-env-fetch : son restart les relance aussitôt.
+    """Les services ont Requires=facilitation-env-fetch : un restart simple les relance aussi.
 
-    Si le checkout est déjà sur le nouveau code à ce moment-là, ils repartent avec
-    l'ancien venv et plantent dès qu'une dépendance arrive (billing_server#74).
+    Ils démarraient pendant le `git reset`, nouveau code et ancien venv, et plantaient dès
+    qu'une dépendance arrivait (billing_server#74, billing 23/11). Seul env-fetch est donc
+    relancé (--job-mode=ignore-dependencies) ; deploy.sh relance l'app une fois, venv à jour.
     """
     commandes = [c for c in commandes_ssm() if not c.startswith("#")]
 
     def position(motif):
         return next(i for i, c in enumerate(commandes) if motif in c)
 
-    env_fetch = position("systemctl restart facilitation-env-fetch")
+    env_fetch = position("systemctl restart --job-mode=ignore-dependencies facilitation-env-fetch")
+    assert not any("systemctl restart facilitation-env-fetch" in c for c in commandes)
     checkout = position("git reset --hard")
     deploiement = position("deploy/deploy.sh")
     assert env_fetch < checkout < deploiement
