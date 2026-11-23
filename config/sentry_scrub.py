@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 #: Replaces a sensitive value, as sentry-sdk's own scrubbing does.
 FILTERED = "[Filtered]"
@@ -39,6 +40,22 @@ _DENY_PARTS = (
 _SENSITIVE_PAIR = re.compile(
     r"(?i)([\w.\-\[\]]*(?:" + "|".join(_DENY_PARTS) + r"|auth)[\w.\-\[\]]*=)[^&\s#;]*"
 )
+# Path segments that follow one of these carry a one-time secret
+# (`/reset-password/<token>/`, `/magic-link/<token>/`...).
+_SECRET_ROUTES = frozenset(
+    {
+        "magic-link", "magic_link", "magic-login", "magiclink", "reset",
+        "password-reset", "reset-password", "password_reset", "activate",
+        "activation", "invite", "invitation", "invitations", "accept-invite",
+        "verify", "confirm", "confirmation", "token", "tokens", "unsubscribe",
+        "ticket", "share", "download",
+    }
+)
+# A long opaque segment (token, signed value) is masked wherever it appears.
+_OPAQUE = re.compile(r"[A-Za-z0-9_\-.:=~+]{24,}")
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s\"'<>]+")
+# A path standing alone (`GET /reset/x/`), not the `//host/...` of a URL.
+_PATH = re.compile(r"(?<![:/\w])(?:/[^/\s?#\"'<>]*)+")
 _MAX_DEPTH = 20
 
 
@@ -49,26 +66,68 @@ def is_sensitive_key(key: Any) -> bool:
     return normalized in _DENYLIST or any(part in normalized for part in _DENY_PARTS)
 
 
+def _is_opaque(segment: str) -> bool:
+    return bool(_OPAQUE.fullmatch(segment)) and any(c.isdigit() for c in segment)
+
+
+def _scrub_path(path: str) -> str:
+    """Mask the segments of a path that carry a secret."""
+    segments = path.split("/")
+    for i, segment in enumerate(segments):
+        if not segment or segment.startswith(("<", "{")):
+            continue  # empty, or a route template (`<token>`): nothing to hide
+        after_secret_route = i > 0 and segments[i - 1].lower() in _SECRET_ROUTES
+        if after_secret_route or _is_opaque(segment):
+            segments[i] = FILTERED
+    return "/".join(segments)
+
+
+def _scrub_url(match: re.Match[str]) -> str:
+    url = match.group(0)
+    try:
+        parts = urlsplit(url)
+        netloc = parts.netloc.rpartition("@")[2]  # drop user:password@
+        return urlunsplit(parts._replace(netloc=netloc, path=_scrub_path(parts.path)))
+    except ValueError:
+        return FILTERED  # unparseable URL: do not guess what it hides
+
+
 def scrub_text(text: Any) -> Any:
-    """Blank the value of every sensitive `name=value` pair in a string."""
-    if not isinstance(text, str) or "=" not in text:
+    """Mask secrets in free text (URLs, query strings, span names, messages).
+
+    `name=value` pairs with a sensitive name, the `user:password@` of a URL, and
+    path segments after a secret-bearing route or that look like a token.
+    """
+    if not isinstance(text, str):
         return text
-    return _SENSITIVE_PAIR.sub(lambda m: m.group(1) + FILTERED, text)
+    if "://" in text:
+        text = _URL.sub(_scrub_url, text)
+    if "/" in text:
+        text = _PATH.sub(lambda m: _scrub_path(m.group(0)), text)
+    if "=" in text:
+        text = _SENSITIVE_PAIR.sub(lambda m: m.group(1) + FILTERED, text)
+    return text
 
 
-def _scrub(value: Any, depth: int = 0) -> None:
-    """Blank sensitive keys of every dict found in `value`, in place."""
+def _scrub(value: Any, depth: int = 0) -> Any:
+    """Blank sensitive keys and mask secrets in strings, recursively, in place.
+
+    Returns the scrubbed value (strings are immutable, containers are edited).
+    """
     if depth > _MAX_DEPTH:
-        return
+        return value
     if isinstance(value, dict):
         for key in list(value):
             if is_sensitive_key(key):
                 value[key] = FILTERED
             else:
-                _scrub(value[key], depth + 1)
+                value[key] = _scrub(value[key], depth + 1)
     elif isinstance(value, list):
-        for item in value:
-            _scrub(item, depth + 1)
+        for i, item in enumerate(value):
+            value[i] = _scrub(item, depth + 1)
+    elif isinstance(value, str):
+        return scrub_text(value)
+    return value
 
 
 def _frames(event: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -87,8 +146,9 @@ def _frames(event: dict[str, Any]) -> Iterator[dict[str, Any]]:
 def scrub_event(event: Any, hint: Any = None) -> Any:
     """`before_send`, first step: what 2.x's EventScrubber did, and a bit more.
 
-    Request headers, cookies, body and query string, `extra`, the user (whose IP
-    is dropped), breadcrumb data and every stack frame's local variables.
+    Request headers, cookies, body, URL and query string, `extra`, `contexts`
+    (response headers, trace data...), the user (whose IP is dropped), message,
+    breadcrumb data, every stack frame's local variables and any embedded span.
     Written so that it cannot raise: in sentry-sdk 3.0 an exception in an event
     callback drops the event.
     """
@@ -96,43 +156,59 @@ def scrub_event(event: Any, hint: Any = None) -> Any:
         return event
     request = event.get("request")
     if isinstance(request, dict):
-        for part in ("headers", "cookies", "data", "env"):
-            _scrub(request.get(part))
-        for part in ("query_string", "url"):
-            if isinstance(request.get(part), str):
-                request[part] = scrub_text(request[part])
-    _scrub(event.get("extra"))
+        for part in ("headers", "cookies", "data", "env", "query_string", "url"):
+            if part in request:
+                request[part] = _scrub(request[part])
+    # `contexts` holds response headers, trace data...
+    for section in ("extra", "contexts"):
+        if section in event:
+            event[section] = _scrub(event[section])
     user = event.get("user")
     if isinstance(user, dict):
         user.pop("ip_address", None)
         _scrub(user)
+    for part in ("message", "transaction"):
+        if isinstance(event.get(part), str):
+            event[part] = scrub_text(event[part])
+    logentry = event.get("logentry")
+    if isinstance(logentry, dict):
+        _scrub(logentry)
+    spans = event.get("spans")
+    if isinstance(spans, list):
+        for span in spans:
+            scrub_span(span)
     breadcrumbs = event.get("breadcrumbs")
     values = breadcrumbs.get("values") if isinstance(breadcrumbs, dict) else None
     if isinstance(values, list):
         for crumb in values:
             if isinstance(crumb, dict):
-                _scrub(crumb.get("data"))
+                for part in ("data", "message"):
+                    if part in crumb:
+                        crumb[part] = _scrub(crumb[part])
     for frame in _frames(event):
         _scrub(frame.get("vars"))
     return event
 
 
 def scrub_span(span: Any, hint: Any = None) -> Any:
-    """`before_send_span`: the same denylist on the span name and attributes.
+    """`before_send_span`: the same scrubbing on the span name and attributes.
 
+    Also used for spans embedded in an event (`name`/`description`, `data`).
     A span cannot be dropped here (sentry-sdk 3.0), only rewritten.
     """
     if not isinstance(span, dict):
         return span
-    if isinstance(span.get("name"), str):
-        span["name"] = scrub_text(span["name"])
-    attributes = span.get("attributes")
-    if isinstance(attributes, dict):
+    for part in ("name", "description"):
+        if isinstance(span.get(part), str):
+            span[part] = scrub_text(span[part])
+    for part in ("attributes", "data"):
+        attributes = span.get(part)
+        if not isinstance(attributes, dict):
+            continue
         for key, value in list(attributes.items()):
-            if is_sensitive_key(key) or is_sensitive_key(key.rsplit(".", 1)[-1]):
+            last = key.rsplit(".", 1)[-1] if isinstance(key, str) else key
+            if is_sensitive_key(key) or is_sensitive_key(last):
                 attributes[key] = FILTERED
-            elif isinstance(value, str):
-                attributes[key] = scrub_text(value)
-            elif isinstance(value, list):
-                attributes[key] = [scrub_text(v) for v in value]
+            else:
+                attributes[key] = _scrub(value)
     return span

@@ -12,8 +12,8 @@ import pytest
 import sentry_sdk
 from sentry_sdk.transport import Transport
 
-from config.sentry import sentry_init_options
-from config.sentry_scrub import FILTERED, scrub_event, scrub_span
+from config.sentry import DATA_COLLECTION, sentry_init_options
+from config.sentry_scrub import FILTERED, scrub_event, scrub_span, scrub_text
 
 SECRET = "s3cr3t-value-never-sent"
 
@@ -171,3 +171,71 @@ def test_logger_error_still_creates_an_event(sentry):
     events = _events(sentry)
     assert [e["logentry"]["message"] for e in events] == ["payment failed for invoice %s"]
     assert "stacktrace" not in json.dumps(events)  # attach_stacktrace stays off
+
+
+# --- Security review follow-up: contexts, embedded spans, URLs, response headers.
+
+JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOjF9.c2lnbmF0dXJlMTIz"
+
+
+def test_scrub_event_scrubs_contexts_recursively() -> None:
+    event = scrub_event(
+        {
+            "contexts": {
+                "response": {"headers": {"Set-Cookie": SECRET, "X-Ok": "y"}},
+                "trace": {"data": {"url.full": "https://h.invalid/?token=" + SECRET}},
+            }
+        },
+        {},
+    )
+    assert SECRET not in json.dumps(event)
+    assert event["contexts"]["response"]["headers"]["X-Ok"] == "y"
+
+
+def test_scrub_event_scrubs_embedded_spans() -> None:
+    event = scrub_event(
+        {
+            "spans": [
+                {
+                    "description": "GET /reset-password/" + SECRET + "/",
+                    "data": {"authorization": SECRET, "http.query": "token=" + SECRET},
+                }
+            ]
+        },
+        {},
+    )
+    assert SECRET not in json.dumps(event)
+    assert event["spans"][0]["description"] == "GET /reset-password/[Filtered]/"
+
+
+def test_scrub_text_drops_url_userinfo() -> None:
+    text = scrub_text("fetch https://bob:" + SECRET + "@h.invalid/a?page=2")
+    assert text == "fetch https://h.invalid/a?page=2"
+
+
+def test_scrub_text_masks_secret_path_segments() -> None:
+    assert scrub_text("GET /auth/magic-link/abc123/") == "GET /auth/magic-link/[Filtered]/"
+    assert scrub_text("GET /invitation/xyz/accept") == "GET /invitation/[Filtered]/accept"
+    assert scrub_text("GET /files/" + JWT + "/") == "GET /files/[Filtered]/"
+    # Route templates and ordinary paths stay readable.
+    assert scrub_text("GET /api/reset/<token>/") == "GET /api/reset/<token>/"
+    assert scrub_text("GET /api/v1/invoices/42/") == "GET /api/v1/invoices/42/"
+
+
+def test_scrub_span_masks_url_paths_in_attributes() -> None:
+    span = scrub_span(
+        {"name": "GET", "attributes": {"url.full": "https://u:p@h.invalid/activate/" + SECRET}},
+        {},
+    )
+    assert span["attributes"]["url.full"] == "https://h.invalid/activate/[Filtered]"
+
+
+def test_response_headers_are_never_collected() -> None:
+    assert DATA_COLLECTION["http_headers"]["response"] == {"mode": "off"}
+    client = sentry_sdk.Client(
+        dsn=None, default_integrations=False, data_collection=DATA_COLLECTION
+    )
+    # 3.0.0 has no response-header setting (it collects none); if a release adds
+    # one, it must resolve to "off".
+    headers = client.options["data_collection"]["http_headers"]
+    assert headers.get("response", {"mode": "off"})["mode"] == "off"

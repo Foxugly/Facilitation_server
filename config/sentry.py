@@ -23,7 +23,13 @@ _PII_TERMS = ["forwarded", "-ip", "remote-", "via", "-user"]
 DATA_COLLECTION: dict[str, Any] = {
     "user_info": False,
     "cookies": {"mode": "off"},
-    "http_headers": {"request": {"mode": "denylist", "terms": _PII_TERMS}},
+    # Response headers (Set-Cookie...): sentry-sdk 3.0.0 has no such setting and
+    # collects none; declared off so a later 3.x that adds it keeps them out.
+    # `before_send` also scrubs `contexts` (response headers included).
+    "http_headers": {
+        "request": {"mode": "denylist", "terms": _PII_TERMS},
+        "response": {"mode": "off"},
+    },
     "http_bodies": [],
     "url_query_params": {"mode": "denylist", "terms": _PII_TERMS},
     "graphql": {"document": False, "variables": False},
